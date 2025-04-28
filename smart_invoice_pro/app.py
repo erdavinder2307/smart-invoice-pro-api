@@ -1,5 +1,7 @@
 from flask import Flask
 from flasgger import Swagger
+from flask_cors import CORS
+from smart_invoice_pro.api.routes import auth_blueprint
 
 def create_app():
     app = Flask(__name__)
@@ -11,6 +13,9 @@ def create_app():
     }
 
     Swagger(app)
+
+    # Enable CORS for the Flask app
+    CORS(app, resources={r"/*": {"origins": "*"}})
 
     @app.route('/')
     def home():
@@ -24,6 +29,6 @@ def create_app():
         return "Smart Invoice Pro API is running!"
 
     # Register your API blueprints here
-    # app.register_blueprint(api_blueprint, url_prefix="/api")
+    app.register_blueprint(auth_blueprint, url_prefix="/api")
 
     return app
