@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from smart_invoice_pro.utils.cosmos_client import container
+from smart_invoice_pro.utils.cosmos_client import users_container
 import uuid
 from flasgger import swag_from
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -71,7 +71,7 @@ def register_user():
         'username': data['username'],
         'password': hashed_password
     }
-    container.create_item(body=user)
+    users_container.create_item(body=user)
     return jsonify({"message": "User registered successfully!", "user": {"id": user['id'], "username": user['username']}}), 201
 
 @auth_blueprint.route('/auth/login', methods=['POST'])
@@ -128,7 +128,7 @@ def login_user():
         return data  # Return error response if JSON is invalid
 
     query = f"SELECT * FROM c WHERE c.username = '{data['username']}'"
-    items = list(container.query_items(query=query, enable_cross_partition_query=True))
+    items = list(users_container.query_items(query=query, enable_cross_partition_query=True))
     if items and check_password_hash(items[0]['password'], data['password']):
         token = jwt.encode(
             {
