@@ -26,3 +26,6 @@ def get_container(container_name, partition_key):
 users_container = get_container("users", "/userid")
 invoices_container = get_container("invoices", "/customer_id")
 customers_container = get_container("customers", "/customer_id")
+products_container = get_container("products", "/product_id")
+stock_container = get_container("stock", "/product_id")
+
