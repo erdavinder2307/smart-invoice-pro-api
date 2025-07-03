@@ -60,6 +60,10 @@ jobs:
           name: python-app
           path: .
 
+      - name: 'Set startup command for Azure App Service'
+        run: |
+          echo 'python run.py' > startup.txt
+
       - name: 'Deploy to Azure Web App'
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v2
