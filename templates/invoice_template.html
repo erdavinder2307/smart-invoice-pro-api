@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Invoice {{ invoice.invoice_number }}</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f7f7f7;
+            color: #222;
+        }
+        .invoice-box {
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 32px 40px 40px 40px;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 4px 32px rgba(0,0,0,0.08);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid #e7e7e7;
+            padding-bottom: 18px;
+            margin-bottom: 32px;
+        }
+        .header .company {
+            font-size: 2.1em;
+            font-weight: 700;
+            color: #2d6cdf;
+        }
+        .header .invoice-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #444;
+        }
+        .info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 32px;
+        }
+        .info .section {
+            width: 48%;
+        }
+        .info .section h4 {
+            margin: 0 0 8px 0;
+            font-size: 1.1em;
+            color: #2d6cdf;
+        }
+        .info .section p {
+            margin: 2px 0;
+            font-size: 1em;
+        }
+        .details {
+            margin-bottom: 32px;
+        }
+        .details table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .details th, .details td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #e7e7e7;
+            text-align: left;
+        }
+        .details th {
+            background: #f0f4fa;
+            font-weight: 600;
+            color: #2d6cdf;
+        }
+        .totals {
+            float: right;
+            width: 320px;
+            margin-top: 16px;
+        }
+        .totals table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .totals th, .totals td {
+            padding: 8px 6px;
+            text-align: right;
+        }
+        .totals th {
+            background: #f0f4fa;
+            color: #2d6cdf;
+            font-weight: 600;
+        }
+        .totals tr.total-row th, .totals tr.total-row td {
+            border-top: 2px solid #2d6cdf;
+            font-size: 1.1em;
+            font-weight: 700;
+        }
+        .notes {
+            margin-top: 48px;
+            font-size: 1em;
+            color: #555;
+        }
+        .footer {
+            margin-top: 60px;
+            text-align: center;
+            color: #aaa;
+            font-size: 0.95em;
+        }
+    </style>
+</head>
+<body>
+    <div class="invoice-box">
+        <div class="header">
+            <div class="company">Smart Invoice Pro</div>
+            <div class="invoice-title">INVOICE</div>
+        </div>
+        <div class="info">
+            <div class="section">
+                <h4>Bill To</h4>
+                <p><strong>Customer ID:</strong> {{ invoice.customer_id }}</p>
+                <p><strong>Status:</strong> {{ invoice.status }}</p>
+                <p><strong>Issue Date:</strong> {{ invoice.issue_date }}</p>
+                <p><strong>Due Date:</strong> {{ invoice.due_date }}</p>
+            </div>
+            <div class="section">
+                <h4>Invoice Details</h4>
+                <p><strong>Invoice #:</strong> {{ invoice.invoice_number }}</p>
+                <p><strong>Payment Terms:</strong> {{ invoice.payment_terms }}</p>
+                <p><strong>Payment Mode:</strong> {{ invoice.payment_mode }}</p>
+                <p><strong>GST Applicable:</strong> {{ 'Yes' if invoice.is_gst_applicable else 'No' }}</p>
+            </div>
+        </div>
+        <div class="details">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Description</th>
+                        <th>Subtotal</th>
+                        <th>CGST</th>
+                        <th>SGST</th>
+                        <th>IGST</th>
+                        <th>Total Tax</th>
+                        <th>Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>{{ invoice.notes or 'Invoice for services rendered' }}</td>
+                        <td>{{ '{:,.2f}'.format(invoice.subtotal) }}</td>
+                        <td>{{ '{:,.2f}'.format(invoice.cgst_amount) }}</td>
+                        <td>{{ '{:,.2f}'.format(invoice.sgst_amount) }}</td>
+                        <td>{{ '{:,.2f}'.format(invoice.igst_amount) }}</td>
+                        <td>{{ '{:,.2f}'.format(invoice.total_tax) }}</td>
+                        <td>{{ '{:,.2f}'.format(invoice.total_amount) }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="totals">
+            <table>
+                <tr>
+                    <th>Amount Paid</th>
+                    <td>{{ '{:,.2f}'.format(invoice.amount_paid) }}</td>
+                </tr>
+                <tr>
+                    <th>Balance Due</th>
+                    <td>{{ '{:,.2f}'.format(invoice.balance_due) }}</td>
+                </tr>
+                <tr class="total-row">
+                    <th>Grand Total</th>
+                    <td>{{ '{:,.2f}'.format(invoice.total_amount) }}</td>
+                </tr>
+            </table>
+        </div>
+        <div style="clear: both;"></div>
+        <div class="notes">
+            <strong>Terms & Conditions:</strong><br>
+            {{ invoice.terms_conditions or 'Payment due as per terms.' }}
+        </div>
+        <div class="footer">
+            &copy; {{ 2025 }} Smart Invoice Pro. All rights reserved.
+        </div>
+    </div>
+</body>
+</html>
