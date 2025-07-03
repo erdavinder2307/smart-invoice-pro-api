@@ -89,6 +89,7 @@ def create_product():
                         'price': 100.0,
                         'tax_rate': 18.0,
                         'unit': 'pcs',
+                        'stock': 100.0,
                         'created_at': '2025-06-06T12:00:00Z',
                         'updated_at': '2025-06-06T12:00:00Z'
                     }
@@ -99,7 +100,25 @@ def create_product():
 })
 def list_products():
     items = list(products_container.read_all_items())
-    return jsonify(items)
+    stock_transactions = list(get_container("stock", "/product_id").read_all_items())
+    # Aggregate stock by product_id
+    stock_map = {}
+    for txn in stock_transactions:
+        pid = txn.get('product_id')
+        qty = float(txn.get('quantity', 0))
+        if pid not in stock_map:
+            stock_map[pid] = 0.0
+        if txn.get('type') == 'IN':
+            stock_map[pid] += qty
+        elif txn.get('type') == 'OUT':
+            stock_map[pid] -= qty
+    result = []
+    for product in items:
+        pid = product.get('id')
+        product_with_stock = dict(product)
+        product_with_stock['stock'] = stock_map.get(pid, 0.0)
+        result.append(product_with_stock)
+    return jsonify(result)
 
 @product_blueprint.route('/products/<product_id>', methods=['GET'])
 @swag_from({
