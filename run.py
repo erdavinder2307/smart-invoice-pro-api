@@ -10,3 +10,4 @@ app = create_app()
 if __name__ == "__main__":
     # For local development only; Azure/gunicorn will use 'app' variable
     app.run(host="0.0.0.0", port=8000)
+
