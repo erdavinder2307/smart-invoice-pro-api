@@ -1,4 +1,4 @@
-name: Build and deploy Python app to Azure Web App
+name: Build and Deploy Python App to Azure Web App
 
 env:
   AZURE_WEBAPP_NAME: smartinvoicepro
@@ -9,66 +9,32 @@ on:
     branches: [ "master" ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      # - name: Run tests
-      #   run: |
-      #     pip install pytest
-      #     pytest
+    - name: Archive project files
+      run: |
+        zip -r app.zip .
 
-      - name: Upload artifact for deployment jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-app
-          path: |
-            ./
-            !.git/
-            !.github/
-            !venv/
-            !antenv/
-
-  deploy:
-    permissions:
-      contents: none
-    runs-on: ubuntu-latest
-    needs: build
-    environment:
-      name: 'Development'
-      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
-
-    steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
-          path: .
-
-      - name: Add startup command for Azure
-        run: |
-          echo "gunicorn run:app --bind=0.0.0.0:8000" > startup.txt
-
-      - name: Deploy to Azure Web App
-        id: deploy-to-webapp
-        uses: azure/webapps-deploy@v2
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+    - name: Deploy to Azure Web App
+      id: deploy-to-webapp
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        package: app.zip
