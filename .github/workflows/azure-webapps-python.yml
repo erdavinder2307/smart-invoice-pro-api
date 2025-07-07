@@ -27,8 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m venv antenv
-          source antenv/bin/activate
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       # - name: Run tests
@@ -62,6 +61,9 @@ jobs:
         with:
           name: python-app
           path: .
+
+      - name: Set Oryx configuration for Azure build
+        run: echo "python" > .python_packages
 
       - name: Add startup command for Azure
         run: |
