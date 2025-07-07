@@ -2,7 +2,7 @@ name: Build and deploy Python app to Azure Web App
 
 env:
   AZURE_WEBAPP_NAME: smartinvoicepro
-  PYTHON_VERSION: '3.9'
+  PYTHON_VERSION: '3.13'
 
 on:
   push:
