@@ -62,10 +62,10 @@ jobs:
           name: python-app
           path: .
 
-      - name: Set Oryx configuration for Azure build
+      - name: Create Oryx marker to trigger Python build
         run: echo "python" > .python_packages
 
-      - name: Add startup command for Azure
+      - name: Set startup command
         run: |
           echo "gunicorn run:app --bind=0.0.0.0:8000" > startup.txt
 
