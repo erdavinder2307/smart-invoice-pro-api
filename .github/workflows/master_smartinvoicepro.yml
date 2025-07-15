@@ -12,10 +12,11 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source code
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -23,16 +24,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip freeze  # Optional: just for log visibility
 
-      - name: Zip artifact
-        run: |
-          zip -r release.zip . -x ".git/*" "venv/*" ".github/*"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-app
-          path: release.zip
+      # Optional: Add test step here
+      # - name: Run tests
+      #   run: pytest
 
   deploy:
     runs-on: ubuntu-latest
@@ -42,16 +38,8 @@ jobs:
       contents: read
 
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
-
-      - name: Unzip artifact
-        run: unzip release.zip
-
-      - name: Add startup command
-        run: echo "gunicorn run:app --bind=0.0.0.0:8000" > startup.txt
+      - name: Checkout code (again for deployment)
+        uses: actions/checkout@v4
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -65,3 +53,4 @@ jobs:
         with:
           app-name: 'smartinvoicepro'
           slot-name: 'Production'
+          package: .
