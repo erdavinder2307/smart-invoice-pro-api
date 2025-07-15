@@ -17,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -30,21 +30,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # - name: Run tests
-      #   run: |
-      #     pip install pytest
-      #     pytest
-
-      - name: Upload artifact for deployment jobs
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-app
           path: |
             ./
             !.git/
-            !.github/
             !venv/
-            !antenv/
+            !.github/
 
   deploy:
     permissions:
@@ -56,17 +50,17 @@ jobs:
       url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
 
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: python-app
           path: .
 
-      - name: Add startup command for Azure
+      - name: Startup command
         run: |
           echo "gunicorn run:app --bind=0.0.0.0:8000" > startup.txt
 
-      - name: Deploy to Azure Web App
+      - name: Deploy to Azure
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v2
         with:
