@@ -1,8 +1,8 @@
-from flask import Blueprint, request, render_template, make_response, jsonify
-from weasyprint import HTML
+from flask import Blueprint, request, make_response, jsonify
 from flasgger import swag_from
-import os
-from jinja2 import TemplateNotFound
+import io
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 invoice_generation_blueprint = Blueprint('invoice_generation', __name__)
 
@@ -129,18 +129,42 @@ def generate_invoice_pdf():
         'created_at': get_value('created_at'),
         'updated_at': get_value('updated_at'),
     }
-    try:
-        html = render_template('invoice_template.html', invoice=mapped_invoice)
-    except TemplateNotFound:
-        return jsonify({'error': 'Invoice template not found'}), 400
-    except Exception as e:
-        return jsonify({'error': f'Template rendering error: {str(e)}'}), 400
-    try:
-        pdf = HTML(string=html).write_pdf()
-        response = make_response(pdf)
-        response.headers['Content-Type'] = 'application/pdf'
-        response.headers['Content-Disposition'] = f'attachment; filename=invoice_{invoice.get('invoice_number', 'document')}.pdf'
-        return response
-        #return jsonify({'error': 'PDF generation not implemented'}), 400
-    except Exception as e:
-        return jsonify({'error': f'PDF generation failed: {str(e)}'}), 400
+    # Generate PDF using ReportLab
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    y = height - 50
+    # Header
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(50, y, f"Invoice #{mapped_invoice['invoice_number']}")
+    y -= 30
+    p.setFont("Helvetica", 12)
+    # Invoice details
+    p.drawString(50, y, f"Issue Date: {mapped_invoice.get('issue_date')}")
+    y -= 20
+    p.drawString(50, y, f"Due Date: {mapped_invoice.get('due_date')}")
+    y -= 30
+    # Customer and payment info
+    p.drawString(50, y, f"Customer ID: {mapped_invoice.get('customer_id')}")
+    y -= 20
+    p.drawString(50, y, f"Payment Terms: {mapped_invoice.get('payment_terms')}")
+    y -= 30
+    # Amounts
+    p.drawString(50, y, f"Subtotal: {mapped_invoice.get('subtotal')}")
+    y -= 20
+    p.drawString(50, y, f"Total Tax: {mapped_invoice.get('total_tax')}")
+    y -= 20
+    p.drawString(50, y, f"Total Amount: {mapped_invoice.get('total_amount')}")
+    y -= 20
+    p.drawString(50, y, f"Amount Paid: {mapped_invoice.get('amount_paid')}")
+    y -= 20
+    p.drawString(50, y, f"Balance Due: {mapped_invoice.get('balance_due')}")
+    # Finish up
+    p.showPage()
+    p.save()
+    buffer.seek(0)
+    pdf_data = buffer.getvalue()
+    response = make_response(pdf_data)
+    response.headers['Content-Type'] = 'application/pdf'
+    response.headers['Content-Disposition'] = f"attachment; filename=invoice_{mapped_invoice.get('invoice_number', 'document')}.pdf"
+    return response
