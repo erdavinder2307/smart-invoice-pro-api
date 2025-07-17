@@ -1,8 +1,12 @@
 from flask import Blueprint, request, make_response, jsonify
+from datetime import date
 from flasgger import swag_from
 import io
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 invoice_generation_blueprint = Blueprint('invoice_generation', __name__)
 
@@ -131,37 +135,94 @@ def generate_invoice_pdf():
     }
     # Generate PDF using ReportLab
     buffer = io.BytesIO()
-    p = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    y = height - 50
+    # Use Platypus for structured layout
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+                            leftMargin=40, rightMargin=40,
+                            topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='Company', fontSize=20,
+                              textColor=colors.HexColor('#2d6cdf'), spaceAfter=10))
+    styles.add(ParagraphStyle(name='Title', fontSize=16,
+                              alignment=2, spaceAfter=20))
+    story = []
     # Header
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(50, y, f"Invoice #{mapped_invoice['invoice_number']}")
-    y -= 30
-    p.setFont("Helvetica", 12)
-    # Invoice details
-    p.drawString(50, y, f"Issue Date: {mapped_invoice.get('issue_date')}")
-    y -= 20
-    p.drawString(50, y, f"Due Date: {mapped_invoice.get('due_date')}")
-    y -= 30
-    # Customer and payment info
-    p.drawString(50, y, f"Customer ID: {mapped_invoice.get('customer_id')}")
-    y -= 20
-    p.drawString(50, y, f"Payment Terms: {mapped_invoice.get('payment_terms')}")
-    y -= 30
-    # Amounts
-    p.drawString(50, y, f"Subtotal: {mapped_invoice.get('subtotal')}")
-    y -= 20
-    p.drawString(50, y, f"Total Tax: {mapped_invoice.get('total_tax')}")
-    y -= 20
-    p.drawString(50, y, f"Total Amount: {mapped_invoice.get('total_amount')}")
-    y -= 20
-    p.drawString(50, y, f"Amount Paid: {mapped_invoice.get('amount_paid')}")
-    y -= 20
-    p.drawString(50, y, f"Balance Due: {mapped_invoice.get('balance_due')}")
-    # Finish up
-    p.showPage()
-    p.save()
+    header_data = [[
+        Paragraph('<b>Smart Invoice Pro</b>', styles['Company']),
+        Paragraph('<b>INVOICE</b>', styles['Title'])
+    ]]
+    header_table = Table(header_data, colWidths=[doc.width*0.5, doc.width*0.5])
+    header_table.setStyle(TableStyle([
+        ('ALIGN', (1,0), (1,0), 'RIGHT'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 12)
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 12))
+    # Info sections
+    info_data = [[
+        Paragraph(f'<b>Bill To</b><br/>'
+                  f'Customer ID: {mapped_invoice["customer_id"]}<br/>'
+                  f'Status: {mapped_invoice["status"]}<br/>'
+                  f'Issue Date: {mapped_invoice["issue_date"]}<br/>'
+                  f'Due Date: {mapped_invoice["due_date"]}', styles['Normal']),
+        Paragraph(f'<b>Invoice Details</b><br/>'
+                  f'Invoice #: {mapped_invoice["invoice_number"]}<br/>'
+                  f'Payment Terms: {mapped_invoice["payment_terms"]}<br/>'
+                  f'Payment Mode: {mapped_invoice["payment_mode"]}<br/>'
+                  f'GST Applicable: {"Yes" if mapped_invoice["is_gst_applicable"] else "No"}',
+                  styles['Normal'])
+    ]]
+    info_table = Table(info_data, colWidths=[doc.width*0.48, doc.width*0.48])
+    info_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 12)
+    ]))
+    story.append(info_table)
+    story.append(Spacer(1, 12))
+    # Details table
+    details_header = ['Description', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total Tax', 'Total']
+    details_row = [
+        mapped_invoice.get('notes', 'Invoice for services rendered'),
+        f"{mapped_invoice['subtotal']:,.2f}",
+        f"{mapped_invoice['cgst_amount']:,.2f}",
+        f"{mapped_invoice['sgst_amount']:,.2f}",
+        f"{mapped_invoice['igst_amount']:,.2f}",
+        f"{mapped_invoice['total_tax']:,.2f}",
+        f"{mapped_invoice['total_amount']:,.2f}"
+    ]
+    details_data = [details_header, details_row]
+    details_table = Table(details_data, colWidths=[doc.width*0.3,]*7)
+    details_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#f0f4fa')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#2d6cdf')),
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold')
+    ]))
+    story.append(details_table)
+    story.append(Spacer(1, 12))
+    # Totals
+    totals_data = [
+        ['Amount Paid', f"{mapped_invoice['amount_paid']:,.2f}"],
+        ['Balance Due', f"{mapped_invoice['balance_due']:,.2f}"],
+        ['Grand Total', f"{mapped_invoice['total_amount']:,.2f}"]
+    ]
+    totals_table = Table(totals_data, colWidths=[doc.width*0.6, doc.width*0.4])
+    totals_table.setStyle(TableStyle([
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+        ('FONTNAME', (0,2), (-1,2), 'Helvetica-Bold'),
+        ('LINEABOVE', (0,2), (-1,2), 1.5, colors.HexColor('#2d6cdf'))
+    ]))
+    story.append(totals_table)
+    story.append(Spacer(1, 24))
+    # Terms & Conditions
+    story.append(Paragraph(f'<b>Terms & Conditions:</b><br/>{mapped_invoice.get("terms_conditions", "Payment due as per terms.")}', styles['Normal']))
+    story.append(Spacer(1, 24))
+    # Footer
+    footer_style = ParagraphStyle('Footer', fontSize=9, alignment=1, textColor=colors.grey)
+    story.append(Paragraph(f'© {date.today().year} Smart Invoice Pro. All rights reserved.', footer_style))
+    # Build PDF
+    doc.build(story)
     buffer.seek(0)
     pdf_data = buffer.getvalue()
     response = make_response(pdf_data)
