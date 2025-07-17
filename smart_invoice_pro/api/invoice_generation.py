@@ -1,5 +1,5 @@
 from flask import Blueprint, request, render_template, make_response, jsonify
-#from weasyprint import HTML
+from weasyprint import HTML
 from flasgger import swag_from
 import os
 from jinja2 import TemplateNotFound
@@ -136,11 +136,11 @@ def generate_invoice_pdf():
     except Exception as e:
         return jsonify({'error': f'Template rendering error: {str(e)}'}), 400
     try:
-        # pdf = HTML(string=html).write_pdf()
-        # response = make_response(pdf)
-        # response.headers['Content-Type'] = 'application/pdf'
-        # response.headers['Content-Disposition'] = f'attachment; filename=invoice_{invoice.get('invoice_number', 'document')}.pdf'
-        # return 
-        return jsonify({'error': 'PDF generation not implemented'}), 400
+        pdf = HTML(string=html).write_pdf()
+        response = make_response(pdf)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename=invoice_{invoice.get('invoice_number', 'document')}.pdf'
+        return response
+        #return jsonify({'error': 'PDF generation not implemented'}), 400
     except Exception as e:
         return jsonify({'error': f'PDF generation failed: {str(e)}'}), 400
