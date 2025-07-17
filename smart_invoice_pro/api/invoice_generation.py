@@ -140,15 +140,22 @@ def generate_invoice_pdf():
                             leftMargin=40, rightMargin=40,
                             topMargin=40, bottomMargin=40)
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='Company', fontSize=20,
-                              textColor=colors.HexColor('#2d6cdf'), spaceAfter=10))
-    styles.add(ParagraphStyle(name='Title', fontSize=16,
-                              alignment=2, spaceAfter=20))
+    # Custom styles: skip if already defined
+    try:
+        styles.add(ParagraphStyle(name='Company', fontSize=20,
+                                  textColor=colors.HexColor('#2d6cdf'), spaceAfter=10))
+    except KeyError:
+        pass
+    try:
+        styles.add(ParagraphStyle(name='InvoiceTitle', fontSize=16,
+                                  alignment=2, spaceAfter=20))
+    except KeyError:
+        pass
     story = []
     # Header
     header_data = [[
         Paragraph('<b>Smart Invoice Pro</b>', styles['Company']),
-        Paragraph('<b>INVOICE</b>', styles['Title'])
+        Paragraph('<b>INVOICE</b>', styles['InvoiceTitle'])
     ]]
     header_table = Table(header_data, colWidths=[doc.width*0.5, doc.width*0.5])
     header_table.setStyle(TableStyle([
