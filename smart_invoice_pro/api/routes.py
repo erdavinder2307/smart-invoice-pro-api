@@ -146,3 +146,10 @@ def login_user():
         }), 200
     else:
         return jsonify({"message": "Invalid username or password."}), 401
+ 
+@auth_blueprint.route('/auth/logout', methods=['POST'])
+def logout_user():
+    """
+    Logout endpoint. Clients should remove the token on their side.
+    """
+    return jsonify({"message": "Logout successful."}), 200

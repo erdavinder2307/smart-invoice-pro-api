@@ -1,4 +1,4 @@
-from flask import Flask, render_template
+from flask import render_template
 
 from smart_invoice_pro.app import create_app
 
