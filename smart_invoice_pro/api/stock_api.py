@@ -120,7 +120,7 @@ def reduce_stock():
     }
 })
 def get_current_stock(product_id):
-    logger.info(f"Received request: {request.method} to /stock/{product_id}")  # Debug log
+    print(f"Received request: {request.method} to /stock/{product_id}")  # Debug log
     
     # Handle OPTIONS request for CORS
     if request.method == 'OPTIONS':

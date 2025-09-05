@@ -4,6 +4,8 @@ import uuid
 from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
+import jwt
+from functools import wraps
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -125,6 +127,9 @@ def create_invoice():
         'id': str(uuid.uuid4()),
         'invoice_number': data['invoice_number'],
         'customer_id': data['customer_id'],
+        'customer_name': data.get('customer_name', ''),
+        'customer_email': data.get('customer_email', ''),
+        'customer_phone': data.get('customer_phone', ''),
         'issue_date': data['issue_date'],
         'due_date': data['due_date'],
         'payment_terms': data.get('payment_terms', ''),
@@ -527,3 +532,85 @@ def get_next_invoice_number():
         return jsonify({'next_invoice_number': next_invoice_number})
     except Exception as e:
         return jsonify({'error': 'Could not determine next invoice number', 'details': str(e)}), 500
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+        
+        try:
+            # Remove 'Bearer ' prefix if present
+            if token.startswith('Bearer '):
+                token = token[7:]
+            
+            data = jwt.decode(token, "customer_secret_key", algorithms=["HS256"])
+            current_customer = data
+        except jwt.ExpiredSignatureError:
+            return jsonify({'message': 'Token has expired!'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'message': 'Token is invalid!'}), 401
+        
+        return f(current_customer, *args, **kwargs)
+    return decorated
+
+@api_blueprint.route('/customer/invoices', methods=['GET'])
+@token_required
+@swag_from({
+    'tags': ['Customer Invoices'],
+    'parameters': [
+        {
+            'name': 'Authorization',
+            'in': 'header',
+            'required': True,
+            'type': 'string',
+            'description': 'Bearer JWT token'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'List of customer invoices',
+            'examples': {
+                'application/json': [
+                    {
+                        'id': 'uuid',
+                        'invoice_number': 'INV001',
+                        'issue_date': '2025-08-22',
+                        'due_date': '2025-09-22',
+                        'total_amount': 1000.0,
+                        'status': 'Issued'
+                    }
+                ]
+            }
+        },
+        '401': {
+            'description': 'Unauthorized'
+        }
+    }
+})
+def get_customer_invoices(current_customer):
+    try:
+        # Query invoices for the current customer by email
+        # Assuming invoices have customer_email field
+        query = f"SELECT * FROM c WHERE c.customer_email = '{current_customer['email']}'"
+        items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+        
+        # Format invoices for frontend display
+        formatted_invoices = []
+        for invoice in items:
+            formatted_invoices.append({
+                'id': invoice.get('id'),
+                'invoice_number': invoice.get('invoice_number'),
+                'issue_date': invoice.get('issue_date'),
+                'due_date': invoice.get('due_date'),
+                'total_amount': invoice.get('total_amount', 0),
+                'status': invoice.get('status', 'Draft'),
+                'customer_name': invoice.get('customer_name'),
+                'created_at': invoice.get('created_at'),
+                'updated_at': invoice.get('updated_at')
+            })
+        
+        return jsonify(formatted_invoices), 200
+    except Exception as e:
+        return jsonify({'error': 'Could not fetch invoices', 'details': str(e)}), 500
