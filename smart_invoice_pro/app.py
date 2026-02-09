@@ -8,6 +8,8 @@ from smart_invoice_pro.api.invoice_generation import invoice_generation_blueprin
 from smart_invoice_pro.api.product_api import product_blueprint
 from smart_invoice_pro.api.stock_api import stock_blueprint
 from smart_invoice_pro.api.dashboard_api import dashboard_blueprint
+from smart_invoice_pro.api.bank_accounts_api import bank_accounts_blueprint
+from smart_invoice_pro.api.contact_api import contact_blueprint
 
 def create_app():
     app = Flask(__name__, template_folder="../templates")
@@ -42,5 +44,7 @@ def create_app():
     app.register_blueprint(product_blueprint, url_prefix="/api")
     app.register_blueprint(stock_blueprint, url_prefix="/api")
     app.register_blueprint(dashboard_blueprint, url_prefix="/api")
+    app.register_blueprint(bank_accounts_blueprint, url_prefix="/api")
+    app.register_blueprint(contact_blueprint, url_prefix="/api")
 
     return app
