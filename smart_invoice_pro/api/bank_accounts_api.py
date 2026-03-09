@@ -3,39 +3,29 @@ from smart_invoice_pro.utils.cosmos_client import bank_accounts_container
 import uuid
 from flasgger import swag_from
 from datetime import datetime
-import jwt
-from functools import wraps
 
 bank_accounts_blueprint = Blueprint('bank_accounts', __name__)
 
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
-        
-        try:
-            # Remove 'Bearer ' prefix if present
-            if token.startswith('Bearer '):
-                token = token[7:]
-            
-            data = jwt.decode(token, "your_secret_key", algorithms=["HS256"])
-            current_user = data
-        except jwt.ExpiredSignatureError:
-            return jsonify({'message': 'Token has expired!'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'message': 'Token is invalid!'}), 401
-        
-        return f(current_user, *args, **kwargs)
-    return decorated
+def get_user_from_request():
+    """Extract user info from request headers (consistent with profile_api pattern)."""
+    user_id = request.headers.get('X-User-Id')
+    if not user_id:
+        return None
+    return {'id': user_id}
 
 
 @bank_accounts_blueprint.route('/bank-accounts', methods=['GET'])
-@token_required
 @swag_from({
     'tags': ['Bank Accounts'],
-    'security': [{'Bearer': []}],
+    'parameters': [
+        {
+            'name': 'X-User-Id',
+            'in': 'header',
+            'required': True,
+            'type': 'string',
+            'description': 'User ID'
+        }
+    ],
     'responses': {
         '200': {
             'description': 'List of bank accounts',
@@ -61,14 +51,15 @@ def token_required(f):
         }
     }
 })
-def get_bank_accounts(current_user):
+def get_bank_accounts():
     """
     Get all bank accounts for the authenticated user.
     """
     try:
-        user_id = current_user.get('id')
-        if not user_id:
-            return jsonify({'message': 'Invalid user token'}), 401
+        current_user = get_user_from_request()
+        if not current_user:
+            return jsonify({'message': 'X-User-Id header is required'}), 401
+        user_id = current_user['id']
         
         # Query bank accounts by user_id
         query = f"SELECT * FROM c WHERE c.user_id = '{user_id}'"
@@ -83,10 +74,8 @@ def get_bank_accounts(current_user):
 
 
 @bank_accounts_blueprint.route('/bank-accounts', methods=['POST'])
-@token_required
 @swag_from({
     'tags': ['Bank Accounts'],
-    'security': [{'Bearer': []}],
     'parameters': [
         {
             'name': 'body',
@@ -141,11 +130,16 @@ def get_bank_accounts(current_user):
         }
     }
 })
-def create_bank_account(current_user):
+def create_bank_account():
     """
     Create a new manual bank account.
     """
     try:
+        current_user = get_user_from_request()
+        if not current_user:
+            return jsonify({'message': 'X-User-Id header is required'}), 401
+        user_id = current_user['id']
+
         data = request.get_json()
         
         # Validate required fields
@@ -153,10 +147,6 @@ def create_bank_account(current_user):
         for field in required_fields:
             if not data.get(field):
                 return jsonify({'message': f'Missing required field: {field}'}), 400
-        
-        user_id = current_user.get('id')
-        if not user_id:
-            return jsonify({'message': 'Invalid user token'}), 401
         
         # Create bank account object
         now = datetime.utcnow().isoformat() + 'Z'
@@ -182,10 +172,8 @@ def create_bank_account(current_user):
 
 
 @bank_accounts_blueprint.route('/bank-accounts/<account_id>', methods=['GET'])
-@token_required
 @swag_from({
     'tags': ['Bank Accounts'],
-    'security': [{'Bearer': []}],
     'parameters': [
         {
             'name': 'account_id',
@@ -227,14 +215,15 @@ def create_bank_account(current_user):
         }
     }
 })
-def get_bank_account(current_user, account_id):
+def get_bank_account(account_id):
     """
     Get bank account details with summary.
     """
     try:
-        user_id = current_user.get('id')
-        if not user_id:
-            return jsonify({'message': 'Invalid user token'}), 401
+        current_user = get_user_from_request()
+        if not current_user:
+            return jsonify({'message': 'X-User-Id header is required'}), 401
+        user_id = current_user['id']
         
         # Query specific bank account
         query = f"SELECT * FROM c WHERE c.id = '{account_id}' AND c.user_id = '{user_id}'"

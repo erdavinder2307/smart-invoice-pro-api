@@ -7,8 +7,36 @@ from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from functools import wraps
+import re
 
 customers_blueprint = Blueprint('customers', __name__)
+
+# ─── Validation Helpers ──────────────────────────────────────────────────────
+def validate_email(email):
+    """Validate email format"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def validate_gst_number(gst):
+    """Validate GST number format: 22ZZZZZ9999Z9Z9"""
+    if not gst:
+        return True  # Optional field
+    pattern = r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
+    return re.match(pattern, gst.upper()) is not None
+
+def validate_pan(pan):
+    """Validate PAN format: ZZZZZ9999Z"""
+    if not pan:
+        return True  # Optional field
+    pattern = r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+    return re.match(pattern, pan.upper()) is not None
+
+def validate_mobile(mobile):
+    """Validate Indian mobile number format"""
+    if not mobile:
+        return True  # Optional field
+    pattern = r'^[6-9]\d{9}$'
+    return re.match(pattern, mobile) is not None
 
 @customers_blueprint.route('/customers', methods=['POST'])
 @swag_from({
@@ -88,6 +116,22 @@ def create_customer():
     if not data.get('phone'):
         return jsonify({'error': 'Phone is required'}), 400
     
+    # Validate email format
+    if not validate_email(data['email']):
+        return jsonify({'error': 'Invalid email format'}), 400
+    
+    # Validate GST number if provided
+    if data.get('gst_number') and not validate_gst_number(data['gst_number']):
+        return jsonify({'error': 'Invalid GST number format. Expected: 22ZZZZZ9999Z9Z9'}), 400
+    
+    # Validate PAN if provided
+    if data.get('pan') and not validate_pan(data['pan']):
+        return jsonify({'error': 'Invalid PAN format. Expected: ZZZZZ9999Z'}), 400
+    
+    # Validate mobile if provided
+    if data.get('mobile') and not validate_mobile(data['mobile']):
+        return jsonify({'error': 'Invalid mobile number format'}), 400
+    
     now = datetime.utcnow().isoformat()
     item = {
         'id': str(uuid.uuid4()),
@@ -103,23 +147,26 @@ def create_customer():
         'language': data.get('language', 'en'),
         'gst_treatment': data.get('gst_treatment', 'regular'),
         'place_of_supply': data.get('place_of_supply', ''),
-        'gst_number': data.get('gst_number', ''),
-        'pan': data.get('pan', ''),
-        'tax_preference': data.get('tax_preference', 'yes'),
+        'gst_number': data.get('gst_number', '').upper() if data.get('gst_number') else '',
+        'pan': data.get('pan', '').upper() if data.get('pan') else '',
+        'tax_preference': data.get('tax_preference', 'taxable'),
         'currency': data.get('currency', 'INR'),
         'opening_balance': float(data.get('opening_balance', 0)),
-        'payment_terms': data.get('payment_terms', 'Net 30'),
-        'billing_address': data.get('billing_address', ''),
+        'payment_terms': data.get('payment_terms', 'due_on_receipt'),
+        'billing_street': data.get('billing_street', ''),
         'billing_city': data.get('billing_city', ''),
         'billing_state': data.get('billing_state', ''),
         'billing_zip': data.get('billing_zip', ''),
         'billing_country': data.get('billing_country', 'India'),
-        'shipping_address': data.get('shipping_address', ''),
+        'shipping_street': data.get('shipping_street', ''),
         'shipping_city': data.get('shipping_city', ''),
         'shipping_state': data.get('shipping_state', ''),
         'shipping_zip': data.get('shipping_zip', ''),
         'shipping_country': data.get('shipping_country', 'India'),
         'portal_enabled': data.get('portal_enabled', False),
+        'contact_persons': data.get('contact_persons', []),
+        'custom_fields': data.get('custom_fields', {}),
+        'reporting_tags': data.get('reporting_tags', []),
         'remarks': data.get('remarks', ''),
         'created_at': now,
         'updated_at': now
@@ -129,9 +176,11 @@ def create_customer():
     if data.get('portal_enabled') and data.get('portal_password'):
         item['portal_password'] = generate_password_hash(data['portal_password'], method='pbkdf2:sha256', salt_length=16)
     
-    # For backward compatibility, also set 'name' field
+    # For backward compatibility, also set 'name' and 'address' fields
     item['name'] = item['display_name']
-    item['address'] = item['billing_address']
+    item['address'] = item['billing_street']
+    item['billing_address'] = item['billing_street']  # alias
+    item['shipping_address'] = item['shipping_street']  # alias
     
     customers_container.create_item(body=item)
     # Remove password from response for security
@@ -296,36 +345,64 @@ def update_customer(customer_id):
     
     item = items[0]
     
-    # List of updateable fields (both old and new)
+    # Validate email format if being updated
+    if 'email' in data and not validate_email(data['email']):
+        return jsonify({'error': 'Invalid email format'}), 400
+    
+    # Validate GST number if provided
+    if 'gst_number' in data and data['gst_number'] and not validate_gst_number(data['gst_number']):
+        return jsonify({'error': 'Invalid GST number format. Expected: 22ZZZZZ9999Z9Z9'}), 400
+    
+    # Validate PAN if provided
+    if 'pan' in data and data['pan'] and not validate_pan(data['pan']):
+        return jsonify({'error': 'Invalid PAN format. Expected: ZZZZZ9999Z'}), 400
+    
+    # Validate mobile if provided
+    if 'mobile' in data and data['mobile'] and not validate_mobile(data['mobile']):
+        return jsonify({'error': 'Invalid mobile number format'}), 400
+    
+    # List of updateable fields (using corrected field names)
     updateable_fields = [
-        'display_name', 'email', 'phone', 'customer_type', 'salutation', 'first_name', 'last_name',
+        'display_name', 'email', 'phone', 'mobile', 'customer_type', 'salutation', 'first_name', 'last_name',
         'company_name', 'language', 'gst_treatment', 'place_of_supply', 'gst_number', 'pan',
         'tax_preference', 'currency', 'opening_balance', 'payment_terms',
-        'billing_address', 'billing_city', 'billing_state', 'billing_zip', 'billing_country',
-        'shipping_address', 'shipping_city', 'shipping_state', 'shipping_zip', 'shipping_country',
-        'portal_enabled', 'remarks'
+        'billing_street', 'billing_city', 'billing_state', 'billing_zip', 'billing_country',
+        'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip', 'shipping_country',
+        'portal_enabled', 'contact_persons', 'custom_fields', 'reporting_tags', 'remarks'
     ]
     
     # Update each field if provided in request
     for field in updateable_fields:
         if field in data:
             if field == 'opening_balance':
-                item[field] = float(data[field])
+                try:
+                    item[field] = float(data[field]) if data[field] != '' else 0.0
+                except (TypeError, ValueError):
+                    item[field] = 0.0
+            elif field in ['gst_number', 'pan']:
+                # Uppercase GST and PAN
+                item[field] = data[field].upper() if data[field] else ''
+            elif field in ['contact_persons', 'custom_fields', 'reporting_tags']:
+                # Handle complex types
+                item[field] = data[field]
             else:
                 item[field] = data[field]
     
-    # Update backward compatibility fields
+    # Update backward compatibility fields and aliases
     if 'display_name' in data:
         item['name'] = data['display_name']
-    if 'billing_address' in data:
-        item['address'] = data['billing_address']
+    if 'billing_street' in data:
+        item['address'] = data['billing_street']
+        item['billing_address'] = data['billing_street']
+    if 'shipping_street' in data:
+        item['shipping_address'] = data['shipping_street']
     
     # Handle portal password update if provided
     if data.get('portal_enabled') and data.get('portal_password'):
         item['portal_password'] = generate_password_hash(data['portal_password'], method='pbkdf2:sha256', salt_length=16)
     
     item['updated_at'] = datetime.utcnow().isoformat()
-    customers_container.replace_item(item=item['id'], body=item)
+    customers_container.upsert_item(body=item)
     
     # Remove password from response for security
     response_item = {k: v for k, v in item.items() if k != 'portal_password'}

@@ -66,13 +66,28 @@ def register_user():
         return data  # Return error response if JSON is invalid
 
     hashed_password = generate_password_hash(data['password'],method='pbkdf2:sha256', salt_length=16)
+
+    # First registered user gets Admin role; everyone else defaults to 'Sales'
+    existing_users = list(users_container.query_items(
+        query='SELECT VALUE COUNT(1) FROM c',
+        enable_cross_partition_query=True
+    ))
+    default_role = 'Admin' if (not existing_users or existing_users[0] == 0) else 'Sales'
+
+    user_id = str(uuid.uuid4())
     user = {
-        'id': str(uuid.uuid4()),
+        'id': user_id,
+        'userid': user_id,  # partition key field for Cosmos DB
         'username': data['username'],
-        'password': hashed_password
+        'password': hashed_password,
+        'role': data.get('role', default_role),
+        'created_at': datetime.datetime.utcnow().isoformat()
     }
     users_container.create_item(body=user)
-    return jsonify({"message": "User registered successfully!", "user": {"id": user['id'], "username": user['username']}}), 201
+    return jsonify({
+        "message": "User registered successfully!",
+        "user": {"id": user['id'], "username": user['username'], "role": user['role']}
+    }), 201
 
 @auth_blueprint.route('/auth/login', methods=['POST'])
 @swag_from({
@@ -141,7 +156,11 @@ def login_user():
         )
         return jsonify({
             "message": "Login successful!",
-            "user": {"id": items[0]['id'], "username": items[0]['username']},
+            "user": {
+                "id": items[0]['id'],
+                "username": items[0]['username'],
+                "role": items[0].get('role', 'Sales')
+            },
             "token": token
         }), 200
     else:
