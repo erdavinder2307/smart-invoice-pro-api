@@ -23,6 +23,7 @@ from smart_invoice_pro.api.reports_api import reports_blueprint
 from smart_invoice_pro.api.payments_api import payments_blueprint
 from smart_invoice_pro.api.bank_reconciliation_api import bank_reconciliation_blueprint
 from smart_invoice_pro.api.roles_api import roles_blueprint
+from smart_invoice_pro.api.gst_api import gst_blueprint
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
 
@@ -78,6 +79,7 @@ def create_app():
     app.register_blueprint(payments_blueprint, url_prefix="/api")
     app.register_blueprint(bank_reconciliation_blueprint, url_prefix="/api")
     app.register_blueprint(roles_blueprint, url_prefix="/api")
+    app.register_blueprint(gst_blueprint, url_prefix="/api")
     
     # Start the background scheduler for recurring invoices
     try:

@@ -22,12 +22,21 @@ stock_summary_router = APIRouter()
             'schema': {
                 'type': 'object',
                 'properties': {
+                    'item_type': {'type': 'string'},
                     'name': {'type': 'string'},
+                    'hsn_sac': {'type': 'string'},
+                    'tax_preference': {'type': 'string'},
                     'description': {'type': 'string'},
+                    'purchase_description': {'type': 'string'},
                     'category': {'type': 'string'},
                     'price': {'type': 'number'},
+                    'purchase_rate': {'type': 'number'},
                     'tax_rate': {'type': 'number'},
                     'unit': {'type': 'string'},
+                    'sales_enabled': {'type': 'boolean'},
+                    'purchase_enabled': {'type': 'boolean'},
+                    'sales_account': {'type': 'string'},
+                    'purchase_account': {'type': 'string'},
                     'reorder_level': {'type': 'number'},
                     'reorder_qty': {'type': 'number'},
                     'preferred_vendor_id': {'type': 'string'}
@@ -63,12 +72,21 @@ def create_product():
     item = {
         'id': str(uuid.uuid4()),
         'product_id': str(uuid.uuid4()),
+        'item_type': data.get('item_type', 'goods'),
         'name': data['name'],
+        'hsn_sac': data.get('hsn_sac', ''),
+        'tax_preference': data.get('tax_preference', 'taxable'),
         'description': data.get('description', ''),
+        'purchase_description': data.get('purchase_description', ''),
         'category': data.get('category', ''),
         'price': data['price'],
+        'purchase_rate': data.get('purchase_rate', 0.0),
         'tax_rate': data.get('tax_rate', 0.0),
         'unit': data['unit'],
+        'sales_enabled': data.get('sales_enabled', True),
+        'purchase_enabled': data.get('purchase_enabled', True),
+        'sales_account': data.get('sales_account', 'Sales'),
+        'purchase_account': data.get('purchase_account', 'Cost of Goods Sold'),
         'reorder_level': data.get('reorder_level', 0),
         'reorder_qty': data.get('reorder_qty', 0),
         'preferred_vendor_id': data.get('preferred_vendor_id', ''),
@@ -187,12 +205,21 @@ def get_product(product_id):
             'schema': {
                 'type': 'object',
                 'properties': {
+                    'item_type': {'type': 'string'},
                     'name': {'type': 'string'},
+                    'hsn_sac': {'type': 'string'},
+                    'tax_preference': {'type': 'string'},
                     'description': {'type': 'string'},
+                    'purchase_description': {'type': 'string'},
                     'category': {'type': 'string'},
                     'price': {'type': 'number'},
+                    'purchase_rate': {'type': 'number'},
                     'tax_rate': {'type': 'number'},
                     'unit': {'type': 'string'},
+                    'sales_enabled': {'type': 'boolean'},
+                    'purchase_enabled': {'type': 'boolean'},
+                    'sales_account': {'type': 'string'},
+                    'purchase_account': {'type': 'string'},
                     'reorder_level': {'type': 'number'},
                     'reorder_qty': {'type': 'number'},
                     'preferred_vendor_id': {'type': 'string'}
@@ -219,7 +246,11 @@ def update_product(product_id):
     if not items:
         return jsonify({'error': 'Product not found'}), 404
     item = items[0]
-    for field in ['name', 'description', 'category', 'price', 'tax_rate', 'unit', 'reorder_level', 'reorder_qty', 'preferred_vendor_id']:
+    for field in [
+        'item_type', 'name', 'hsn_sac', 'tax_preference', 'description', 'purchase_description',
+        'category', 'price', 'purchase_rate', 'tax_rate', 'unit', 'sales_enabled', 'purchase_enabled',
+        'sales_account', 'purchase_account', 'reorder_level', 'reorder_qty', 'preferred_vendor_id'
+    ]:
         if field in data:
             item[field] = data[field]
     item['updated_at'] = datetime.utcnow().isoformat()

@@ -5,11 +5,17 @@ import uuid
 from flasgger import swag_from
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 import jwt
 from functools import wraps
 import re
+import os
+import base64
 
 customers_blueprint = Blueprint('customers', __name__)
+
+CUSTOMER_UPLOAD_FOLDER = 'uploads/customer_documents'
+os.makedirs(CUSTOMER_UPLOAD_FOLDER, exist_ok=True)
 
 # ─── Validation Helpers ──────────────────────────────────────────────────────
 def validate_email(email):
@@ -37,6 +43,48 @@ def validate_mobile(mobile):
         return True  # Optional field
     pattern = r'^[6-9]\d{9}$'
     return re.match(pattern, mobile) is not None
+
+
+def process_customer_documents(documents, customer_id):
+    """Persist new base64 documents and keep existing URL documents."""
+    if not isinstance(documents, list):
+        return []
+
+    processed = []
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+
+        # Existing document reference
+        if doc.get('url'):
+            processed.append({
+                'name': doc.get('name', 'Document'),
+                'url': doc.get('url'),
+            })
+            continue
+
+        # New document upload via base64
+        data_uri = doc.get('document_base64')
+        filename = doc.get('document_filename', 'document')
+        if not data_uri:
+            continue
+
+        try:
+            raw_data = data_uri.split(',')[1] if ',' in data_uri else data_uri
+            file_bytes = base64.b64decode(raw_data)
+            safe_filename = secure_filename(f"{customer_id}_{uuid.uuid4().hex}_{filename}")
+            file_path = os.path.join(CUSTOMER_UPLOAD_FOLDER, safe_filename)
+            with open(file_path, 'wb') as f:
+                f.write(file_bytes)
+
+            processed.append({
+                'name': filename,
+                'url': f"/uploads/customer_documents/{safe_filename}",
+            })
+        except Exception as ex:
+            print(f"Error saving customer document: {str(ex)}")
+
+    return processed
 
 @customers_blueprint.route('/customers', methods=['POST'])
 @swag_from({
@@ -133,9 +181,10 @@ def create_customer():
         return jsonify({'error': 'Invalid mobile number format'}), 400
     
     now = datetime.utcnow().isoformat()
+    customer_uuid = str(uuid.uuid4())
     item = {
         'id': str(uuid.uuid4()),
-        'customer_id': str(uuid.uuid4()),
+        'customer_id': customer_uuid,
         'display_name': data['display_name'],
         'email': data['email'],
         'phone': data['phone'],
@@ -153,6 +202,12 @@ def create_customer():
         'currency': data.get('currency', 'INR'),
         'opening_balance': float(data.get('opening_balance', 0)),
         'payment_terms': data.get('payment_terms', 'due_on_receipt'),
+        'website_url': data.get('website_url', ''),
+        'department': data.get('department', ''),
+        'designation': data.get('designation', ''),
+        'x_handle': data.get('x_handle', ''),
+        'skype': data.get('skype', ''),
+        'facebook': data.get('facebook', ''),
         'billing_street': data.get('billing_street', ''),
         'billing_city': data.get('billing_city', ''),
         'billing_state': data.get('billing_state', ''),
@@ -164,6 +219,7 @@ def create_customer():
         'shipping_zip': data.get('shipping_zip', ''),
         'shipping_country': data.get('shipping_country', 'India'),
         'portal_enabled': data.get('portal_enabled', False),
+        'documents': process_customer_documents(data.get('documents', []), customer_uuid),
         'contact_persons': data.get('contact_persons', []),
         'custom_fields': data.get('custom_fields', {}),
         'reporting_tags': data.get('reporting_tags', []),
@@ -366,9 +422,10 @@ def update_customer(customer_id):
         'display_name', 'email', 'phone', 'mobile', 'customer_type', 'salutation', 'first_name', 'last_name',
         'company_name', 'language', 'gst_treatment', 'place_of_supply', 'gst_number', 'pan',
         'tax_preference', 'currency', 'opening_balance', 'payment_terms',
+        'website_url', 'department', 'designation', 'x_handle', 'skype', 'facebook',
         'billing_street', 'billing_city', 'billing_state', 'billing_zip', 'billing_country',
         'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip', 'shipping_country',
-        'portal_enabled', 'contact_persons', 'custom_fields', 'reporting_tags', 'remarks'
+        'portal_enabled', 'documents', 'contact_persons', 'custom_fields', 'reporting_tags', 'remarks'
     ]
     
     # Update each field if provided in request
@@ -382,6 +439,8 @@ def update_customer(customer_id):
             elif field in ['gst_number', 'pan']:
                 # Uppercase GST and PAN
                 item[field] = data[field].upper() if data[field] else ''
+            elif field == 'documents':
+                item[field] = process_customer_documents(data[field], item.get('customer_id', item['id']))
             elif field in ['contact_persons', 'custom_fields', 'reporting_tags']:
                 # Handle complex types
                 item[field] = data[field]
