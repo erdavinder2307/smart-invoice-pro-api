@@ -1,0 +1,47 @@
+[
+  {
+    "name": "FUNCTIONS_WORKER_RUNTIME",
+    "value": "python",
+    "slotSetting": false
+  },
+  {
+    "name": "FUNCTIONS_EXTENSION_VERSION",
+    "value": "~4",
+    "slotSetting": false
+  },
+  {
+    "name": "AzureWebJobsStorage",
+    "value": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_EMAIL_CONNECTION_STRING",
+    "value": "YOUR_AZURE_EMAIL_CONNECTION_STRING",
+    "slotSetting": false
+  },
+  {
+    "name": "SENDER_EMAIL",
+    "value": "admin@solidevelectrosoft.com",
+    "slotSetting": false
+  },
+  {
+    "name": "ALERT_EMAIL",
+    "value": "davinder@solidevelectrosoft.com",
+    "slotSetting": false
+  },
+  {
+    "name": "COSMOS_URI",
+    "value": "https://smartinvoicepro.documents.azure.com:443/",
+    "slotSetting": false
+  },
+  {
+    "name": "COSMOS_KEY",
+    "value": "YOUR_COSMOS_DB_KEY",
+    "slotSetting": false
+  },
+  {
+    "name": "COSMOS_DB_NAME",
+    "value": "smartinvoicedb",
+    "slotSetting": false
+  }
+]

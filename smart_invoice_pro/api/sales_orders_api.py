@@ -1,0 +1,641 @@
+from flask import Blueprint, request, jsonify
+from smart_invoice_pro.utils.cosmos_client import sales_orders_container, invoices_container
+import uuid
+from flasgger import swag_from
+from datetime import datetime
+from enum import Enum
+
+sales_orders_blueprint = Blueprint('sales_orders', __name__)
+
+class SalesOrderStatus(Enum):
+    Draft = 'Draft'
+    Confirmed = 'Confirmed'
+    Closed = 'Closed'
+    Invoiced = 'Invoiced'
+    Cancelled = 'Cancelled'
+
+def validate_sales_order_data(data, is_update=False):
+    """Validate sales order data"""
+    errors = {}
+    
+    if not is_update:
+        required_fields = ['so_number', 'customer_id', 'order_date', 'total_amount', 'status']
+        for field in required_fields:
+            if field not in data:
+                errors[field] = f'{field} is required'
+    
+    # Validate status
+    if 'status' in data and data['status'] not in SalesOrderStatus._value2member_map_:
+        errors['status'] = f'Invalid status: {data["status"]}'
+    
+    # Validate dates
+    if 'order_date' in data and 'delivery_date' in data and data['delivery_date']:
+        try:
+            order = datetime.fromisoformat(data['order_date'].replace('Z', '+00:00'))
+            delivery = datetime.fromisoformat(data['delivery_date'].replace('Z', '+00:00'))
+            if delivery < order:
+                errors['delivery_date'] = 'Delivery date cannot be before order date'
+        except ValueError:
+            errors['dates'] = 'Invalid date format'
+    
+    return errors
+
+@sales_orders_blueprint.route('/sales-orders', methods=['POST'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'so_number': {'type': 'string'},
+                    'customer_id': {'type': 'integer'},
+                    'customer_name': {'type': 'string'},
+                    'customer_email': {'type': 'string'},
+                    'customer_phone': {'type': 'string'},
+                    'order_date': {'type': 'string', 'format': 'date'},
+                    'delivery_date': {'type': 'string', 'format': 'date'},
+                    'payment_terms': {'type': 'string'},
+                    'subtotal': {'type': 'number'},
+                    'cgst_amount': {'type': 'number'},
+                    'sgst_amount': {'type': 'number'},
+                    'igst_amount': {'type': 'number'},
+                    'total_tax': {'type': 'number'},
+                    'total_amount': {'type': 'number'},
+                    'status': {'type': 'string', 'enum': ['Draft', 'Confirmed', 'Closed', 'Invoiced', 'Cancelled']},
+                    'notes': {'type': 'string'},
+                    'terms_conditions': {'type': 'string'},
+                    'is_gst_applicable': {'type': 'boolean'},
+                    'subject': {'type': 'string'},
+                    'salesperson': {'type': 'string'},
+                    'items': {'type': 'array'},
+                    'converted_to_invoice_id': {'type': 'string'},
+                    'converted_to_po_id': {'type': 'string'},
+                    'converted_from_quote_id': {'type': 'string'}
+                },
+                'required': ['so_number', 'customer_id', 'order_date', 'total_amount', 'status']
+            },
+            'description': 'Sales Order data'
+        }
+    ],
+    'responses': {
+        '201': {
+            'description': 'Sales Order created successfully',
+            'examples': {
+                'application/json': {
+                    'id': 'uuid',
+                    'so_number': 'SO-001',
+                    'customer_id': 123,
+                    'status': 'Draft'
+                }
+            }
+        },
+        '400': {
+            'description': 'Validation error'
+        }
+    }
+})
+def create_sales_order():
+    """Create a new sales order"""
+    data = request.get_json()
+    
+    # Validate data
+    errors = validate_sales_order_data(data)
+    if errors:
+        return jsonify({"error": "Validation failed", "details": errors}), 400
+    
+    now = datetime.utcnow().isoformat()
+    
+    item = {
+        'id': str(uuid.uuid4()),
+        'so_number': data['so_number'],
+        'customer_id': data['customer_id'],
+        'customer_name': data.get('customer_name', ''),
+        'customer_email': data.get('customer_email', ''),
+        'customer_phone': data.get('customer_phone', ''),
+        'order_date': data['order_date'],
+        'delivery_date': data.get('delivery_date', None),
+        'payment_terms': data.get('payment_terms', ''),
+        'subtotal': data.get('subtotal', 0.0),
+        'cgst_amount': data.get('cgst_amount', 0.0),
+        'sgst_amount': data.get('sgst_amount', 0.0),
+        'igst_amount': data.get('igst_amount', 0.0),
+        'total_tax': data.get('total_tax', 0.0),
+        'total_amount': data['total_amount'],
+        'status': data['status'],
+        'notes': data.get('notes', ''),
+        'terms_conditions': data.get('terms_conditions', ''),
+        'is_gst_applicable': data.get('is_gst_applicable', False),
+        'subject': data.get('subject', ''),
+        'salesperson': data.get('salesperson', ''),
+        'items': data.get('items', []),
+        'converted_to_invoice_id': data.get('converted_to_invoice_id', None),
+        'converted_to_po_id': data.get('converted_to_po_id', None),
+        'converted_from_quote_id': data.get('converted_from_quote_id', None),
+        'created_at': now,
+        'updated_at': now
+    }
+    
+    try:
+        created_item = sales_orders_container.create_item(body=item)
+        return jsonify(created_item), 201
+    except Exception as e:
+        return jsonify({"error": f"Failed to create sales order: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders', methods=['GET'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'status',
+            'in': 'query',
+            'type': 'string',
+            'description': 'Filter by status'
+        },
+        {
+            'name': 'customer_id',
+            'in': 'query',
+            'type': 'integer',
+            'description': 'Filter by customer ID'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'List of sales orders',
+            'schema': {
+                'type': 'array',
+                'items': {
+                    'type': 'object'
+                }
+            }
+        }
+    }
+})
+def get_sales_orders():
+    """Get all sales orders with optional filters"""
+    try:
+        status_filter = request.args.get('status')
+        customer_id_filter = request.args.get('customer_id', type=int)
+        
+        query = "SELECT * FROM c"
+        conditions = []
+        
+        if status_filter:
+            conditions.append(f"c.status = '{status_filter}'")
+        if customer_id_filter:
+            conditions.append(f"c.customer_id = {customer_id_filter}")
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY c.created_at DESC"
+        
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        return jsonify(items), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to retrieve sales orders: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['GET'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'so_id',
+            'in': 'path',
+            'type': 'string',
+            'required': True,
+            'description': 'Sales Order ID'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'Sales Order retrieved successfully'
+        },
+        '404': {
+            'description': 'Sales Order not found'
+        }
+    }
+})
+def get_sales_order(so_id):
+    """Get a sales order by ID"""
+    try:
+        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        if not items:
+            return jsonify({"error": "Sales Order not found"}), 404
+        
+        return jsonify(items[0]), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to retrieve sales order: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['PUT'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'so_id',
+            'in': 'path',
+            'type': 'string',
+            'required': True,
+            'description': 'Sales Order ID'
+        },
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'so_number': {'type': 'string'},
+                    'customer_id': {'type': 'integer'},
+                    'customer_name': {'type': 'string'},
+                    'order_date': {'type': 'string', 'format': 'date'},
+                    'delivery_date': {'type': 'string', 'format': 'date'},
+                    'payment_terms': {'type': 'string'},
+                    'subtotal': {'type': 'number'},
+                    'cgst_amount': {'type': 'number'},
+                    'sgst_amount': {'type': 'number'},
+                    'igst_amount': {'type': 'number'},
+                    'total_tax': {'type': 'number'},
+                    'total_amount': {'type': 'number'},
+                    'status': {'type': 'string', 'enum': ['Draft', 'Confirmed', 'Closed', 'Invoiced', 'Cancelled']},
+                    'notes': {'type': 'string'},
+                    'terms_conditions': {'type': 'string'},
+                    'items': {'type': 'array'}
+                }
+            },
+            'description': 'Updated sales order data'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'Sales Order updated successfully'
+        },
+        '404': {
+            'description': 'Sales Order not found'
+        },
+        '400': {
+            'description': 'Validation error'
+        }
+    }
+})
+def update_sales_order(so_id):
+    """Update a sales order"""
+    data = request.get_json()
+    
+    # Validate data
+    errors = validate_sales_order_data(data, is_update=True)
+    if errors:
+        return jsonify({"error": "Validation failed", "details": errors}), 400
+    
+    try:
+        # Fetch existing sales order
+        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        if not items:
+            return jsonify({"error": "Sales Order not found"}), 404
+        
+        so = items[0]
+        
+        # Update fields
+        updatable_fields = [
+            'so_number', 'customer_id', 'customer_name', 'customer_email', 'customer_phone',
+            'order_date', 'delivery_date', 'payment_terms', 'subtotal', 'cgst_amount',
+            'sgst_amount', 'igst_amount', 'total_tax', 'total_amount', 'status',
+            'notes', 'terms_conditions', 'is_gst_applicable', 'subject', 'salesperson', 'items'
+        ]
+        
+        for field in updatable_fields:
+            if field in data:
+                so[field] = data[field]
+        
+        so['updated_at'] = datetime.utcnow().isoformat()
+        
+        updated_item = sales_orders_container.replace_item(
+            item=so['id'],
+            body=so
+        )
+        
+        return jsonify(updated_item), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to update sales order: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['DELETE'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'so_id',
+            'in': 'path',
+            'type': 'string',
+            'required': True,
+            'description': 'Sales Order ID'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'Sales Order deleted successfully'
+        },
+        '404': {
+            'description': 'Sales Order not found'
+        }
+    }
+})
+def delete_sales_order(so_id):
+    """Delete a sales order"""
+    try:
+        # Fetch the sales order to get partition key
+        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        if not items:
+            return jsonify({"error": "Sales Order not found"}), 404
+        
+        so = items[0]
+        
+        # Check if already converted to invoice
+        if so.get('status') == 'Invoiced':
+            return jsonify({"error": "Cannot delete a sales order that has been invoiced"}), 400
+        
+        sales_orders_container.delete_item(
+            item=so['id'],
+            partition_key=so['customer_id']
+        )
+        
+        return jsonify({"message": "Sales Order deleted successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete sales order: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>/convert-invoice', methods=['POST'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'so_id',
+            'in': 'path',
+            'type': 'string',
+            'required': True,
+            'description': 'Sales Order ID'
+        },
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'invoice_number': {'type': 'string'}
+                },
+                'required': ['invoice_number']
+            },
+            'description': 'Invoice number for the new invoice'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'Sales Order converted to invoice successfully',
+            'examples': {
+                'application/json': {
+                    'message': 'Sales Order converted to invoice successfully',
+                    'invoice_id': 'uuid',
+                    'invoice_number': 'INV-001'
+                }
+            }
+        },
+        '400': {
+            'description': 'Sales Order already invoiced or validation error'
+        },
+        '404': {
+            'description': 'Sales Order not found'
+        }
+    }
+})
+def convert_so_to_invoice(so_id):
+    """Convert a sales order to an invoice"""
+    data = request.get_json()
+    invoice_number = data.get('invoice_number')
+    
+    if not invoice_number:
+        return jsonify({"error": "invoice_number is required"}), 400
+    
+    try:
+        # Fetch the sales order
+        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        if not items:
+            return jsonify({"error": "Sales Order not found"}), 404
+        
+        so = items[0]
+        
+        # Check if already invoiced
+        if so.get('status') == 'Invoiced' or so.get('converted_to_invoice_id'):
+            return jsonify({"error": "Sales Order has already been invoiced"}), 400
+        
+        # Create invoice from sales order
+        now = datetime.utcnow().isoformat()
+        invoice = {
+            'id': str(uuid.uuid4()),
+            'invoice_number': invoice_number,
+            'customer_id': so['customer_id'],
+            'customer_name': so.get('customer_name', ''),
+            'customer_email': so.get('customer_email', ''),
+            'customer_phone': so.get('customer_phone', ''),
+            'issue_date': datetime.utcnow().date().isoformat(),
+            'due_date': so.get('delivery_date', datetime.utcnow().date().isoformat()),
+            'payment_terms': so.get('payment_terms', ''),
+            'subtotal': so.get('subtotal', 0.0),
+            'cgst_amount': so.get('cgst_amount', 0.0),
+            'sgst_amount': so.get('sgst_amount', 0.0),
+            'igst_amount': so.get('igst_amount', 0.0),
+            'total_tax': so.get('total_tax', 0.0),
+            'total_amount': so['total_amount'],
+            'amount_paid': 0.0,
+            'balance_due': so['total_amount'],
+            'status': 'Draft',
+            'payment_mode': '',
+            'notes': so.get('notes', ''),
+            'terms_conditions': so.get('terms_conditions', ''),
+            'is_gst_applicable': so.get('is_gst_applicable', False),
+            'invoice_type': 'Tax Invoice',
+            'subject': so.get('subject', ''),
+            'salesperson': so.get('salesperson', ''),
+            'items': so.get('items', []),
+            'converted_from_so_id': so_id,
+            'created_at': now,
+            'updated_at': now
+        }
+        
+        created_invoice = invoices_container.create_item(body=invoice)
+        
+        # Update sales order status
+        so['status'] = 'Invoiced'
+        so['converted_to_invoice_id'] = created_invoice['id']
+        so['updated_at'] = now
+        
+        sales_orders_container.replace_item(
+            item=so['id'],
+            body=so
+        )
+        
+        return jsonify({
+            "message": "Sales Order converted to invoice successfully",
+            "invoice_id": created_invoice['id'],
+            "invoice_number": created_invoice['invoice_number']
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": f"Failed to convert sales order to invoice: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>/convert-po', methods=['POST'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'parameters': [
+        {
+            'name': 'so_id',
+            'in': 'path',
+            'type': 'string',
+            'required': True,
+            'description': 'Sales Order ID'
+        },
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'po_number': {'type': 'string'}
+                },
+                'required': ['po_number']
+            },
+            'description': 'Purchase Order number'
+        }
+    ],
+    'responses': {
+        '200': {
+            'description': 'Sales Order converted to PO successfully',
+            'examples': {
+                'application/json': {
+                    'message': 'Sales Order converted to purchase order successfully',
+                    'po_id': 'uuid',
+                    'po_number': 'PO-001'
+                }
+            }
+        },
+        '400': {
+            'description': 'Validation error or Sales Order already converted'
+        },
+        '404': {
+            'description': 'Sales Order not found'
+        }
+    }
+})
+def convert_so_to_po(so_id):
+    """Convert a sales order to a purchase order"""
+    data = request.get_json()
+    po_number = data.get('po_number')
+    
+    if not po_number:
+        return jsonify({"error": "po_number is required"}), 400
+    
+    try:
+        # Fetch the sales order
+        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        if not items:
+            return jsonify({"error": "Sales Order not found"}), 404
+        
+        so = items[0]
+        
+        # Check if already converted to PO
+        if so.get('converted_to_po_id'):
+            return jsonify({"error": "Sales Order has already been converted to a purchase order"}), 400
+        
+        # TODO: Create purchase order when PO module is implemented
+        # For now, just update the sales order with a placeholder PO ID
+        now = datetime.utcnow().isoformat()
+        po_id = str(uuid.uuid4())
+        
+        so['converted_to_po_id'] = po_id
+        so['updated_at'] = now
+        
+        sales_orders_container.replace_item(
+            item=so['id'],
+            body=so
+        )
+        
+        return jsonify({
+            "message": "Sales Order converted to purchase order successfully (PO module pending implementation)",
+            "po_id": po_id,
+            "po_number": po_number
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": f"Failed to convert sales order to PO: {str(e)}"}), 500
+
+@sales_orders_blueprint.route('/sales-orders/next-number', methods=['GET'])
+@swag_from({
+    'tags': ['Sales Orders'],
+    'responses': {
+        '200': {
+            'description': 'Next available SO number',
+            'examples': {
+                'application/json': {
+                    'next_number': 'SO-001'
+                }
+            }
+        }
+    }
+})
+def get_next_so_number():
+    """Get the next available sales order number"""
+    try:
+        query = "SELECT * FROM c ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        
+        if not items:
+            return jsonify({"next_number": "SO-001"}), 200
+        
+        last_so = items[0]
+        last_number = last_so.get('so_number', 'SO-000')
+        
+        # Extract number part (assuming format SO-XXX)
+        try:
+            prefix, num_str = last_number.rsplit('-', 1)
+            next_num = int(num_str) + 1
+            next_number = f"{prefix}-{next_num:03d}"
+        except:
+            next_number = "SO-001"
+        
+        return jsonify({"next_number": next_number}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate next SO number: {str(e)}"}), 500

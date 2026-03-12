@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
-from smart_invoice_pro.utils.cosmos_client import invoices_container
+from smart_invoice_pro.utils.cosmos_client import invoices_container, get_container
 import uuid
+import secrets
 from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
@@ -147,10 +148,31 @@ def create_invoice():
         'terms_conditions': data.get('terms_conditions', ''),
         'is_gst_applicable': data.get('is_gst_applicable', False),
         'invoice_type': data.get('invoice_type', ''),
+        'items': data.get('items', []),
+        'portal_token': secrets.token_urlsafe(32),
         'created_at': data.get('created_at', now),
         'updated_at': data.get('updated_at', now)
     }
     invoices_container.create_item(body=item)
+    
+    # Decrement stock for each item in the invoice
+    stock_container = get_container("stock", "/product_id")
+    for invoice_item in data.get('items', []):
+        if 'product_id' in invoice_item and 'quantity' in invoice_item:
+            try:
+                stock_transaction = {
+                    'id': str(uuid.uuid4()),
+                    'product_id': str(invoice_item['product_id']),
+                    'quantity': float(invoice_item['quantity']),
+                    'type': 'OUT',
+                    'source': f'Invoice {data["invoice_number"]}',
+                    'reference_id': item['id'],
+                    'timestamp': now
+                }
+                stock_container.create_item(body=stock_transaction)
+            except Exception as e:
+                print(f"Error updating stock for product {invoice_item.get('product_id')}: {str(e)}")
+    
     return jsonify(item), 201
 
 @api_blueprint.route('/invoices', methods=['GET'])
@@ -614,3 +636,63 @@ def get_customer_invoices(current_customer):
         return jsonify(formatted_invoices), 200
     except Exception as e:
         return jsonify({'error': 'Could not fetch invoices', 'details': str(e)}), 500
+
+
+# ── Public portal endpoint (no auth required) ────────────────────────────────
+@api_blueprint.route('/portal/invoice/<token>', methods=['GET'])
+def get_invoice_by_portal_token(token):
+    """Return a read-only view of an invoice via its portal_token. Public, no auth."""
+    try:
+        query = f"SELECT * FROM c WHERE c.portal_token = '{token}'"
+        items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+        if not items:
+            return jsonify({'error': 'Invoice not found or link is invalid'}), 404
+        inv = items[0]
+        # Return only safe, read-only fields
+        safe = {
+            'id': inv.get('id'),
+            'invoice_number': inv.get('invoice_number'),
+            'issue_date': inv.get('issue_date'),
+            'due_date': inv.get('due_date'),
+            'status': inv.get('status'),
+            'customer_name': inv.get('customer_name'),
+            'customer_email': inv.get('customer_email'),
+            'subtotal': inv.get('subtotal', 0),
+            'total_tax': inv.get('total_tax', 0),
+            'cgst_amount': inv.get('cgst_amount', 0),
+            'sgst_amount': inv.get('sgst_amount', 0),
+            'igst_amount': inv.get('igst_amount', 0),
+            'total_amount': inv.get('total_amount', 0),
+            'amount_paid': inv.get('amount_paid', 0),
+            'balance_due': inv.get('balance_due', 0),
+            'payment_terms': inv.get('payment_terms', ''),
+            'notes': inv.get('notes', ''),
+            'terms_conditions': inv.get('terms_conditions', ''),
+            'is_gst_applicable': inv.get('is_gst_applicable', False),
+            'items': inv.get('items', []),
+            'portal_token': token,
+        }
+        return jsonify(safe), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Generate / regenerate a portal token for an existing invoice ─────────────
+@api_blueprint.route('/invoices/<invoice_id>/generate-portal-token', methods=['POST'])
+def generate_portal_token(invoice_id):
+    """Generate or regenerate a portal_token for an existing invoice."""
+    try:
+        user_id = request.headers.get('X-User-Id')
+        query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
+        items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+        if not items:
+            return jsonify({'error': 'Invoice not found'}), 404
+        inv = items[0]
+        new_token = inv.get('portal_token') or secrets.token_urlsafe(32)
+        if not inv.get('portal_token'):
+            inv['portal_token'] = new_token
+            inv['updated_at'] = datetime.utcnow().isoformat()
+            invoices_container.upsert_item(body=inv)
+        return jsonify({'portal_token': inv['portal_token']}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
