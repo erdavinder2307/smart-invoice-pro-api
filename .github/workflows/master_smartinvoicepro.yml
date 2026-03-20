@@ -63,10 +63,52 @@ jobs:
 
 
       - name: Deploy to Azure Web App
+        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'smartinvoicepro'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
           package: release.zip
+
+      - name: Wait for app warm-up
+        run: sleep 20
+
+      - name: Post-deploy smoke test
+        env:
+          BASE_URL: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BASE_URL}" ]; then
+            BASE_URL="https://smartinvoicepro-e8ekfnf4b4abfvhx.centralindia-01.azurewebsites.net"
+          fi
+
+          echo "Using base URL: ${BASE_URL}"
+
+          probe_endpoint() {
+            local endpoint="$1"
+            local retries=10
+            local delay=15
+            local attempt=1
+
+            while [ "$attempt" -le "$retries" ]; do
+              status=$(curl -sS -o /tmp/smoke_response.txt -w "%{http_code}" "${BASE_URL}${endpoint}" || true)
+              if [ "$status" = "200" ]; then
+                echo "PASS ${endpoint} (HTTP ${status})"
+                return 0
+              fi
+
+              echo "Attempt ${attempt}/${retries} failed for ${endpoint} (HTTP ${status}). Retrying in ${delay}s..."
+              attempt=$((attempt + 1))
+              sleep "$delay"
+            done
+
+            echo "FAIL ${endpoint}. Last response body:"
+            cat /tmp/smoke_response.txt || true
+            return 1
+          }
+
+          probe_endpoint "/"
+          probe_endpoint "/api/quotes/next-number"
 
           

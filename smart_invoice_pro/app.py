@@ -1,6 +1,8 @@
 from flask import Flask
 from flasgger import Swagger
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from smart_invoice_pro.api.routes import auth_blueprint
 from smart_invoice_pro.api.invoices import api_blueprint as invoices_blueprint
 from smart_invoice_pro.api.customers_api import customers_blueprint
@@ -37,6 +39,18 @@ def create_app():
     }
 
     Swagger(app)
+
+    # Rate limiting (uses in-memory storage by default; switch to Redis in production)
+    limiter = Limiter(
+        app=app,
+        key_func=get_remote_address,
+        default_limits=[],
+        storage_uri="memory://"
+    )
+
+    # Apply 5 attempts per minute to the login endpoint
+    from smart_invoice_pro.api.routes import login_user
+    limiter.limit("5 per minute")(login_user)
 
     # Enable CORS for the Flask app (allow all origins and headers)
     CORS(app, resources={r"/*": {
