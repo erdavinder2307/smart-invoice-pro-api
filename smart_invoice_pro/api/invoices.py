@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import invoices_container, get_container
+from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 import uuid
 import secrets
 from flasgger import swag_from
@@ -149,6 +150,7 @@ def create_invoice():
         'is_gst_applicable': data.get('is_gst_applicable', False),
         'invoice_type': data.get('invoice_type', ''),
         'items': data.get('items', []),
+        'tenant_id': request.tenant_id,
         'portal_token': secrets.token_urlsafe(32),
         'created_at': data.get('created_at', now),
         'updated_at': data.get('updated_at', now)
@@ -163,6 +165,7 @@ def create_invoice():
                 stock_transaction = {
                     'id': str(uuid.uuid4()),
                     'product_id': str(invoice_item['product_id']),
+                    'tenant_id': request.tenant_id,
                     'quantity': float(invoice_item['quantity']),
                     'type': 'OUT',
                     'source': f'Invoice {data["invoice_number"]}',
@@ -173,7 +176,7 @@ def create_invoice():
             except Exception as e:
                 print(f"Error updating stock for product {invoice_item.get('product_id')}: {str(e)}")
     
-    return jsonify(item), 201
+    return jsonify(sanitize_item(item)), 201
 
 @api_blueprint.route('/invoices', methods=['GET'])
 @swag_from({
@@ -213,8 +216,12 @@ def create_invoice():
     }
 })
 def list_invoices():
-    items = list(invoices_container.read_all_items())
-    return jsonify(items)
+    items = list(invoices_container.query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
+    return jsonify(sanitize_items(items))
 
 # @api_blueprint.route('/invoices/<customer_id>', methods=['GET'])
 # @swag_from({
@@ -316,11 +323,17 @@ def list_invoices():
     }
 })
 def get_invoice(invoice_id):
-    query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-    items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(invoices_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Invoice not found'}), 404
-    return jsonify(items[0])
+    if items[0].get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    return jsonify(sanitize_item(items[0]))
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PUT'])
 @swag_from({
@@ -380,11 +393,17 @@ def get_invoice(invoice_id):
 })
 def update_invoice(invoice_id):
     data = request.get_json()
-    query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-    items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(invoices_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Invoice not found'}), 404
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     # Update all fields from the request (PUT = full replacement)
     for field in [
         'invoice_number', 'customer_id', 'issue_date', 'due_date', 'payment_terms',
@@ -397,7 +416,7 @@ def update_invoice(invoice_id):
             item[field] = data[field]
     item['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.replace_item(item=item['id'], body=item)
-    return jsonify(item)
+    return jsonify(sanitize_item(item))
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['DELETE'])
 @swag_from({
@@ -423,11 +442,17 @@ def update_invoice(invoice_id):
     }
 })
 def delete_invoice(invoice_id):
-    query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-    items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(invoices_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Invoice not found'}), 404
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     invoices_container.delete_item(item=item['id'], partition_key=item['customer_id'])
     return jsonify({'message': 'Invoice deleted'})
 
@@ -508,16 +533,22 @@ def patch_invoice(invoice_id):
     errors = validate_invoice_patch(data)
     if errors:
         return jsonify({'error': 'Validation failed', 'details': errors}), 400
-    query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-    items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(invoices_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Invoice not found'}), 404
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     for k, v in data.items():
         item[k] = v
     item['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.replace_item(item=item['id'], body=item)
-    return jsonify({'message': 'Invoice updated', 'invoice': item})
+    return jsonify({'message': 'Invoice updated', 'invoice': sanitize_item(item)})
 
 @api_blueprint.route('/invoices/next-number', methods=['GET'])
 @swag_from({
@@ -537,7 +568,11 @@ def patch_invoice(invoice_id):
 })
 def get_next_invoice_number():
     try:
-        items = list(invoices_container.read_all_items())
+        items = list(invoices_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+            parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+            enable_cross_partition_query=True
+        ))
         max_num = 0
         prefix = 'INV-'
         for item in items:
@@ -682,12 +717,17 @@ def get_invoice_by_portal_token(token):
 def generate_portal_token(invoice_id):
     """Generate or regenerate a portal_token for an existing invoice."""
     try:
-        user_id = request.headers.get('X-User-Id')
-        query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-        items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+        query = "SELECT * FROM c WHERE c.id = @id"
+        items = list(invoices_container.query_items(
+            query=query,
+            parameters=[{"name": "@id", "value": invoice_id}],
+            enable_cross_partition_query=True
+        ))
         if not items:
             return jsonify({'error': 'Invoice not found'}), 404
         inv = items[0]
+        if inv.get('tenant_id') != request.tenant_id:
+            return jsonify({'error': 'Forbidden'}), 403
         new_token = inv.get('portal_token') or secrets.token_urlsafe(32)
         if not inv.get('portal_token'):
             inv['portal_token'] = new_token

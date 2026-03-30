@@ -63,9 +63,7 @@ def parse_date(date_str):
 def get_profit_loss():
     """Get Profit & Loss Statement"""
     try:
-        user_id = request.args.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
+        tenant_id = request.tenant_id
 
         # Parse dates
         end_date = parse_date(request.args.get('end_date')) or datetime.now()
@@ -79,7 +77,7 @@ def get_profit_loss():
         # Query invoices (Revenue)
         invoice_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.issue_date >= '{start_date.strftime('%Y-%m-%d')}' 
             AND c.issue_date <= '{end_date.strftime('%Y-%m-%d')}'
         """
@@ -99,7 +97,7 @@ def get_profit_loss():
         # Query bills (Cost of Goods Sold)
         bills_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.bill_date >= '{start_date.strftime('%Y-%m-%d')}' 
             AND c.bill_date <= '{end_date.strftime('%Y-%m-%d')}'
         """
@@ -117,7 +115,7 @@ def get_profit_loss():
         # Query expenses (Operating Expenses)
         expenses_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.expense_date >= '{start_date.strftime('%Y-%m-%d')}' 
             AND c.expense_date <= '{end_date.strftime('%Y-%m-%d')}'
         """
@@ -197,9 +195,7 @@ def get_profit_loss():
 def get_balance_sheet():
     """Get Balance Sheet"""
     try:
-        user_id = request.args.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
+        tenant_id = request.tenant_id
 
         as_of_date = parse_date(request.args.get('as_of_date')) or datetime.now()
 
@@ -212,14 +208,14 @@ def get_balance_sheet():
 
         # Assets
         # 1. Cash (from bank accounts)
-        bank_query = f"SELECT * FROM c WHERE c.user_id = '{user_id}'"
+        bank_query = f"SELECT * FROM c WHERE c.tenant_id = '{tenant_id}'"
         bank_accounts = list(bank_accounts_container.query_items(query=bank_query, enable_cross_partition_query=True))
         cash_total = sum(float(acc.get('balance', 0)) for acc in bank_accounts)
 
         # 2. Accounts Receivable (unpaid invoices)
         ar_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.issue_date <= '{as_of_date.strftime('%Y-%m-%d')}'
             AND c.status IN ('Pending', 'Partially Paid')
         """
@@ -227,7 +223,7 @@ def get_balance_sheet():
         accounts_receivable = sum(float(inv.get('balance_due', 0)) for inv in ar_invoices)
 
         # 3. Inventory (available products)
-        products_query = f"SELECT * FROM c WHERE c.user_id = '{user_id}'"
+        products_query = f"SELECT * FROM c WHERE c.tenant_id = '{tenant_id}'"
         products = list(products_container.query_items(query=products_query, enable_cross_partition_query=True))
         inventory_value = 0
         for product in products:
@@ -241,7 +237,7 @@ def get_balance_sheet():
         # 1. Accounts Payable (unpaid bills)
         ap_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.bill_date <= '{as_of_date.strftime('%Y-%m-%d')}'
             AND c.status IN ('Pending', 'Partially Paid')
         """
@@ -253,21 +249,21 @@ def get_balance_sheet():
         # Equity
         # Calculate from inception profit/loss
         all_invoices_query = f"""
-            SELECT * FROM c WHERE c.user_id = '{user_id}' 
+            SELECT * FROM c WHERE c.tenant_id = '{tenant_id}' 
             AND c.issue_date <= '{as_of_date.strftime('%Y-%m-%d')}'
         """
         all_invoices = list(invoices_container.query_items(query=all_invoices_query, enable_cross_partition_query=True))
         total_revenue = sum(float(inv.get('amount_paid', 0)) for inv in all_invoices if inv.get('status') in ['Paid', 'Partially Paid'])
 
         all_expenses_query = f"""
-            SELECT * FROM c WHERE c.user_id = '{user_id}' 
+            SELECT * FROM c WHERE c.tenant_id = '{tenant_id}' 
             AND c.expense_date <= '{as_of_date.strftime('%Y-%m-%d')}'
         """
         all_expenses = list(expenses_container.query_items(query=all_expenses_query, enable_cross_partition_query=True))
         total_expenses = sum(float(exp.get('amount', 0)) for exp in all_expenses)
 
         all_bills_query = f"""
-            SELECT * FROM c WHERE c.user_id = '{user_id}' 
+            SELECT * FROM c WHERE c.tenant_id = '{tenant_id}' 
             AND c.bill_date <= '{as_of_date.strftime('%Y-%m-%d')}'
         """
         all_bills = list(bills_container.query_items(query=all_bills_query, enable_cross_partition_query=True))
@@ -348,9 +344,7 @@ def get_balance_sheet():
 def get_ar_aging():
     """Get Accounts Receivable Aging Report"""
     try:
-        user_id = request.args.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
+        tenant_id = request.tenant_id
 
         as_of_date = parse_date(request.args.get('as_of_date')) or datetime.now()
 
@@ -361,14 +355,14 @@ def get_ar_aging():
         # Query unpaid/partially paid invoices
         query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.status IN ('Pending', 'Partially Paid')
             AND c.issue_date <= '{as_of_date.strftime('%Y-%m-%d')}'
         """
         invoices = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
 
         # Get customer names
-        customers_query = f"SELECT * FROM c WHERE c.user_id = '{user_id}'"
+        customers_query = f"SELECT * FROM c WHERE c.tenant_id = '{tenant_id}'"
         customers = list(customers_container.query_items(query=customers_query, enable_cross_partition_query=True))
         customer_map = {c['id']: c.get('name', 'Unknown') for c in customers}
 
@@ -518,9 +512,7 @@ def get_ar_aging():
 def get_cash_flow():
     """Get Cash Flow Statement"""
     try:
-        user_id = request.args.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
+        tenant_id = request.tenant_id
 
         end_date = parse_date(request.args.get('end_date')) or datetime.now()
         start_date = parse_date(request.args.get('start_date')) or datetime(end_date.year, 1, 1)
@@ -534,7 +526,7 @@ def get_cash_flow():
         # Cash received from customers (paid invoices)
         invoices_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.issue_date >= '{start_date.strftime('%Y-%m-%d')}' 
             AND c.issue_date <= '{end_date.strftime('%Y-%m-%d')}'
         """
@@ -544,7 +536,7 @@ def get_cash_flow():
         # Cash paid for expenses
         expenses_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.expense_date >= '{start_date.strftime('%Y-%m-%d')}' 
             AND c.expense_date <= '{end_date.strftime('%Y-%m-%d')}'
         """
@@ -554,7 +546,7 @@ def get_cash_flow():
         # Cash paid to suppliers (paid bills)
         bills_query = f"""
             SELECT * FROM c 
-            WHERE c.user_id = '{user_id}' 
+            WHERE c.tenant_id = '{tenant_id}' 
             AND c.bill_date >= '{start_date.strftime('%Y-%m-%d')}' 
             AND c.bill_date <= '{end_date.strftime('%Y-%m-%d')}'
         """

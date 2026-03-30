@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import customers_container
 from smart_invoice_pro.utils.cosmos_client import invoices_container
+from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 import uuid
 from flasgger import swag_from
 from datetime import datetime, timedelta
@@ -224,6 +225,7 @@ def create_customer():
         'custom_fields': data.get('custom_fields', {}),
         'reporting_tags': data.get('reporting_tags', []),
         'remarks': data.get('remarks', ''),
+        'tenant_id': request.tenant_id,
         'created_at': now,
         'updated_at': now
     }
@@ -240,7 +242,7 @@ def create_customer():
     
     customers_container.create_item(body=item)
     # Remove password from response for security
-    response_item = {k: v for k, v in item.items() if k != 'portal_password'}
+    response_item = sanitize_item(item)
     return jsonify(response_item), 201
 
 @customers_blueprint.route('/customers', methods=['GET'])
@@ -267,13 +269,13 @@ def create_customer():
     }
 })
 def list_customers():
-    items = list(customers_container.read_all_items())
-    # Remove password from all customer records for security
-    safe_items = []
-    for item in items:
-        safe_item = {k: v for k, v in item.items() if k != 'password'}
-        safe_items.append(safe_item)
-    return jsonify(safe_items)
+    query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+    items = list(customers_container.query_items(
+        query=query,
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
+    return jsonify(sanitize_items(items))
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['GET'])
 @swag_from({
@@ -310,14 +312,20 @@ def list_customers():
     }
 })
 def get_customer(customer_id):
-    query = f"SELECT * FROM c WHERE c.id = '{customer_id}'"
-    items = list(customers_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(customers_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": customer_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Customer not found'}), 404
+    if items[0].get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     
     # Remove password from response for security
     customer = items[0]
-    response_item = {k: v for k, v in customer.items() if k != 'password'}
+    response_item = sanitize_item(customer)
     return jsonify(response_item)
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['PUT'])
@@ -394,12 +402,18 @@ def get_customer(customer_id):
 })
 def update_customer(customer_id):
     data = request.get_json()
-    query = f"SELECT * FROM c WHERE c.id = '{customer_id}'"
-    items = list(customers_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(customers_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": customer_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Customer not found'}), 404
     
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     
     # Validate email format if being updated
     if 'email' in data and not validate_email(data['email']):
@@ -464,7 +478,7 @@ def update_customer(customer_id):
     customers_container.upsert_item(body=item)
     
     # Remove password from response for security
-    response_item = {k: v for k, v in item.items() if k != 'portal_password'}
+    response_item = sanitize_item(item)
     return jsonify(response_item)
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['DELETE'])
@@ -491,11 +505,17 @@ def update_customer(customer_id):
     }
 })
 def delete_customer(customer_id):
-    query = f"SELECT * FROM c WHERE c.id = '{customer_id}'"
-    items = list(customers_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(customers_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": customer_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Customer not found'}), 404
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     # Cosmos DB partition key for customers is /customer_id, so use the value of 'customer_id' from the item
     customers_container.delete_item(item=item['id'], partition_key=item['customer_id'])
     return jsonify({'message': 'Customer deleted'})
