@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import users_container
 import uuid
+import os
 from flasgger import swag_from
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
@@ -66,6 +67,7 @@ def register_user():
         return data  # Return error response if JSON is invalid
 
     hashed_password = generate_password_hash(data['password'],method='pbkdf2:sha256', salt_length=16)
+    tenant_id = data.get('tenant_id') or str(uuid.uuid4())
 
     # First registered user gets Admin role; everyone else defaults to 'Sales'
     existing_users = list(users_container.query_items(
@@ -78,6 +80,7 @@ def register_user():
     user = {
         'id': user_id,
         'userid': user_id,  # partition key field for Cosmos DB
+        'tenant_id': tenant_id,
         'username': data['username'],
         'password': hashed_password,
         'role': data.get('role', default_role),
@@ -86,7 +89,12 @@ def register_user():
     users_container.create_item(body=user)
     return jsonify({
         "message": "User registered successfully!",
-        "user": {"id": user['id'], "username": user['username'], "role": user['role']}
+        "user": {
+            "id": user['id'],
+            "tenant_id": user['tenant_id'],
+            "username": user['username'],
+            "role": user['role']
+        }
     }), 201
 
 @auth_blueprint.route('/auth/login', methods=['POST'])
@@ -142,22 +150,31 @@ def login_user():
     if isinstance(data, tuple):
         return data  # Return error response if JSON is invalid
 
-    query = f"SELECT * FROM c WHERE c.username = '{data['username']}'"
-    items = list(users_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.username = @username"
+    items = list(users_container.query_items(
+        query=query,
+        parameters=[{"name": "@username", "value": data['username']}],
+        enable_cross_partition_query=True
+    ))
     if items and check_password_hash(items[0]['password'], data['password']):
+        jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+        tenant_id = items[0].get('tenant_id') or items[0].get('id')
         token = jwt.encode(
             {
                 "id": items[0]['id'],
+                "user_id": items[0]['id'],
+                "tenant_id": tenant_id,
                 "username": items[0]['username'],
                 "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
             },
-            "your_secret_key",  # Replace with your actual secret key
+            jwt_secret,
             algorithm="HS256"
         )
         return jsonify({
             "message": "Login successful!",
             "user": {
                 "id": items[0]['id'],
+                "tenant_id": tenant_id,
                 "username": items[0]['username'],
                 "role": items[0].get('role', 'Sales')
             },

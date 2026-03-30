@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import get_container
+from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 import uuid
 from flasgger import swag_from
 from datetime import datetime
@@ -62,9 +63,13 @@ def _name_exists(name, exclude_id=None):
     query = (
         "SELECT c.id FROM c "
         "WHERE LOWER(c.name) = @name "
+        "AND c.tenant_id = @tenant_id "
         "AND (NOT IS_DEFINED(c.is_deleted) OR c.is_deleted = false)"
     )
-    params = [{"name": "@name", "value": name_lower}]
+    params = [
+        {"name": "@name", "value": name_lower},
+        {"name": "@tenant_id", "value": request.tenant_id}
+    ]
     items = list(products_container.query_items(
         query=query,
         parameters=params,
@@ -85,9 +90,13 @@ def _item_used_in_invoices(product_id):
         query = (
             "SELECT VALUE COUNT(1) FROM c "
             "JOIN item IN c.items "
-            "WHERE item.product_id = @pid"
+            "WHERE item.product_id = @pid "
+            "AND c.tenant_id = @tenant_id"
         )
-        params = [{"name": "@pid", "value": product_id}]
+        params = [
+            {"name": "@pid", "value": product_id},
+            {"name": "@tenant_id", "value": request.tenant_id}
+        ]
         result = list(invoices_container.query_items(
             query=query,
             parameters=params,
@@ -183,13 +192,14 @@ def create_product():
         'reorder_level': data.get('reorder_level', 0),
         'reorder_qty': data.get('reorder_qty', 0),
         'preferred_vendor_id': data.get('preferred_vendor_id', ''),
+        'tenant_id': request.tenant_id,
         'is_deleted': False,
         'deleted_at': None,
         'created_at': now,
         'updated_at': now
     }
     products_container.create_item(body=item)
-    return jsonify(item), 201
+    return jsonify(sanitize_item(item)), 201
 
 
 # ─────────────────────────────────────────────
@@ -205,11 +215,20 @@ def create_product():
     }
 })
 def list_products():
-    items = list(products_container.read_all_items())
+    query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+    items = list(products_container.query_items(
+        query=query,
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
     # Exclude soft-deleted items
     items = [p for p in items if not p.get('is_deleted', False)]
 
-    stock_transactions = list(get_container("stock", "/product_id").read_all_items())
+    stock_transactions = list(get_container("stock", "/product_id").query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
     # Aggregate stock by product_id
     stock_map = {}
     for txn in stock_transactions:
@@ -227,7 +246,7 @@ def list_products():
         product_with_stock = dict(product)
         product_with_stock['stock'] = stock_map.get(pid, 0.0)
         result.append(product_with_stock)
-    return jsonify(result)
+    return jsonify(sanitize_items(result))
 
 
 # ─────────────────────────────────────────────
@@ -251,14 +270,20 @@ def list_products():
     }
 })
 def get_product(product_id):
-    query = f"SELECT * FROM c WHERE c.id = '{product_id}'"
-    items = list(products_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(products_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": product_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Product not found'}), 404
     product = items[0]
+    if product.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     if product.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
-    return jsonify(product)
+    return jsonify(sanitize_item(product))
 
 
 # ─────────────────────────────────────────────
@@ -319,11 +344,17 @@ def update_product(product_id):
     if errors:
         return jsonify({'error': errors[0], 'errors': errors}), 400
 
-    query = f"SELECT * FROM c WHERE c.id = '{product_id}'"
-    items = list(products_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(products_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": product_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Product not found'}), 404
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     if item.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
 
@@ -345,7 +376,7 @@ def update_product(product_id):
             item[field] = data[field]
     item['updated_at'] = datetime.utcnow().isoformat()
     products_container.replace_item(item=item['id'], body=item)
-    return jsonify(item)
+    return jsonify(sanitize_item(item))
 
 
 # ─────────────────────────────────────────────
@@ -377,11 +408,17 @@ def update_product(product_id):
     }
 })
 def delete_product(product_id):
-    query = f"SELECT * FROM c WHERE c.id = '{product_id}'"
-    items = list(products_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(products_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": product_id}],
+        enable_cross_partition_query=True
+    ))
     if not items:
         return jsonify({'error': 'Product not found'}), 404
     item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     if item.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
 
@@ -416,9 +453,17 @@ def delete_product(product_id):
     }
 })
 def products_stock_summary():
-    products = list(products_container.read_all_items())
+    products = list(products_container.query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
     products = [p for p in products if not p.get('is_deleted', False)]
-    stock_transactions = list(get_container("stock", "/product_id").read_all_items())
+    stock_transactions = list(get_container("stock", "/product_id").query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
     # Aggregate stock by product_id
     stock_map = {}
     for txn in stock_transactions:
@@ -439,7 +484,7 @@ def products_stock_summary():
             'sku': product.get('sku', ''),
             'stock': stock_map.get(pid, 0.0)
         })
-    return jsonify(result)
+    return jsonify(sanitize_items(result))
 
 
 # ─────────────────────────────────────────────
@@ -456,9 +501,17 @@ def products_stock_summary():
 })
 def get_low_stock_products():
     """Get all products where current stock is at or below reorder level"""
-    products = list(products_container.read_all_items())
+    products = list(products_container.query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
     products = [p for p in products if not p.get('is_deleted', False)]
-    stock_transactions = list(get_container("stock", "/product_id").read_all_items())
+    stock_transactions = list(get_container("stock", "/product_id").query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
 
     # Calculate current stock for each product
     stock_map = {}
@@ -494,7 +547,7 @@ def get_low_stock_products():
                 'price': product.get('price', 0)
             })
 
-    return jsonify(low_stock_products)
+    return jsonify(sanitize_items(low_stock_products))
 
 
 # ─────────────────────────────────────────────
@@ -535,12 +588,18 @@ def create_restock_po(product_id):
     data = request.get_json() or {}
 
     # Get product details
-    query = f"SELECT * FROM c WHERE c.id = '{product_id}'"
-    products = list(products_container.query_items(query=query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE c.id = @id"
+    products = list(products_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": product_id}],
+        enable_cross_partition_query=True
+    ))
     if not products:
         return jsonify({'error': 'Product not found'}), 404
 
     product = products[0]
+    if product.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
     if product.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
 
@@ -555,7 +614,11 @@ def create_restock_po(product_id):
 
     # Get next PO number
     po_container = get_container("purchase_orders", "/vendor_id")
-    all_pos = list(po_container.read_all_items())
+    all_pos = list(po_container.query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
+        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        enable_cross_partition_query=True
+    ))
     next_number = len(all_pos) + 1
     po_number = f"PO-{next_number:03d}"
 
@@ -594,6 +657,7 @@ def create_restock_po(product_id):
         }],
         'created_at': now,
         'updated_at': now,
+        'tenant_id': request.tenant_id,
         'auto_generated': True
     }
 
