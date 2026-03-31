@@ -11,6 +11,7 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/refresh",
 }
 
 

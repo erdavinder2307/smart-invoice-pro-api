@@ -13,10 +13,10 @@ bank_txns_container    = get_container("bank_transactions", "/user_id")
 invoices_container     = get_container("invoices", "/customer_id")
 expenses_container     = get_container("expenses", "/id")
 
-# ── Auth helper (X-User-Id pattern) ─────────────────────────────────────────
+# ── Auth helper (uses JWT context from middleware) ──────────────────────────
 def get_user_id():
-    uid = request.headers.get('X-User-Id')
-    return uid  # None → caller returns 401
+    uid = getattr(request, 'user_id', None)
+    return uid  # None -> caller returns 401
 
 
 # ─────────────────────────────────────────────────────────────────────────────

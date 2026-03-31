@@ -3,7 +3,7 @@ from flasgger import Swagger
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from smart_invoice_pro.api.routes import auth_blueprint
+from smart_invoice_pro.api.routes import auth_blueprint, api_blueprint
 from smart_invoice_pro.api.invoices import api_blueprint as invoices_blueprint
 from smart_invoice_pro.api.customers_api import customers_blueprint
 from smart_invoice_pro.api.invoice_generation import invoice_generation_blueprint
@@ -26,6 +26,16 @@ from smart_invoice_pro.api.payments_api import payments_blueprint
 from smart_invoice_pro.api.bank_reconciliation_api import bank_reconciliation_blueprint
 from smart_invoice_pro.api.roles_api import roles_blueprint
 from smart_invoice_pro.api.gst_api import gst_blueprint
+from smart_invoice_pro.api.reminders_api import reminders_blueprint
+from smart_invoice_pro.api.organization_profile_api import org_profile_blueprint
+from smart_invoice_pro.api.branding_api import branding_blueprint
+from smart_invoice_pro.api.invoice_preferences_api import invoice_preferences_blueprint
+from smart_invoice_pro.api.tax_rates_api import tax_rates_blueprint
+from smart_invoice_pro.api.roles_permissions_api import roles_permissions_blueprint
+from smart_invoice_pro.api.automation_settings_api import automation_blueprint
+from smart_invoice_pro.api.integrations_settings_api import integrations_blueprint
+from smart_invoice_pro.api.notifications_api import notifications_blueprint
+from smart_invoice_pro.api.audit_logs_api import audit_logs_blueprint
 from smart_invoice_pro.api.auth_middleware import enforce_api_auth
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
@@ -56,7 +66,7 @@ def create_app():
     # Enable CORS – explicit origins so that credentialed requests work correctly
     CORS(
         app,
-        resources={r"/api/*": {"origins": ["http://localhost:3000", "http://127.0.0.1:3000"]}},
+        resources={r"/api/*": {"origins": ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8080", "http://127.0.0.1:8080"]}},
         allow_headers=["Content-Type", "Authorization", "X-User-Id", "X-Username"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         supports_credentials=True,
@@ -76,7 +86,7 @@ def create_app():
     @app.after_request
     def _add_cors_headers(response):
         origin = request.headers.get("Origin", "")
-        allowed = {"http://localhost:3000", "http://127.0.0.1:3000"}
+        allowed = {"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8080", "http://127.0.0.1:8080"}
         if origin in allowed:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
@@ -94,6 +104,7 @@ def create_app():
 
     # Register your API blueprints here
     app.register_blueprint(auth_blueprint, url_prefix="/api")
+    app.register_blueprint(api_blueprint, url_prefix="/api")
     app.register_blueprint(invoices_blueprint, url_prefix="/api")
     app.register_blueprint(customers_blueprint, url_prefix="/api")
     app.register_blueprint(invoice_generation_blueprint, url_prefix="/api")
@@ -116,7 +127,17 @@ def create_app():
     app.register_blueprint(bank_reconciliation_blueprint, url_prefix="/api")
     app.register_blueprint(roles_blueprint, url_prefix="/api")
     app.register_blueprint(gst_blueprint, url_prefix="/api")
-    
+    app.register_blueprint(reminders_blueprint, url_prefix="/api")
+    app.register_blueprint(org_profile_blueprint, url_prefix="/api")
+    app.register_blueprint(branding_blueprint, url_prefix="/api")
+    app.register_blueprint(invoice_preferences_blueprint, url_prefix="/api")
+    app.register_blueprint(tax_rates_blueprint, url_prefix="/api")
+    app.register_blueprint(roles_permissions_blueprint, url_prefix="/api")
+    app.register_blueprint(automation_blueprint, url_prefix="/api")
+    app.register_blueprint(integrations_blueprint, url_prefix="/api")
+    app.register_blueprint(notifications_blueprint, url_prefix="/api")
+    app.register_blueprint(audit_logs_blueprint, url_prefix="/api")
+
     # Start the background scheduler for recurring invoices
     try:
         start_scheduler(app)

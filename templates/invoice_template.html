@@ -30,7 +30,7 @@
         .header .company {
             font-size: 2.1em;
             font-weight: 700;
-            color: #2d6cdf;
+            color: {{ branding.accent_color | default('#2d6cdf') }};
         }
         .header .invoice-title {
             font-size: 1.3em;
@@ -48,7 +48,7 @@
         .info .section h4 {
             margin: 0 0 8px 0;
             font-size: 1.1em;
-            color: #2d6cdf;
+            color: {{ branding.accent_color | default('#2d6cdf') }};
         }
         .info .section p {
             margin: 2px 0;
@@ -69,7 +69,7 @@
         .details th {
             background: #f0f4fa;
             font-weight: 600;
-            color: #2d6cdf;
+            color: {{ branding.accent_color | default('#2d6cdf') }};
         }
         .totals {
             float: right;
@@ -86,11 +86,11 @@
         }
         .totals th {
             background: #f0f4fa;
-            color: #2d6cdf;
+            color: {{ branding.accent_color | default('#2d6cdf') }};
             font-weight: 600;
         }
         .totals tr.total-row th, .totals tr.total-row td {
-            border-top: 2px solid #2d6cdf;
+            border-top: 2px solid {{ branding.accent_color | default('#2d6cdf') }};
             font-size: 1.1em;
             font-weight: 700;
         }

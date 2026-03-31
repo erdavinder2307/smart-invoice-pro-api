@@ -1,9 +1,11 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 from smart_invoice_pro.utils.cosmos_client import purchase_orders_container, bills_container
 import uuid
+import base64
 from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 
 purchase_orders_blueprint = Blueprint('purchase_orders', __name__)
 
@@ -516,3 +518,153 @@ def get_next_po_number():
         return jsonify({"next_number": next_number}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to generate next PO number: {str(e)}"}), 500
+
+@purchase_orders_blueprint.route('/purchase-orders/<po_id>/pdf', methods=['GET'])
+def get_po_pdf(po_id):
+    """Generate and return a PDF for a purchase order."""
+    items = list(purchase_orders_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": po_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Purchase order not found'}), 404
+    po = items[0]
+    doc = {
+        **po,
+        'invoice_number': po.get('po_number', po['id']),
+        'customer_name': po.get('vendor_name', po.get('vendor_id', 'Vendor')),
+        'items': [
+            {**item, 'name': item.get('item_name', item.get('name', ''))}
+            for item in po.get('items', [])
+        ]
+    }
+    try:
+        branding = _get_tenant_branding(request.tenant_id)
+        pdf_bytes = build_invoice_pdf(doc, branding=branding)
+        ref = po.get('po_number', 'po').replace('/', '-')
+        response = make_response(pdf_bytes)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'inline; filename={ref}.pdf'
+        return response
+    except Exception as e:
+        return jsonify({'error': f'Failed to generate PDF: {str(e)}'}), 500
+
+
+@purchase_orders_blueprint.route('/purchase-orders/<po_id>/send-email', methods=['POST'])
+def send_po_email(po_id):
+    """Send a purchase order to the vendor via Azure Communication Services."""
+    import os
+    from azure.communication.email import EmailClient
+
+    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
+    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    if not connection_string:
+        return jsonify({'error': 'Email service not configured on the server'}), 503
+
+    data = request.get_json() or {}
+    attach_pdf = bool(data.get('attach_pdf', False))
+
+    items = list(purchase_orders_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": po_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Purchase order not found'}), 404
+    po = items[0]
+
+    recipient_email = data.get('recipient_email') or po.get('vendor_email', '').strip()
+    if not recipient_email:
+        return jsonify({'error': 'No recipient email found on this purchase order'}), 400
+
+    po_number     = po.get('po_number', po['id'])
+    vendor_name   = po.get('vendor_name', 'Vendor')
+    order_date    = po.get('order_date', '')
+    delivery_date = po.get('delivery_date', po.get('expected_delivery', ''))
+    total_amount  = float(po.get('total_amount', 0))
+    personal_msg  = data.get('message', '')
+
+    _branding = _get_tenant_branding(request.tenant_id)
+    _primary  = _branding.get('primary_color', '#2563EB')
+
+    item_rows_html = ''
+    for line in po.get('items', []):
+        item_rows_html += (
+            f"<tr>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0'>{line.get('item_name', line.get('name', ''))}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>{float(line.get('quantity', 0)):.2f}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('rate', 0)):,.2f}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('amount', 0)):,.2f}</td>"
+            f"</tr>"
+        )
+
+    personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
+    html_content = f"""
+    <html><body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
+        <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
+            <h2 style='color:#fff;margin:0'>Purchase Order {po_number}</h2>
+        </div>
+        <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
+            <p>Dear {vendor_name},</p>
+            {personal_msg_html}
+            <p>Please find the purchase order details below:</p>
+            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
+                <thead><tr style='background:#F8FAFC'>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
+                </tr></thead>
+                <tbody>{item_rows_html}</tbody>
+            </table>
+            <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
+            <p style='color:#475569'><strong>Order Date:</strong> {order_date}</p>
+            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Smart Invoice Pro.</p>
+        </div>
+    </body></html>
+    """
+
+    email_message = {
+        "senderAddress": sender_address,
+        "recipients": {"to": [{"address": recipient_email}]},
+        "content": {
+            "subject": f"Purchase Order {po_number}",
+            "html": html_content
+        }
+    }
+
+    if attach_pdf:
+        try:
+            doc = {
+                **po,
+                'invoice_number': po_number,
+                'customer_name': vendor_name,
+                'items': [{**i, 'name': i.get('item_name', i.get('name', ''))} for i in po.get('items', [])]
+            }
+            pdf_bytes = build_invoice_pdf(doc, branding=_branding)
+            email_message["attachments"] = [{
+                "name": f"po_{po_number}.pdf",
+                "contentType": "application/pdf",
+                "contentInBase64": base64.b64encode(pdf_bytes).decode('utf-8')
+            }]
+        except Exception as pdf_err:
+            print(f"WARNING: PO PDF generation failed: {pdf_err}")
+
+    try:
+        client = EmailClient.from_connection_string(connection_string)
+        poller = client.begin_send(email_message)
+        result = poller.result()
+        return jsonify({
+            'message':    'Purchase order email sent successfully',
+            'sent_to':    recipient_email,
+            'message_id': result.get('id'),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to send email: {str(e)}'}), 500

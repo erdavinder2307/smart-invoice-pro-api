@@ -10,6 +10,7 @@ Approval workflow
 """
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import users_container, invoices_container, purchase_orders_container
+from smart_invoice_pro.utils.audit_logger import log_audit
 from datetime import datetime
 from functools import wraps
 
@@ -22,6 +23,12 @@ DEFAULT_ROLE = 'Admin'   # first registered user becomes Admin by convention
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _get_user_id():
+    """Get user ID from JWT context (set by auth_middleware) or fallback to X-User-Id header."""
+    # Prefer the JWT-decoded user_id attached by auth_middleware
+    jwt_user_id = getattr(request, 'user_id', None)
+    if jwt_user_id:
+        return str(jwt_user_id).strip()
+    # Fallback: legacy X-User-Id header (for backward compat)
     return request.headers.get('X-User-Id', '').strip()
 
 def _fetch_user(user_id):
@@ -40,14 +47,19 @@ def _get_role(user_id):
     return user.get('role', 'Sales')
 
 def require_role(*allowed_roles):
-    """Decorator: only allow requests from users with one of the specified roles."""
+    """Decorator: only allow requests from users with one of the specified roles.
+    Works with both JWT-authenticated requests and legacy X-User-Id header.
+    Returns 401 if unauthenticated, 403 if authenticated but wrong role.
+    """
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
             uid = _get_user_id()
             if not uid:
-                return jsonify({'error': 'Unauthorized'}), 401
+                return jsonify({'error': 'Unauthorized — authentication required'}), 401
             role = _get_role(uid)
+            if role is None:
+                return jsonify({'error': 'Unauthorized — user not found'}), 401
             if role not in allowed_roles:
                 return jsonify({'error': f'Forbidden. Required role: {", ".join(allowed_roles)}. Your role: {role}'}), 403
             return fn(*args, **kwargs)
@@ -115,9 +127,15 @@ def update_user_role(target_user_id):
         if len(admins) <= 1:
             return jsonify({'error': 'Cannot remove the last Admin user'}), 400
 
+    old_role = user.get('role')
     user['role'] = new_role
     user['updated_at'] = datetime.utcnow().isoformat()
     users_container.upsert_item(body=user)
+    log_audit("user", "update", target_user_id,
+              {"id": target_user_id, "role": old_role},
+              {"id": target_user_id, "role": new_role},
+              user_id=getattr(request, 'user_id', None),
+              tenant_id=getattr(request, 'tenant_id', None))
     return jsonify({'id': target_user_id, 'role': new_role}), 200
 
 

@@ -1,5 +1,8 @@
 from flask import Blueprint, jsonify, request
-from smart_invoice_pro.utils.cosmos_client import get_container
+from smart_invoice_pro.utils.cosmos_client import (
+    invoices_container, expenses_container, bills_container,
+    products_container, bank_accounts_container, customers_container
+)
 from datetime import datetime, timedelta
 from flasgger import swag_from
 import os
@@ -16,7 +19,7 @@ def parse_date(date_str):
         return None
 
 
-@reports_blueprint.route('/api/reports/profit-loss', methods=['GET'])
+@reports_blueprint.route('/reports/profit-loss', methods=['GET'])
 @swag_from({
     'summary': 'Get Profit & Loss Report',
     'description': 'Generate profit and loss statement for a date range',
@@ -70,9 +73,6 @@ def get_profit_loss():
         start_date = parse_date(request.args.get('start_date')) or datetime(end_date.year, 1, 1)
 
         # Get containers
-        invoices_container = get_container('invoices')
-        expenses_container = get_container('expenses')
-        bills_container = get_container('bills')
 
         # Query invoices (Revenue)
         invoice_query = f"""
@@ -166,7 +166,7 @@ def get_profit_loss():
         return jsonify({'error': str(e)}), 500
 
 
-@reports_blueprint.route('/api/reports/balance-sheet', methods=['GET'])
+@reports_blueprint.route('/reports/balance-sheet', methods=['GET'])
 @swag_from({
     'summary': 'Get Balance Sheet',
     'description': 'Generate balance sheet as of a specific date',
@@ -200,11 +200,6 @@ def get_balance_sheet():
         as_of_date = parse_date(request.args.get('as_of_date')) or datetime.now()
 
         # Get containers
-        invoices_container = get_container('invoices')
-        expenses_container = get_container('expenses')
-        bills_container = get_container('bills')
-        products_container = get_container('products')
-        bank_accounts_container = get_container('bank_accounts')
 
         # Assets
         # 1. Cash (from bank accounts)
@@ -315,7 +310,121 @@ def get_balance_sheet():
         return jsonify({'error': str(e)}), 500
 
 
-@reports_blueprint.route('/api/reports/aging', methods=['GET'])
+@reports_blueprint.route('/reports/ap-aging', methods=['GET'])
+@swag_from({
+    'summary': 'Get Accounts Payable Aging Report',
+    'description': 'Generate A/P aging report showing unpaid bills by age brackets',
+    'parameters': [
+        {
+            'name': 'as_of_date',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'As of date (YYYY-MM-DD), defaults to today'
+        },
+        {
+            'name': 'user_id',
+            'in': 'query',
+            'type': 'string',
+            'required': True,
+            'description': 'User ID'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'A/P aging report data'
+        }
+    }
+})
+def get_ap_aging():
+    """Get Accounts Payable Aging Report"""
+    try:
+        tenant_id = request.tenant_id
+
+        as_of_date = parse_date(request.args.get('as_of_date')) or datetime.now()
+
+
+        query = f"""
+            SELECT * FROM c
+            WHERE c.tenant_id = '{tenant_id}'
+            AND c.status IN ('Pending', 'Partially Paid')
+            AND c.bill_date <= '{as_of_date.strftime('%Y-%m-%d')}'
+        """
+        bills = list(bills_container.query_items(query=query, enable_cross_partition_query=True))
+
+        aging_buckets = {'current': [], '1-30': [], '31-60': [], '61-90': [], '90+': []}
+        aging_totals  = {'current': 0, '1-30': 0, '31-60': 0, '61-90': 0, '90+': 0}
+
+        for bill in bills:
+            due_date = parse_date(bill.get('due_date'))
+            if not due_date:
+                continue
+
+            days_overdue = (as_of_date - due_date).days
+            balance_due = float(bill.get('balance_due', 0))
+
+            bill_data = {
+                'bill_id': bill['id'],
+                'bill_number': bill.get('bill_number'),
+                'vendor_id': bill.get('vendor_id'),
+                'vendor_name': bill.get('vendor_name', 'Unknown'),
+                'bill_date': bill.get('bill_date'),
+                'due_date': bill.get('due_date'),
+                'total_amount': float(bill.get('total_amount', 0)),
+                'amount_paid': float(bill.get('amount_paid', 0)),
+                'balance_due': balance_due,
+                'days_overdue': days_overdue,
+                'status': bill.get('status')
+            }
+
+            if days_overdue < 0:
+                bucket = 'current'
+            elif days_overdue <= 30:
+                bucket = '1-30'
+            elif days_overdue <= 60:
+                bucket = '31-60'
+            elif days_overdue <= 90:
+                bucket = '61-90'
+            else:
+                bucket = '90+'
+
+            aging_buckets[bucket].append(bill_data)
+            aging_totals[bucket] += balance_due
+
+        total_outstanding = sum(aging_totals.values())
+
+        vendor_summary_map = defaultdict(lambda: {'vendor_name': 'Unknown', 'total_outstanding': 0.0})
+        for bill in bills:
+            vid = bill.get('vendor_id', bill['id'])
+            vendor_summary_map[vid]['vendor_name'] = bill.get('vendor_name', 'Unknown')
+            vendor_summary_map[vid]['total_outstanding'] += float(bill.get('balance_due', 0))
+
+        vendor_summary = [
+            {'vendor_id': vid, 'vendor_name': d['vendor_name'], 'total_outstanding': round(d['total_outstanding'], 2)}
+            for vid, d in vendor_summary_map.items()
+        ]
+        vendor_summary.sort(key=lambda x: x['total_outstanding'], reverse=True)
+
+        return jsonify({
+            'as_of_date': as_of_date.strftime('%Y-%m-%d'),
+            'aging_buckets': {
+                bucket: {
+                    'total': round(aging_totals[bucket], 2),
+                    'count': len(aging_buckets[bucket]),
+                    'bills': aging_buckets[bucket]
+                }
+                for bucket in ['current', '1-30', '31-60', '61-90', '90+']
+            },
+            'total_outstanding': round(total_outstanding, 2),
+            'total_bills': len(bills),
+            'vendor_summary': vendor_summary
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@reports_blueprint.route('/reports/aging', methods=['GET'])
 @swag_from({
     'summary': 'Get Accounts Receivable Aging Report',
     'description': 'Generate A/R aging report showing unpaid invoices by age brackets',
@@ -349,8 +458,6 @@ def get_ar_aging():
         as_of_date = parse_date(request.args.get('as_of_date')) or datetime.now()
 
         # Get containers
-        invoices_container = get_container('invoices')
-        customers_container = get_container('customers')
 
         # Query unpaid/partially paid invoices
         query = f"""
@@ -476,7 +583,7 @@ def get_ar_aging():
         return jsonify({'error': str(e)}), 500
 
 
-@reports_blueprint.route('/api/reports/cash-flow', methods=['GET'])
+@reports_blueprint.route('/reports/cash-flow', methods=['GET'])
 @swag_from({
     'summary': 'Get Cash Flow Report',
     'description': 'Generate cash flow statement for a date range',
@@ -518,9 +625,6 @@ def get_cash_flow():
         start_date = parse_date(request.args.get('start_date')) or datetime(end_date.year, 1, 1)
 
         # Get containers
-        invoices_container = get_container('invoices')
-        expenses_container = get_container('expenses')
-        bills_container = get_container('bills')
 
         # Cash from Operating Activities
         # Cash received from customers (paid invoices)
@@ -573,6 +677,342 @@ def get_cash_flow():
                 'net_cash_from_financing': 0  # Can be extended
             },
             'net_increase_in_cash': round(net_cash_operating, 2)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@reports_blueprint.route('/reports/sales-summary', methods=['GET'])
+def get_sales_summary():
+    """Get Sales Summary Report — revenue by customer and by month"""
+    try:
+        tenant_id = request.tenant_id
+
+        start_date = parse_date(request.args.get('start_date')) or (datetime.now().replace(day=1))
+        end_date   = parse_date(request.args.get('end_date'))   or datetime.now()
+
+
+        query = f"""
+            SELECT * FROM c
+            WHERE c.tenant_id = '{tenant_id}'
+            AND c.issue_date >= '{start_date.strftime('%Y-%m-%d')}'
+            AND c.issue_date <= '{end_date.strftime('%Y-%m-%d')}'
+            AND c.status IN ('Paid', 'Partially Paid', 'Pending')
+        """
+        invoices = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+
+        total_revenue = 0.0
+        total_paid    = 0.0
+        customer_map  = defaultdict(lambda: {'customer_name': 'Unknown', 'invoice_count': 0, 'total_amount': 0.0, 'total_paid': 0.0})
+        monthly_map   = defaultdict(float)
+
+        for inv in invoices:
+            amount = float(inv.get('total_amount', 0))
+            paid   = float(inv.get('amount_paid', 0))
+            total_revenue += amount
+            total_paid    += paid
+
+            cid = inv.get('customer_id', inv['id'])
+            customer_map[cid]['customer_name']  = inv.get('customer_name', 'Unknown')
+            customer_map[cid]['invoice_count'] += 1
+            customer_map[cid]['total_amount']  += amount
+            customer_map[cid]['total_paid']    += paid
+
+            issue_date = inv.get('issue_date', '')
+            if issue_date and len(issue_date) >= 7:
+                month_key = issue_date[:7]  # YYYY-MM
+                monthly_map[month_key] += amount
+
+        customer_summary = sorted(
+            [
+                {
+                    'customer_id': cid,
+                    'customer_name': d['customer_name'],
+                    'invoice_count': d['invoice_count'],
+                    'total_amount': round(d['total_amount'], 2),
+                    'total_paid': round(d['total_paid'], 2)
+                }
+                for cid, d in customer_map.items()
+            ],
+            key=lambda x: x['total_amount'],
+            reverse=True
+        )
+
+        monthly_breakdown = [
+            {'month': month, 'total': round(amt, 2)}
+            for month, amt in sorted(monthly_map.items())
+        ]
+
+        avg_invoice = (total_revenue / len(invoices)) if invoices else 0
+
+        return jsonify({
+            'period': {
+                'start_date': start_date.strftime('%Y-%m-%d'),
+                'end_date': end_date.strftime('%Y-%m-%d')
+            },
+            'total_revenue': round(total_revenue, 2),
+            'total_paid': round(total_paid, 2),
+            'invoice_count': len(invoices),
+            'avg_invoice_value': round(avg_invoice, 2),
+            'customer_summary': customer_summary,
+            'monthly_breakdown': monthly_breakdown
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@reports_blueprint.route('/reports/gst-tax-summary', methods=['GET'])
+def get_gst_tax_summary():
+    """GST Tax Summary — taxable value and tax amounts grouped by GST rate"""
+    try:
+        tenant_id = request.tenant_id
+
+        start_date = parse_date(request.args.get('start_date')) or (datetime.now().replace(day=1))
+        end_date   = parse_date(request.args.get('end_date'))   or datetime.now()
+
+
+        query = f"""
+            SELECT * FROM c
+            WHERE c.tenant_id = '{tenant_id}'
+            AND c.issue_date >= '{start_date.strftime('%Y-%m-%d')}'
+            AND c.issue_date <= '{end_date.strftime('%Y-%m-%d')}'
+            AND c.status IN ('Paid', 'Partially Paid', 'Pending')
+        """
+        invoices = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+
+        rate_groups = defaultdict(lambda: {'taxable_value': 0.0, 'cgst': 0.0, 'sgst': 0.0, 'igst': 0.0, 'total_tax': 0.0})
+        totals = {'taxable_value': 0.0, 'cgst': 0.0, 'sgst': 0.0, 'igst': 0.0, 'total_tax': 0.0, 'invoice_count': 0}
+
+        for inv in invoices:
+            items = inv.get('items', [])
+            is_igst = float(inv.get('igst_amount', 0)) > 0
+
+            for item in items:
+                tax_rate = float(item.get('tax', 0))
+                qty      = float(item.get('quantity', 0))
+                rate     = float(item.get('rate', 0))
+                discount = float(item.get('discount', 0))
+                taxable  = max(0, qty * rate - discount)
+                tax_amt  = round(taxable * tax_rate / 100, 2)
+
+                if is_igst:
+                    cgst_amt, sgst_amt, igst_amt = 0.0, 0.0, tax_amt
+                else:
+                    cgst_amt = round(tax_amt / 2, 2)
+                    sgst_amt = round(tax_amt / 2, 2)
+                    igst_amt = 0.0
+
+                key = f'{tax_rate:.0f}%'
+                rate_groups[key]['taxable_value'] += taxable
+                rate_groups[key]['cgst']          += cgst_amt
+                rate_groups[key]['sgst']          += sgst_amt
+                rate_groups[key]['igst']          += igst_amt
+                rate_groups[key]['total_tax']     += tax_amt
+
+                totals['taxable_value'] += taxable
+                totals['cgst']          += cgst_amt
+                totals['sgst']          += sgst_amt
+                totals['igst']          += igst_amt
+                totals['total_tax']     += tax_amt
+
+            totals['invoice_count'] += 1
+
+        tax_breakdown = sorted(
+            [
+                {
+                    'tax_rate': rate,
+                    'taxable_value': round(d['taxable_value'], 2),
+                    'cgst': round(d['cgst'], 2),
+                    'sgst': round(d['sgst'], 2),
+                    'igst': round(d['igst'], 2),
+                    'total_tax': round(d['total_tax'], 2)
+                }
+                for rate, d in rate_groups.items()
+            ],
+            key=lambda x: float(x['tax_rate'].replace('%', ''))
+        )
+
+        return jsonify({
+            'period': {
+                'start_date': start_date.strftime('%Y-%m-%d'),
+                'end_date': end_date.strftime('%Y-%m-%d')
+            },
+            'tax_breakdown': tax_breakdown,
+            'totals': {
+                'taxable_value': round(totals['taxable_value'], 2),
+                'cgst': round(totals['cgst'], 2),
+                'sgst': round(totals['sgst'], 2),
+                'igst': round(totals['igst'], 2),
+                'total_tax': round(totals['total_tax'], 2),
+                'invoice_count': totals['invoice_count']
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@reports_blueprint.route('/reports/payments-received', methods=['GET'])
+def get_payments_received():
+    """Payments Received — customer payments from invoice payment history"""
+    try:
+        tenant_id = request.tenant_id
+
+        start_date = parse_date(request.args.get('start_date')) or (datetime.now().replace(day=1))
+        end_date   = parse_date(request.args.get('end_date'))   or datetime.now()
+
+
+        query = f"""
+            SELECT * FROM c
+            WHERE c.tenant_id = '{tenant_id}'
+            AND c.status IN ('Paid', 'Partially Paid')
+        """
+        invoices = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+
+        payments = []
+        total_received = 0.0
+        mode_totals = defaultdict(float)
+        daily_totals = defaultdict(float)
+
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str   = end_date.strftime('%Y-%m-%d')
+
+        for inv in invoices:
+            history = inv.get('payment_history', [])
+            if history:
+                for entry in history:
+                    pdate = entry.get('payment_date', '')
+                    if pdate and start_str <= pdate[:10] <= end_str:
+                        amount = float(entry.get('amount', 0))
+                        mode   = entry.get('payment_mode', 'Unknown') or 'Unknown'
+                        payments.append({
+                            'payment_id':      entry.get('id', ''),
+                            'payment_date':    pdate[:10],
+                            'invoice_id':      inv['id'],
+                            'invoice_number':  inv.get('invoice_number', ''),
+                            'customer_name':   inv.get('customer_name', 'Unknown'),
+                            'amount':          round(amount, 2),
+                            'payment_mode':    mode,
+                            'reference':       entry.get('reference', '')
+                        })
+                        total_received += amount
+                        mode_totals[mode] += amount
+                        daily_totals[pdate[:10]] += amount
+            elif inv.get('amount_paid', 0) > 0:
+                # Fallback: no history, use invoice-level fields
+                pdate = inv.get('payment_date', inv.get('due_date', ''))
+                if pdate and start_str <= pdate[:10] <= end_str:
+                    amount = float(inv.get('amount_paid', 0))
+                    mode   = inv.get('payment_mode', 'Unknown') or 'Unknown'
+                    payments.append({
+                        'payment_id':      inv['id'],
+                        'payment_date':    pdate[:10],
+                        'invoice_id':      inv['id'],
+                        'invoice_number':  inv.get('invoice_number', ''),
+                        'customer_name':   inv.get('customer_name', 'Unknown'),
+                        'amount':          round(amount, 2),
+                        'payment_mode':    mode,
+                        'reference':       ''
+                    })
+                    total_received += amount
+                    mode_totals[mode] += amount
+                    daily_totals[pdate[:10]] += amount
+
+        payments.sort(key=lambda x: x['payment_date'], reverse=True)
+        daily_trend = sorted([{'date': d, 'total': round(t, 2)} for d, t in daily_totals.items()], key=lambda x: x['date'])
+        mode_breakdown = [{'mode': m, 'total': round(t, 2)} for m, t in sorted(mode_totals.items(), key=lambda x: -x[1])]
+
+        return jsonify({
+            'period':         {'start_date': start_str, 'end_date': end_str},
+            'total_received': round(total_received, 2),
+            'payment_count':  len(payments),
+            'payments':       payments,
+            'mode_breakdown': mode_breakdown,
+            'daily_trend':    daily_trend
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@reports_blueprint.route('/reports/payments-made', methods=['GET'])
+def get_payments_made():
+    """Payments Made — vendor payments from bill payment history"""
+    try:
+        tenant_id = request.tenant_id
+
+        start_date = parse_date(request.args.get('start_date')) or (datetime.now().replace(day=1))
+        end_date   = parse_date(request.args.get('end_date'))   or datetime.now()
+
+
+        query = f"""
+            SELECT * FROM c
+            WHERE c.tenant_id = '{tenant_id}'
+            AND c.status IN ('Paid', 'Partially Paid')
+        """
+        bills = list(bills_container.query_items(query=query, enable_cross_partition_query=True))
+
+        payments = []
+        total_paid = 0.0
+        mode_totals = defaultdict(float)
+        daily_totals = defaultdict(float)
+
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str   = end_date.strftime('%Y-%m-%d')
+
+        for bill in bills:
+            history = bill.get('payment_history', [])
+            if history:
+                for entry in history:
+                    pdate = entry.get('payment_date', '')
+                    if pdate and start_str <= pdate[:10] <= end_str:
+                        amount = float(entry.get('amount', 0))
+                        mode   = entry.get('payment_mode', 'Unknown') or 'Unknown'
+                        payments.append({
+                            'payment_id':   entry.get('id', ''),
+                            'payment_date': pdate[:10],
+                            'bill_id':      bill['id'],
+                            'bill_number':  bill.get('bill_number', ''),
+                            'vendor_name':  bill.get('vendor_name', 'Unknown'),
+                            'amount':       round(amount, 2),
+                            'payment_mode': mode,
+                            'reference':    entry.get('reference', '')
+                        })
+                        total_paid += amount
+                        mode_totals[mode] += amount
+                        daily_totals[pdate[:10]] += amount
+            elif bill.get('amount_paid', 0) > 0:
+                pdate = bill.get('payment_date', bill.get('due_date', ''))
+                if pdate and start_str <= pdate[:10] <= end_str:
+                    amount = float(bill.get('amount_paid', 0))
+                    mode   = bill.get('payment_mode', 'Unknown') or 'Unknown'
+                    payments.append({
+                        'payment_id':   bill['id'],
+                        'payment_date': pdate[:10],
+                        'bill_id':      bill['id'],
+                        'bill_number':  bill.get('bill_number', ''),
+                        'vendor_name':  bill.get('vendor_name', 'Unknown'),
+                        'amount':       round(amount, 2),
+                        'payment_mode': mode,
+                        'reference':    ''
+                    })
+                    total_paid += amount
+                    mode_totals[mode] += amount
+                    daily_totals[pdate[:10]] += amount
+
+        payments.sort(key=lambda x: x['payment_date'], reverse=True)
+        daily_trend = sorted([{'date': d, 'total': round(t, 2)} for d, t in daily_totals.items()], key=lambda x: x['date'])
+        mode_breakdown = [{'mode': m, 'total': round(t, 2)} for m, t in sorted(mode_totals.items(), key=lambda x: -x[1])]
+
+        return jsonify({
+            'period':        {'start_date': start_str, 'end_date': end_str},
+            'total_paid':    round(total_paid, 2),
+            'payment_count': len(payments),
+            'payments':      payments,
+            'mode_breakdown': mode_breakdown,
+            'daily_trend':   daily_trend
         }), 200
 
     except Exception as e:

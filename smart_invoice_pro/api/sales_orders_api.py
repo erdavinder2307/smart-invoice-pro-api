@@ -1,9 +1,12 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g, make_response
 from smart_invoice_pro.utils.cosmos_client import sales_orders_container, invoices_container
+from smart_invoice_pro.api.auth_middleware import token_required
 import uuid
+import base64
 from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 
 sales_orders_blueprint = Blueprint('sales_orders', __name__)
 
@@ -98,6 +101,7 @@ def validate_sales_order_data(data, is_update=False):
         }
     }
 })
+@token_required
 def create_sales_order():
     """Create a new sales order"""
     data = request.get_json()
@@ -111,6 +115,7 @@ def create_sales_order():
     
     item = {
         'id': str(uuid.uuid4()),
+        'tenant_id': request.tenant_id,
         'so_number': data['so_number'],
         'customer_id': data['customer_id'],
         'customer_name': data.get('customer_name', ''),
@@ -174,27 +179,32 @@ def create_sales_order():
         }
     }
 })
+@token_required
 def get_sales_orders():
     """Get all sales orders with optional filters"""
     try:
         status_filter = request.args.get('status')
         customer_id_filter = request.args.get('customer_id', type=int)
         
-        query = "SELECT * FROM c"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         conditions = []
+        parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
         
         if status_filter:
-            conditions.append(f"c.status = '{status_filter}'")
+            conditions.append("c.status = @status")
+            parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
-            conditions.append(f"c.customer_id = {customer_id_filter}")
+            conditions.append("c.customer_id = @customer_id")
+            parameters.append({"name": "@customer_id", "value": customer_id_filter})
         
         if conditions:
-            query += " WHERE " + " AND ".join(conditions)
+            query += " AND " + " AND ".join(conditions)
         
         query += " ORDER BY c.created_at DESC"
         
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=parameters,
             enable_cross_partition_query=True
         ))
         
@@ -223,12 +233,17 @@ def get_sales_orders():
         }
     }
 })
+@token_required
 def get_sales_order(so_id):
     """Get a sales order by ID"""
     try:
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -290,6 +305,7 @@ def get_sales_order(so_id):
         }
     }
 })
+@token_required
 def update_sales_order(so_id):
     """Update a sales order"""
     data = request.get_json()
@@ -301,9 +317,13 @@ def update_sales_order(so_id):
     
     try:
         # Fetch existing sales order
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -356,13 +376,18 @@ def update_sales_order(so_id):
         }
     }
 })
+@token_required
 def delete_sales_order(so_id):
     """Delete a sales order"""
     try:
         # Fetch the sales order to get partition key
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -428,6 +453,7 @@ def delete_sales_order(so_id):
         }
     }
 })
+@token_required
 def convert_so_to_invoice(so_id):
     """Convert a sales order to an invoice"""
     data = request.get_json()
@@ -438,9 +464,13 @@ def convert_so_to_invoice(so_id):
     
     try:
         # Fetch the sales order
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -457,6 +487,7 @@ def convert_so_to_invoice(so_id):
         now = datetime.utcnow().isoformat()
         invoice = {
             'id': str(uuid.uuid4()),
+            'tenant_id': request.tenant_id,
             'invoice_number': invoice_number,
             'customer_id': so['customer_id'],
             'customer_name': so.get('customer_name', ''),
@@ -552,6 +583,7 @@ def convert_so_to_invoice(so_id):
         }
     }
 })
+@token_required
 def convert_so_to_po(so_id):
     """Convert a sales order to a purchase order"""
     data = request.get_json()
@@ -562,9 +594,13 @@ def convert_so_to_po(so_id):
     
     try:
         # Fetch the sales order
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -613,12 +649,14 @@ def convert_so_to_po(so_id):
         }
     }
 })
+@token_required
 def get_next_so_number():
     """Get the next available sales order number"""
     try:
-        query = "SELECT * FROM c ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
             enable_cross_partition_query=True
         ))
         
@@ -639,3 +677,153 @@ def get_next_so_number():
         return jsonify({"next_number": next_number}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to generate next SO number: {str(e)}"}), 500
+
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>/pdf', methods=['GET'])
+@token_required
+def get_so_pdf(so_id):
+    """Generate and return a PDF for a sales order."""
+    items = list(sales_orders_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": so_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Sales order not found'}), 404
+    so = items[0]
+    doc = {
+        **so,
+        'invoice_number': so.get('so_number', so['id']),
+        'items': [
+            {**item, 'name': item.get('item_name', item.get('name', ''))}
+            for item in so.get('items', [])
+        ]
+    }
+    try:
+        branding = _get_tenant_branding(request.tenant_id)
+        pdf_bytes = build_invoice_pdf(doc, branding=branding)
+        ref = so.get('so_number', 'so').replace('/', '-')
+        response = make_response(pdf_bytes)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'inline; filename={ref}.pdf'
+        return response
+    except Exception as e:
+        return jsonify({'error': f'Failed to generate PDF: {str(e)}'}), 500
+
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>/send-email', methods=['POST'])
+@token_required
+def send_so_email(so_id):
+    """Send a sales order to the customer via Azure Communication Services."""
+    import os
+    from azure.communication.email import EmailClient
+
+    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
+    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    if not connection_string:
+        return jsonify({'error': 'Email service not configured on the server'}), 503
+
+    data = request.get_json() or {}
+    attach_pdf = bool(data.get('attach_pdf', False))
+
+    items = list(sales_orders_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": so_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Sales order not found'}), 404
+    so = items[0]
+
+    recipient_email = data.get('recipient_email') or so.get('customer_email', '').strip()
+    if not recipient_email:
+        return jsonify({'error': 'No recipient email found on this sales order'}), 400
+
+    so_number     = so.get('so_number', so['id'])
+    customer_name = so.get('customer_name', 'Customer')
+    order_date    = so.get('order_date', '')
+    total_amount  = float(so.get('total_amount', 0))
+    personal_msg  = data.get('message', '')
+
+    _branding = _get_tenant_branding(request.tenant_id)
+    _primary  = _branding.get('primary_color', '#2563EB')
+
+    item_rows_html = ''
+    for line in so.get('items', []):
+        item_rows_html += (
+            f"<tr>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0'>{line.get('item_name', line.get('name', ''))}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>{float(line.get('quantity', 0)):.2f}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('rate', 0)):,.2f}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('amount', 0)):,.2f}</td>"
+            f"</tr>"
+        )
+
+    personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
+    html_content = f"""
+    <html><body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
+        <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
+            <h2 style='color:#fff;margin:0'>Sales Order {so_number}</h2>
+        </div>
+        <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
+            <p>Dear {customer_name},</p>
+            {personal_msg_html}
+            <p>Please find your sales order details below:</p>
+            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
+                <thead><tr style='background:#F8FAFC'>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
+                </tr></thead>
+                <tbody>{item_rows_html}</tbody>
+            </table>
+            <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
+            <p style='color:#475569'><strong>Order Date:</strong> {order_date}</p>
+            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Smart Invoice Pro.</p>
+        </div>
+    </body></html>
+    """
+
+    email_message = {
+        "senderAddress": sender_address,
+        "recipients": {"to": [{"address": recipient_email}]},
+        "content": {
+            "subject": f"Sales Order {so_number}",
+            "html": html_content
+        }
+    }
+
+    if attach_pdf:
+        try:
+            doc = {
+                **so,
+                'invoice_number': so_number,
+                'items': [{**i, 'name': i.get('item_name', i.get('name', ''))} for i in so.get('items', [])]
+            }
+            pdf_bytes = build_invoice_pdf(doc, branding=_branding)
+            email_message["attachments"] = [{
+                "name": f"so_{so_number}.pdf",
+                "contentType": "application/pdf",
+                "contentInBase64": base64.b64encode(pdf_bytes).decode('utf-8')
+            }]
+        except Exception as pdf_err:
+            print(f"WARNING: SO PDF generation failed: {pdf_err}")
+
+    try:
+        client = EmailClient.from_connection_string(connection_string)
+        poller = client.begin_send(email_message)
+        result = poller.result()
+        return jsonify({
+            'message':    'Sales order email sent successfully',
+            'sent_to':    recipient_email,
+            'message_id': result.get('id'),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to send email: {str(e)}'}), 500
