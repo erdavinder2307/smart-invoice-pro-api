@@ -5,11 +5,21 @@ All Cosmos DB containers are mocked at the module level so that
 no test ever hits a real database.
 """
 import datetime
+import sys
 import uuid
 from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
+
+# ── Mock CosmosClient before any application module is imported ─────────────
+# cosmos_client.py creates a real CosmosClient at import time, which fails
+# without valid credentials. We patch it early so all containers become mocks.
+_cosmos_client_patcher = patch(
+    "azure.cosmos.CosmosClient",
+    return_value=MagicMock(),
+)
+_cosmos_client_patcher.start()
 
 from smart_invoice_pro.app import create_app
 
