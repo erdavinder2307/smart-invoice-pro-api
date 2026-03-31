@@ -113,6 +113,6 @@ jobs:
           }
 
           probe_endpoint "/"
-          probe_endpoint "/api/quotes/next-number"
+          probe_endpoint "/api/ping"
 
           
