@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify
 from smart_invoice_pro.utils.cosmos_client import get_container
+from smart_invoice_pro.utils.notifications import create_notification
 from datetime import datetime
 from flasgger import swag_from
 from azure.communication.email import EmailClient
@@ -180,6 +181,26 @@ def check_low_stock():
         email_sent = False
         if low_stock_products and send_email_param:
             email_sent = send_low_stock_email(low_stock_products)
+
+        # Create per-product low-stock notifications (grouped by tenant)
+        for lsp in low_stock_products:
+            product_full = next(
+                (p for p in products if p.get('id') == lsp['id']), {}
+            )
+            tid = product_full.get('tenant_id')
+            if tid:
+                create_notification(
+                    tenant_id=tid,
+                    notification_type='low_stock',
+                    title='Low Stock Alert',
+                    message=(
+                        f"{lsp['name']} is running low: "
+                        f"{lsp['current_stock']} {lsp['unit']} remaining "
+                        f"(reorder level: {lsp['reorder_level']})."
+                    ),
+                    entity_id=lsp['id'],
+                    entity_type='product',
+                )
         
         return jsonify({
             'message': 'Low stock check completed',

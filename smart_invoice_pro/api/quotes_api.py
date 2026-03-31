@@ -1,9 +1,11 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 from smart_invoice_pro.utils.cosmos_client import quotes_container, invoices_container, sales_orders_container
 import uuid
+import base64
 from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 
 quotes_blueprint = Blueprint('quotes', __name__)
 
@@ -609,3 +611,149 @@ def get_next_quote_number():
         return jsonify({"next_number": next_number}), 200
     except Exception as e:
         return jsonify({"next_number": "QT-001"}), 200
+
+
+@quotes_blueprint.route('/quotes/<quote_id>/pdf', methods=['GET'])
+def get_quote_pdf(quote_id):
+    """Generate and return a PDF for a quote."""
+    items = list(quotes_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": quote_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Quote not found'}), 404
+    quote = items[0]
+    doc = {**quote, 'invoice_number': quote.get('quote_number', quote['id'])}
+    try:
+        branding = _get_tenant_branding(request.tenant_id)
+        pdf_bytes = build_invoice_pdf(doc, branding=branding)
+        ref = quote.get('quote_number', 'quote').replace('/', '-')
+        response = make_response(pdf_bytes)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'inline; filename={ref}.pdf'
+        return response
+    except Exception as e:
+        return jsonify({'error': f'Failed to generate PDF: {str(e)}'}), 500
+
+
+@quotes_blueprint.route('/quotes/<quote_id>/send-email', methods=['POST'])
+def send_quote_email(quote_id):
+    """Send a quote to the customer via Azure Communication Services."""
+    import os
+    from azure.communication.email import EmailClient
+
+    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
+    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    if not connection_string:
+        return jsonify({'error': 'Email service not configured on the server'}), 503
+
+    data = request.get_json() or {}
+    attach_pdf = bool(data.get('attach_pdf', False))
+
+    items = list(quotes_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": quote_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Quote not found'}), 404
+    quote = items[0]
+
+    recipient_email = data.get('recipient_email') or quote.get('customer_email', '').strip()
+    if not recipient_email:
+        return jsonify({'error': 'No recipient email found on this quote'}), 400
+
+    quote_number  = quote.get('quote_number', quote['id'])
+    customer_name = quote.get('customer_name', 'Customer')
+    issue_date    = quote.get('issue_date', '')
+    expiry_date   = quote.get('expiry_date', '')
+    total_amount  = float(quote.get('total_amount', 0))
+    personal_msg  = data.get('message', '')
+
+    _branding = _get_tenant_branding(request.tenant_id)
+    _primary  = _branding.get('primary_color', '#2563EB')
+
+    item_rows_html = ''
+    for line in quote.get('items', []):
+        item_rows_html += (
+            f"<tr>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0'>{line.get('name', line.get('item_name', ''))}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>{float(line.get('quantity', 0)):.2f}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('rate', 0)):,.2f}</td>"
+            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('amount', 0)):,.2f}</td>"
+            f"</tr>"
+        )
+
+    personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
+    html_content = f"""
+    <html><body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
+        <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
+            <h2 style='color:#fff;margin:0'>Quote {quote_number}</h2>
+        </div>
+        <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
+            <p>Dear {customer_name},</p>
+            {personal_msg_html}
+            <p>Please find your quotation details below:</p>
+            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
+                <thead><tr style='background:#F8FAFC'>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
+                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
+                </tr></thead>
+                <tbody>{item_rows_html}</tbody>
+            </table>
+            <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
+            <p style='color:#475569'><strong>Quote Date:</strong> {issue_date}&nbsp;|&nbsp;<strong>Valid Until:</strong> {expiry_date}</p>
+            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Smart Invoice Pro.</p>
+        </div>
+    </body></html>
+    """
+
+    email_message = {
+        "senderAddress": sender_address,
+        "recipients": {"to": [{"address": recipient_email}]},
+        "content": {
+            "subject": f"Quotation {quote_number} from us \u2014 Valid until {expiry_date}",
+            "html": html_content
+        }
+    }
+
+    if attach_pdf:
+        try:
+            doc = {**quote, 'invoice_number': quote_number}
+            pdf_bytes = build_invoice_pdf(doc, branding=_branding)
+            email_message["attachments"] = [{
+                "name": f"quote_{quote_number}.pdf",
+                "contentType": "application/pdf",
+                "contentInBase64": base64.b64encode(pdf_bytes).decode('utf-8')
+            }]
+        except Exception as pdf_err:
+            print(f"WARNING: Quote PDF generation failed: {pdf_err}")
+
+    try:
+        client = EmailClient.from_connection_string(connection_string)
+        poller = client.begin_send(email_message)
+        result = poller.result()
+
+        quote['email_status']  = 'sent'
+        quote['email_sent_at'] = datetime.utcnow().isoformat()
+        quote['updated_at']    = datetime.utcnow().isoformat()
+        if quote.get('status') == 'Draft':
+            quote['status'] = 'Sent'
+        quotes_container.replace_item(item=quote['id'], body=quote)
+
+        return jsonify({
+            'message':    'Quote email sent successfully',
+            'sent_to':    recipient_email,
+            'message_id': result.get('id'),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to send email: {str(e)}'}), 500

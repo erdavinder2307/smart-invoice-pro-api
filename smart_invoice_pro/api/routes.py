@@ -1,13 +1,14 @@
 from flask import Blueprint, request, jsonify
-from smart_invoice_pro.utils.cosmos_client import users_container
+from smart_invoice_pro.utils.cosmos_client import users_container, refresh_tokens_container
 import uuid
 import os
+import secrets
 from flasgger import swag_from
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import datetime
 
-api_blueprint = Blueprint('api', __name__)
+api_blueprint = Blueprint('api_core', __name__)
 auth_blueprint = Blueprint('auth', __name__)
 
 @api_blueprint.route('/ping', methods=['GET'])
@@ -159,35 +160,155 @@ def login_user():
     if items and check_password_hash(items[0]['password'], data['password']):
         jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
         tenant_id = items[0].get('tenant_id') or items[0].get('id')
-        token = jwt.encode(
+        user_id = items[0]['id']
+        access_token = jwt.encode(
             {
-                "id": items[0]['id'],
-                "user_id": items[0]['id'],
+                "id": user_id,
+                "user_id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
-                "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+                "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
             },
             jwt_secret,
             algorithm="HS256"
         )
+
+        # Generate and store refresh token (30-day expiry)
+        refresh_token_value = secrets.token_urlsafe(48)
+        refresh_token_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+        refresh_token_record = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "token": refresh_token_value,
+            "expires_at": refresh_token_expires.isoformat(),
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }
+        refresh_tokens_container.create_item(body=refresh_token_record)
+
         return jsonify({
             "message": "Login successful!",
             "user": {
-                "id": items[0]['id'],
+                "id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
                 "role": items[0].get('role', 'Sales')
             },
-            "token": token
+            "token": access_token,
+            "access_token": access_token,
+            "refresh_token": refresh_token_value
         }), 200
     else:
         return jsonify({"message": "Invalid username or password."}), 401
  
+@auth_blueprint.route('/auth/refresh', methods=['POST'])
+def refresh_token():
+    """
+    Exchange a valid refresh token for a new access token.
+    Input JSON: { "refresh_token": "<token>" }
+    Returns: { "access_token": "<new_jwt>" }
+    """
+    data = request.get_json(silent=True) or {}
+    incoming = data.get('refresh_token', '').strip()
+    if not incoming:
+        return jsonify({"error": "refresh_token is required"}), 400
+
+    # Look up token in DB
+    items = list(refresh_tokens_container.query_items(
+        query="SELECT * FROM c WHERE c.token = @token",
+        parameters=[{"name": "@token", "value": incoming}],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({"error": "Invalid refresh token"}), 401
+
+    record = items[0]
+
+    # Check expiry
+    expires_at = datetime.datetime.fromisoformat(record['expires_at'])
+    if datetime.datetime.utcnow() > expires_at:
+        # Expired — delete stale record
+        try:
+            refresh_tokens_container.delete_item(
+                item=record['id'], partition_key=record['user_id']
+            )
+        except Exception:
+            pass
+        return jsonify({"error": "Refresh token expired"}), 401
+
+    # Issue new access token
+    jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+
+    # Fetch user to get current role/username
+    user_items = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @uid",
+        parameters=[{"name": "@uid", "value": record['user_id']}],
+        enable_cross_partition_query=True
+    ))
+    if not user_items:
+        return jsonify({"error": "User not found"}), 401
+
+    user = user_items[0]
+    new_access_token = jwt.encode(
+        {
+            "id": record['user_id'],
+            "user_id": record['user_id'],
+            "tenant_id": record['tenant_id'],
+            "username": user.get('username', ''),
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+        },
+        jwt_secret,
+        algorithm="HS256"
+    )
+
+    # Rotate refresh token (optional but more secure)
+    new_refresh_value = secrets.token_urlsafe(48)
+    new_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    # Delete old record
+    try:
+        refresh_tokens_container.delete_item(
+            item=record['id'], partition_key=record['user_id']
+        )
+    except Exception:
+        pass
+    # Create rotated record
+    refresh_tokens_container.create_item(body={
+        "id": str(uuid.uuid4()),
+        "user_id": record['user_id'],
+        "tenant_id": record['tenant_id'],
+        "token": new_refresh_value,
+        "expires_at": new_expires.isoformat(),
+        "created_at": datetime.datetime.utcnow().isoformat()
+    })
+
+    return jsonify({
+        "access_token": new_access_token,
+        "token": new_access_token,
+        "refresh_token": new_refresh_value
+    }), 200
+
+
 @auth_blueprint.route('/auth/logout', methods=['POST'])
 def logout_user():
     """
-    Logout endpoint. Clients should remove the token on their side.
+    Logout endpoint. Revokes the provided refresh token from the DB.
+    Input JSON (optional): { "refresh_token": "<token>" }
     """
+    data = request.get_json(silent=True) or {}
+    incoming = data.get('refresh_token', '').strip()
+    if incoming:
+        items = list(refresh_tokens_container.query_items(
+            query="SELECT * FROM c WHERE c.token = @token",
+            parameters=[{"name": "@token", "value": incoming}],
+            enable_cross_partition_query=True
+        ))
+        for record in items:
+            try:
+                refresh_tokens_container.delete_item(
+                    item=record['id'], partition_key=record['user_id']
+                )
+            except Exception:
+                pass
     return jsonify({"message": "Logout successful."}), 200
 
 

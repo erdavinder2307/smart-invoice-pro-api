@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, date, timedelta
 
 from azure.communication.email import EmailClient
+from smart_invoice_pro.utils.notifications import create_notification
 
 logger = logging.getLogger(__name__)
 
@@ -23,22 +24,78 @@ REMINDER_STATUSES = {'Issued', 'Partially Paid'}
 
 
 def _load_reminder_config(settings_container, tenant_id):
-    """Return reminder config for tenant, falling back to sensible defaults."""
-    doc_id = f"{tenant_id}:reminder_settings"
-    items = list(settings_container.query_items(
+    """
+    Load reminder config for tenant.
+
+    Priority:
+    1. New ``automation_settings`` doc  (richer per-rule format)
+    2. Legacy ``reminder_settings`` doc (flat arrays)
+    3. Hard-coded defaults
+
+    Always returns an internal dict:
+      {
+        reminders_enabled: bool,
+        before_due_days:   list[int],
+        after_due_days:    list[int],
+        on_due_enabled:    bool,
+      }
+    """
+    # ── 1. New automation_settings format ─────────────────────────────────────
+    auto_id = f"{tenant_id}:automation_settings"
+    auto_items = list(settings_container.query_items(
         query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
         parameters=[
-            {"name": "@id",  "value": doc_id},
+            {"name": "@id",  "value": auto_id},
             {"name": "@tid", "value": tenant_id},
         ],
         enable_cross_partition_query=True
     ))
-    if items:
-        return items[0]
+    if auto_items:
+        doc = auto_items[0]
+        enabled       = doc.get('email_enabled', True)
+        reminders     = doc.get('payment_reminders', [])
+        before_days: list[int] = []
+        after_days:  list[int] = []
+        on_due_enabled = False
+        for r in reminders:
+            if not r.get('enabled', True):
+                continue
+            rtype = r.get('type')
+            days  = int(r.get('days', 0))
+            if rtype == 'before_due' and days > 0:
+                before_days.append(days)
+            elif rtype == 'after_due' and days > 0:
+                after_days.append(days)
+            elif rtype == 'on_due':
+                on_due_enabled = True
+        return {
+            'reminders_enabled': enabled,
+            'before_due_days':   before_days,
+            'after_due_days':    after_days,
+            'on_due_enabled':    on_due_enabled,
+        }
+
+    # ── 2. Legacy reminder_settings format ────────────────────────────────────
+    legacy_id = f"{tenant_id}:reminder_settings"
+    legacy_items = list(settings_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id",  "value": legacy_id},
+            {"name": "@tid", "value": tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if legacy_items:
+        cfg = legacy_items[0]
+        cfg.setdefault('on_due_enabled', False)
+        return cfg
+
+    # ── 3. Defaults ────────────────────────────────────────────────────────────
     return {
         'reminders_enabled': True,
         'before_due_days':   [3],
         'after_due_days':    [1, 3, 7],
+        'on_due_enabled':    True,
     }
 
 
@@ -163,6 +220,7 @@ def process_payment_reminders():
 
             before_days: list[int] = cfg.get('before_due_days', [])
             after_days:  list[int] = cfg.get('after_due_days', [])
+            on_due_enabled: bool   = cfg.get('on_due_enabled', False)
 
             for inv in tenant_invoices:
                 due_date_str = inv.get('due_date', '')
@@ -182,9 +240,16 @@ def process_payment_reminders():
                     *[('before_due', d, f"due in {d} day{'s' if d != 1 else ''}") for d in before_days],
                     *[('after_due',  d, f"overdue by {d} day{'s' if d != 1 else ''}") for d in after_days],
                 ]
+                if on_due_enabled:
+                    checks.append(('on_due', 0, 'due today'))
 
                 for reminder_type, offset, label in checks:
-                    expected_diff = offset if reminder_type == 'after_due' else -offset
+                    if reminder_type == 'on_due':
+                        expected_diff = 0
+                    elif reminder_type == 'after_due':
+                        expected_diff = offset
+                    else:  # before_due
+                        expected_diff = -offset
 
                     if days_diff != expected_diff:
                         continue
@@ -215,6 +280,14 @@ def process_payment_reminders():
 
                     if ok:
                         sent_count += 1
+                        create_notification(
+                            tenant_id=inv.get('tenant_id'),
+                            notification_type='reminder_sent',
+                            title='Payment Reminder Sent',
+                            message=f"A payment reminder was sent for invoice {inv.get('invoice_number', inv.get('id', ''))} ({label}).",
+                            entity_id=inv.get('id'),
+                            entity_type='invoice',
+                        )
                     else:
                         skipped_count += 1
 

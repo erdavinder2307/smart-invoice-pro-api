@@ -2,6 +2,10 @@ from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import customers_container
 from smart_invoice_pro.utils.cosmos_client import invoices_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
+from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
+from smart_invoice_pro.utils.notifications import create_notification
+from smart_invoice_pro.utils.audit_logger import log_audit
+import copy
 import uuid
 from flasgger import swag_from
 from datetime import datetime, timedelta
@@ -243,6 +247,23 @@ def create_customer():
     customers_container.create_item(body=item)
     # Remove password from response for security
     response_item = sanitize_item(item)
+    dispatch_webhook_event(
+        tenant_id=request.tenant_id,
+        event="customer.created",
+        payload={"customer_id": item["id"], "name": item.get("display_name"),
+                 "email": item.get("email")},
+    )
+    create_notification(
+        tenant_id=request.tenant_id,
+        notification_type="customer_created",
+        title="Customer Added",
+        message=f"{item.get('display_name', 'A new customer')} has been added to your contacts.",
+        entity_id=item["id"],
+        entity_type="customer",
+        user_id=getattr(request, 'user_id', None),
+    )
+    log_audit("customer", "create", item["id"], None, item,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     return jsonify(response_item), 201
 
 @customers_blueprint.route('/customers', methods=['GET'])
@@ -327,6 +348,59 @@ def get_customer(customer_id):
     customer = items[0]
     response_item = sanitize_item(customer)
     return jsonify(response_item)
+
+
+@customers_blueprint.route('/customers/<customer_id>/overview', methods=['GET'])
+def get_customer_overview(customer_id):
+    """
+    Get customer detail with invoice history and financial summary.
+    """
+    # Fetch customer
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(customers_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": customer_id}],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Customer not found'}), 404
+    customer = items[0]
+    if customer.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    # Fetch invoices for this customer
+    inv_query = (
+        "SELECT c.id, c.invoice_number, c.issue_date, c.due_date, "
+        "c.total_amount, c.amount_paid, c.balance_due, c.status "
+        "FROM c WHERE c.customer_id = @cid AND c.tenant_id = @tid "
+        "ORDER BY c.created_at DESC"
+    )
+    invoices = list(invoices_container.query_items(
+        query=inv_query,
+        parameters=[
+            {"name": "@cid", "value": customer_id},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True
+    ))
+
+    total_invoiced = sum(float(inv.get('total_amount') or 0) for inv in invoices)
+    total_paid = sum(float(inv.get('amount_paid') or 0) for inv in invoices)
+    outstanding = sum(
+        float(inv.get('balance_due') or 0)
+        for inv in invoices
+        if inv.get('status') not in ('Paid', 'Cancelled', 'Void')
+    )
+
+    return jsonify({
+        'customer': sanitize_item(customer),
+        'invoices': invoices,
+        'total_invoiced': round(total_invoiced, 2),
+        'total_paid': round(total_paid, 2),
+        'outstanding': round(outstanding, 2),
+        'invoice_count': len(invoices),
+    }), 200
+
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['PUT'])
 @swag_from({
@@ -414,6 +488,7 @@ def update_customer(customer_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    before_snapshot = copy.deepcopy(item)
     
     # Validate email format if being updated
     if 'email' in data and not validate_email(data['email']):
@@ -476,6 +551,8 @@ def update_customer(customer_id):
     
     item['updated_at'] = datetime.utcnow().isoformat()
     customers_container.upsert_item(body=item)
+    log_audit("customer", "update", customer_id, before_snapshot, item,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     
     # Remove password from response for security
     response_item = sanitize_item(item)
@@ -517,6 +594,8 @@ def delete_customer(customer_id):
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
     # Cosmos DB partition key for customers is /customer_id, so use the value of 'customer_id' from the item
+    log_audit("customer", "delete", customer_id, item, None,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     customers_container.delete_item(item=item['id'], partition_key=item['customer_id'])
     return jsonify({'message': 'Customer deleted'})
 

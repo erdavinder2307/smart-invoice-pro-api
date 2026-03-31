@@ -1,6 +1,10 @@
 from flask import Blueprint, request, jsonify, make_response
 from smart_invoice_pro.utils.cosmos_client import invoices_container, get_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
+from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
+from smart_invoice_pro.utils.notifications import create_notification
+from smart_invoice_pro.utils.audit_logger import log_audit
+import copy
 import uuid
 import secrets
 import base64
@@ -267,6 +271,23 @@ def create_invoice():
             except Exception as e:
                 print(f"Error updating stock for product {invoice_item.get('product_id')}: {str(e)}")
     
+    dispatch_webhook_event(
+        tenant_id=request.tenant_id,
+        event="invoice.created",
+        payload={"invoice_id": item["id"], "invoice_number": item.get("invoice_number"),
+                 "total": item.get("total"), "status": item.get("status")},
+    )
+    create_notification(
+        tenant_id=request.tenant_id,
+        notification_type="invoice_created",
+        title="Invoice Created",
+        message=f"Invoice {item.get('invoice_number', item['id'])} for ₹{item.get('total_amount', 0):,.2f} has been created.",
+        entity_id=item["id"],
+        entity_type="invoice",
+        user_id=getattr(request, 'user_id', None),
+    )
+    log_audit("invoice", "create", item["id"], None, item,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     return jsonify(sanitize_item(item)), 201
 
 @api_blueprint.route('/invoices', methods=['GET'])
@@ -495,6 +516,7 @@ def update_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    before_snapshot = copy.deepcopy(item)
     # Update all fields from the request (PUT = full replacement)
     for field in [
         'invoice_number', 'customer_id', 'issue_date', 'due_date', 'payment_terms',
@@ -507,6 +529,8 @@ def update_invoice(invoice_id):
             item[field] = data[field]
     item['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.replace_item(item=item['id'], body=item)
+    log_audit("invoice", "update", invoice_id, before_snapshot, item,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     return jsonify(sanitize_item(item))
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['DELETE'])
@@ -544,6 +568,8 @@ def delete_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    log_audit("invoice", "delete", invoice_id, item, None,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     invoices_container.delete_item(item=item['id'], partition_key=item['customer_id'])
     return jsonify({'message': 'Invoice deleted'})
 
@@ -635,10 +661,13 @@ def patch_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    before_snapshot = copy.deepcopy(item)
     for k, v in data.items():
         item[k] = v
     item['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.replace_item(item=item['id'], body=item)
+    log_audit("invoice", "update", invoice_id, before_snapshot, item,
+              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     return jsonify({'message': 'Invoice updated', 'invoice': sanitize_item(item)})
 
 @api_blueprint.route('/invoices/next-number', methods=['GET'])
@@ -883,6 +912,7 @@ def record_payment(invoice_id):
             return jsonify({'error': 'Invoice not found'}), 404
 
         inv = items[0]
+        before_payment_snapshot = copy.deepcopy(inv)
 
         if inv.get('status') == 'Cancelled':
             return jsonify({'error': 'Cannot record payment on a cancelled invoice'}), 400
@@ -923,6 +953,27 @@ def record_payment(invoice_id):
         inv['updated_at']      = datetime.utcnow().isoformat()
 
         invoices_container.replace_item(item=inv['id'], body=inv)
+        log_audit("payment", "update", invoice_id, before_payment_snapshot, inv,
+                  user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
+
+        if inv['status'] == 'Paid':
+            dispatch_webhook_event(
+                tenant_id=request.tenant_id,
+                event="invoice.paid",
+                payload={"invoice_id": inv["id"],
+                         "invoice_number": inv.get("invoice_number"),
+                         "total": inv.get("total_amount"),
+                         "amount_paid": new_amount_paid},
+            )
+            create_notification(
+                tenant_id=request.tenant_id,
+                notification_type="payment_received",
+                title="Payment Received",
+                message=f"Invoice {inv.get('invoice_number', inv['id'])} has been fully paid (₹{new_amount_paid:,.2f}).",
+                entity_id=inv["id"],
+                entity_type="invoice",
+                user_id=getattr(request, 'user_id', None),
+            )
 
         return jsonify({
             'message':      'Payment recorded successfully',

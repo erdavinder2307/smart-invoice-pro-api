@@ -7,8 +7,8 @@ from datetime import datetime
 bank_accounts_blueprint = Blueprint('bank_accounts', __name__)
 
 def get_user_from_request():
-    """Extract user info from request headers (consistent with profile_api pattern)."""
-    user_id = request.headers.get('X-User-Id')
+    """Extract user info from JWT token context set by auth middleware."""
+    user_id = getattr(request, 'user_id', None)
     if not user_id:
         return None
     return {'id': user_id}
@@ -249,3 +249,65 @@ def get_bank_account(account_id):
         }), 200
     except Exception as e:
         return jsonify({'message': f'Error fetching bank account: {str(e)}'}), 500
+
+
+@bank_accounts_blueprint.route('/bank-accounts/<account_id>', methods=['PUT'])
+def update_bank_account(account_id):
+    """
+    Update a bank account's name, bank name, or account type.
+    """
+    try:
+        current_user = get_user_from_request()
+        if not current_user:
+            return jsonify({'message': 'X-User-Id header is required'}), 401
+        user_id = current_user['id']
+
+        query = f"SELECT * FROM c WHERE c.id = '{account_id}' AND c.user_id = '{user_id}'"
+        items = list(bank_accounts_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        if not items:
+            return jsonify({'message': 'Bank account not found or access denied'}), 404
+
+        account = items[0]
+        data = request.get_json() or {}
+
+        updatable = ['bank_name', 'account_name', 'account_type']
+        for field in updatable:
+            if field in data:
+                account[field] = data[field]
+
+        account['updated_at'] = datetime.utcnow().isoformat() + 'Z'
+        bank_accounts_container.replace_item(item=account['id'], body=account)
+
+        return jsonify(account), 200
+    except Exception as e:
+        return jsonify({'message': f'Error updating bank account: {str(e)}'}), 500
+
+
+@bank_accounts_blueprint.route('/bank-accounts/<account_id>', methods=['DELETE'])
+def delete_bank_account(account_id):
+    """
+    Delete a bank account.
+    """
+    try:
+        current_user = get_user_from_request()
+        if not current_user:
+            return jsonify({'message': 'X-User-Id header is required'}), 401
+        user_id = current_user['id']
+
+        query = f"SELECT * FROM c WHERE c.id = '{account_id}' AND c.user_id = '{user_id}'"
+        items = list(bank_accounts_container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        if not items:
+            return jsonify({'message': 'Bank account not found or access denied'}), 404
+
+        account = items[0]
+        bank_accounts_container.delete_item(item=account['id'], partition_key=account['id'])
+
+        return jsonify({'message': 'Bank account deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'message': f'Error deleting bank account: {str(e)}'}), 500

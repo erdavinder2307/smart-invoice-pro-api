@@ -33,4 +33,7 @@ purchase_orders_container = get_container("purchase_orders", "/vendor_id")
 bills_container = get_container("bills", "/vendor_id")
 expenses_container = get_container("expenses", "/id")
 settings_container = get_container("settings", "/tenant_id")
+refresh_tokens_container = get_container("refresh_tokens", "/user_id")
+notifications_container = get_container("notifications", "/tenant_id")
+audit_logs_container = get_container("audit_logs", "/tenant_id")
 

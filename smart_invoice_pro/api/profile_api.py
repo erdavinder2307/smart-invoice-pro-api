@@ -7,16 +7,13 @@ from datetime import datetime
 profile_blueprint = Blueprint('profile', __name__)
 
 def get_user_from_request():
-    """Extract user info from request headers (following existing auth pattern)"""
-    # In production, this would validate JWT token from Authorization header
-    # For now, we'll get user_id from headers as done in other endpoints
-    user_id = request.headers.get('X-User-Id')
-    username = request.headers.get('X-Username')
+    """Extract user info from JWT token context set by auth middleware"""
+    user_id = getattr(request, 'user_id', None)
     
     if not user_id:
         return None
     
-    return {'id': user_id, 'username': username}
+    return {'id': user_id, 'username': getattr(request, 'username', None)}
 
 @profile_blueprint.route('/profile/me', methods=['GET'])
 @swag_from({

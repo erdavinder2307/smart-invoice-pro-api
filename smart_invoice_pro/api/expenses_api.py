@@ -23,7 +23,7 @@ def allowed_file(filename):
 # ─────────────────────────────────────────────────────────────────────────────
 # CREATE EXPENSE
 # ─────────────────────────────────────────────────────────────────────────────
-@expenses_blueprint.route('', methods=['POST'])
+@expenses_blueprint.route('/expenses', methods=['POST'])
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Create a new expense',
@@ -115,7 +115,7 @@ def create_expense():
 # ─────────────────────────────────────────────────────────────────────────────
 # GET ALL EXPENSES
 # ─────────────────────────────────────────────────────────────────────────────
-@expenses_blueprint.route('', methods=['GET'])
+@expenses_blueprint.route('/expenses', methods=['GET'])
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Get all expenses',
@@ -184,7 +184,7 @@ def get_expenses():
 # ─────────────────────────────────────────────────────────────────────────────
 # GET EXPENSE BY ID
 # ─────────────────────────────────────────────────────────────────────────────
-@expenses_blueprint.route('/<expense_id>', methods=['GET'])
+@expenses_blueprint.route('/expenses/<expense_id>', methods=['GET'])
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Get expense by ID',
@@ -220,7 +220,7 @@ def get_expense(expense_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE EXPENSE
 # ─────────────────────────────────────────────────────────────────────────────
-@expenses_blueprint.route('/<expense_id>', methods=['PUT'])
+@expenses_blueprint.route('/expenses/<expense_id>', methods=['PUT'])
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Update an expense',
@@ -323,7 +323,7 @@ def update_expense(expense_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # DELETE EXPENSE
 # ─────────────────────────────────────────────────────────────────────────────
-@expenses_blueprint.route('/<expense_id>', methods=['DELETE'])
+@expenses_blueprint.route('/expenses/<expense_id>', methods=['DELETE'])
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Delete an expense',
@@ -374,7 +374,7 @@ def delete_expense(expense_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # GET EXPENSE STATISTICS
 # ─────────────────────────────────────────────────────────────────────────────
-@expenses_blueprint.route('/stats/summary', methods=['GET'])
+@expenses_blueprint.route('/expenses/stats/summary', methods=['GET'])
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Get expense statistics',
