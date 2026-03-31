@@ -29,8 +29,12 @@ jobs:
       
       - name: Install dependencies
         run: pip install -r requirements.txt
-        
-      # Optional: Add step to run tests here (PyTest, Django test suites, etc.)
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -q --tb=short --co -q 2>&1 | tail -5 && python -m pytest tests/ -q --tb=short
+        env:
+          JWT_SECRET_KEY: "your_secret_key"
+          SECRET_KEY: "your_secret_key"
 
       - name: Zip artifact for deployment
         run: zip release.zip ./* -r
