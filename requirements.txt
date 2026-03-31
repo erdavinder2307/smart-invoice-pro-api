@@ -19,3 +19,4 @@ fastapi==0.111.0
 sqlalchemy==2.0.30
 reportlab>=3.6.0
 Flask-Limiter==3.5.0
+faker>=20.0.0

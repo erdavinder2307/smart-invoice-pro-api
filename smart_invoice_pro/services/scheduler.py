@@ -6,6 +6,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import uuid
 import logging
+from smart_invoice_pro.services.reminder_job import process_payment_reminders
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -182,6 +183,17 @@ def start_scheduler(app):
         minute=5,
         id='recurring_invoice_job',
         name='Generate Recurring Invoices',
+        replace_existing=True
+    )
+
+    # Daily payment reminder job — runs at 09:05 AM
+    scheduler.add_job(
+        func=process_payment_reminders,
+        trigger='cron',
+        hour=9,
+        minute=5,
+        id='payment_reminder_job',
+        name='Send Payment Reminders',
         replace_existing=True
     )
     

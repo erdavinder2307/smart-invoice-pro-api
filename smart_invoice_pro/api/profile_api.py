@@ -220,3 +220,44 @@ def update_profile():
         # Remove internal Cosmos DB fields from response
         safe_profile = {k: v for k, v in profile.items() if k not in ['password', '_rid', '_self', '_etag', '_attachments', '_ts']}
         return jsonify({'message': 'Profile created successfully', 'profile': safe_profile}), 201
+
+
+# ── POST /profile/device-token — register FCM push token ─────────────────────
+@profile_blueprint.route('/profile/device-token', methods=['POST'])
+def register_device_token():
+    """Save an FCM device token for push notification delivery."""
+    user_id = getattr(request, 'user_id', None) or request.headers.get('X-User-Id')
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True) or {}
+    token = data.get('token')
+    platform = data.get('platform', 'android')
+
+    if not token:
+        return jsonify({'error': 'token is required'}), 400
+
+    now = datetime.utcnow().isoformat()
+    query = (
+        "SELECT * FROM c WHERE c.type = 'device_token' "
+        f"AND c.user_id = '{user_id}' AND c.platform = '{platform}'"
+    )
+    existing = list(users_container.query_items(query=query, enable_cross_partition_query=True))
+
+    if existing:
+        record = existing[0]
+        record['token'] = token
+        record['updated_at'] = now
+        users_container.upsert_item(body=record)
+    else:
+        users_container.create_item(body={
+            'id': str(uuid.uuid4()),
+            'type': 'device_token',
+            'user_id': user_id,
+            'platform': platform,
+            'token': token,
+            'created_at': now,
+            'updated_at': now,
+        })
+
+    return jsonify({'message': 'Device token registered'}), 200

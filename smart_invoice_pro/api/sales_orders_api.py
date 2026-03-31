@@ -1,5 +1,6 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from smart_invoice_pro.utils.cosmos_client import sales_orders_container, invoices_container
+from smart_invoice_pro.api.auth_middleware import token_required
 import uuid
 from flasgger import swag_from
 from datetime import datetime
@@ -98,6 +99,7 @@ def validate_sales_order_data(data, is_update=False):
         }
     }
 })
+@token_required
 def create_sales_order():
     """Create a new sales order"""
     data = request.get_json()
@@ -111,6 +113,7 @@ def create_sales_order():
     
     item = {
         'id': str(uuid.uuid4()),
+        'tenant_id': request.tenant_id,
         'so_number': data['so_number'],
         'customer_id': data['customer_id'],
         'customer_name': data.get('customer_name', ''),
@@ -174,27 +177,32 @@ def create_sales_order():
         }
     }
 })
+@token_required
 def get_sales_orders():
     """Get all sales orders with optional filters"""
     try:
         status_filter = request.args.get('status')
         customer_id_filter = request.args.get('customer_id', type=int)
         
-        query = "SELECT * FROM c"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         conditions = []
+        parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
         
         if status_filter:
-            conditions.append(f"c.status = '{status_filter}'")
+            conditions.append("c.status = @status")
+            parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
-            conditions.append(f"c.customer_id = {customer_id_filter}")
+            conditions.append("c.customer_id = @customer_id")
+            parameters.append({"name": "@customer_id", "value": customer_id_filter})
         
         if conditions:
-            query += " WHERE " + " AND ".join(conditions)
+            query += " AND " + " AND ".join(conditions)
         
         query += " ORDER BY c.created_at DESC"
         
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=parameters,
             enable_cross_partition_query=True
         ))
         
@@ -223,12 +231,17 @@ def get_sales_orders():
         }
     }
 })
+@token_required
 def get_sales_order(so_id):
     """Get a sales order by ID"""
     try:
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -290,6 +303,7 @@ def get_sales_order(so_id):
         }
     }
 })
+@token_required
 def update_sales_order(so_id):
     """Update a sales order"""
     data = request.get_json()
@@ -301,9 +315,13 @@ def update_sales_order(so_id):
     
     try:
         # Fetch existing sales order
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -356,13 +374,18 @@ def update_sales_order(so_id):
         }
     }
 })
+@token_required
 def delete_sales_order(so_id):
     """Delete a sales order"""
     try:
         # Fetch the sales order to get partition key
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -428,6 +451,7 @@ def delete_sales_order(so_id):
         }
     }
 })
+@token_required
 def convert_so_to_invoice(so_id):
     """Convert a sales order to an invoice"""
     data = request.get_json()
@@ -438,9 +462,13 @@ def convert_so_to_invoice(so_id):
     
     try:
         # Fetch the sales order
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -457,6 +485,7 @@ def convert_so_to_invoice(so_id):
         now = datetime.utcnow().isoformat()
         invoice = {
             'id': str(uuid.uuid4()),
+            'tenant_id': request.tenant_id,
             'invoice_number': invoice_number,
             'customer_id': so['customer_id'],
             'customer_name': so.get('customer_name', ''),
@@ -552,6 +581,7 @@ def convert_so_to_invoice(so_id):
         }
     }
 })
+@token_required
 def convert_so_to_po(so_id):
     """Convert a sales order to a purchase order"""
     data = request.get_json()
@@ -562,9 +592,13 @@ def convert_so_to_po(so_id):
     
     try:
         # Fetch the sales order
-        query = f"SELECT * FROM c WHERE c.id = '{so_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -613,12 +647,14 @@ def convert_so_to_po(so_id):
         }
     }
 })
+@token_required
 def get_next_so_number():
     """Get the next available sales order number"""
     try:
-        query = "SELECT * FROM c ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
         items = list(sales_orders_container.query_items(
             query=query,
+            parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
             enable_cross_partition_query=True
         ))
         

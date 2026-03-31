@@ -201,7 +201,7 @@ def create_customer():
         'pan': data.get('pan', '').upper() if data.get('pan') else '',
         'tax_preference': data.get('tax_preference', 'taxable'),
         'currency': data.get('currency', 'INR'),
-        'opening_balance': float(data.get('opening_balance', 0)),
+        'opening_balance': float(data['opening_balance']) if data.get('opening_balance') not in (None, '', False) else 0.0,
         'payment_terms': data.get('payment_terms', 'due_on_receipt'),
         'website_url': data.get('website_url', ''),
         'department': data.get('department', ''),

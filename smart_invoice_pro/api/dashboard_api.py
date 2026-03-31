@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
 from flasgger import swag_from
 from datetime import datetime, timedelta
-from smart_invoice_pro.utils.cosmos_client import customers_container, products_container, invoices_container, get_container
+from smart_invoice_pro.utils.cosmos_client import customers_container, products_container, invoices_container, bills_container, get_container
 
 stock_container = get_container("stock", "/product_id")
 dashboard_blueprint = Blueprint('dashboard', __name__)
@@ -34,11 +34,47 @@ def dashboard_summary():
         invoices = list(invoices_container.read_all_items())
         total_invoices = len(invoices)
         total_revenue = sum(float(inv.get('total_amount', 0)) for inv in invoices)
+
+        # Receivables: balance_due on unpaid/partially-paid invoices
+        receivable_statuses = {'issued', 'partially paid', 'overdue', 'sent'}
+        total_receivables = sum(
+            float(inv.get('balance_due', inv.get('total_amount', 0)))
+            for inv in invoices
+            if inv.get('status', '').lower() in receivable_statuses
+        )
+
+        # Overdue: due_date is past and invoice is still open
+        today = datetime.utcnow().date()
+        overdue_count = 0
+        for inv in invoices:
+            if inv.get('status', '').lower() not in {'issued', 'partially paid', 'sent', 'overdue'}:
+                continue
+            due_str = inv.get('due_date')
+            if not due_str:
+                continue
+            try:
+                if datetime.fromisoformat(due_str[:10]).date() < today:
+                    overdue_count += 1
+            except Exception:
+                pass
+
+        # Payables: balance_due on unpaid bills
+        payable_statuses = {'unpaid', 'partially paid', 'overdue'}
+        bills = list(bills_container.read_all_items())
+        total_payables = sum(
+            float(b.get('balance_due', b.get('total_amount', 0)))
+            for b in bills
+            if b.get('payment_status', '').lower() in payable_statuses
+        )
+
         return jsonify({
             'total_customers': total_customers,
             'total_products': total_products,
             'total_invoices': total_invoices,
-            'total_revenue': total_revenue
+            'total_revenue': total_revenue,
+            'total_receivables': total_receivables,
+            'total_payables': total_payables,
+            'overdue_count': overdue_count,
         })
     except Exception as e:
         return jsonify({'error': f'Error fetching dashboard summary: {str(e)}'}), 500
@@ -142,3 +178,32 @@ def dashboard_monthly_revenue():
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': f'Error fetching monthly revenue: {str(e)}'}), 500
+
+
+@dashboard_blueprint.route('/dashboard/recent-invoices', methods=['GET'])
+def dashboard_recent_invoices():
+    """Return the 10 most recent invoices for the dashboard activity feed."""
+    try:
+        limit = int(request.args.get('limit', 10))
+        invoices = list(invoices_container.read_all_items())
+        # Sort by created_at or issue_date descending
+        def sort_key(inv):
+            ds = inv.get('created_at') or inv.get('issue_date') or ''
+            return ds[:19]
+        invoices.sort(key=sort_key, reverse=True)
+        recent = invoices[:limit]
+        result = []
+        for inv in recent:
+            result.append({
+                'id': inv.get('id'),
+                'invoice_number': inv.get('invoice_number', ''),
+                'customer_name': inv.get('customer_name', ''),
+                'total_amount': float(inv.get('total_amount', 0)),
+                'balance_due': float(inv.get('balance_due', inv.get('total_amount', 0))),
+                'status': inv.get('status', ''),
+                'issue_date': (inv.get('issue_date') or inv.get('created_at') or '')[:10],
+                'due_date': (inv.get('due_date') or '')[:10],
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': f'Error fetching recent invoices: {str(e)}'}), 500

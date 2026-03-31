@@ -189,3 +189,70 @@ def logout_user():
     Logout endpoint. Clients should remove the token on their side.
     """
     return jsonify({"message": "Logout successful."}), 200
+
+
+@auth_blueprint.route('/auth/delete-account', methods=['DELETE'])
+def delete_account():
+    """
+    Permanently delete the authenticated user's account and all associated data.
+    Requires a valid Bearer token (validated by enforce_api_auth before_request).
+    """
+    from smart_invoice_pro.utils.cosmos_client import (
+        invoices_container, customers_container, products_container,
+        stock_container, bank_accounts_container, quotes_container,
+        recurring_profiles_container, sales_orders_container,
+        vendors_container, purchase_orders_container, bills_container,
+        expenses_container, settings_container
+    )
+
+    user_id = request.user_id
+    tenant_id = request.tenant_id
+
+    def _bulk_delete(container, partition_key_field):
+        """Query all items for this tenant and delete each one."""
+        try:
+            items = list(container.query_items(
+                query="SELECT * FROM c WHERE c.tenant_id = @tid",
+                parameters=[{"name": "@tid", "value": tenant_id}],
+                enable_cross_partition_query=True
+            ))
+            for item in items:
+                pk_val = item.get(partition_key_field) or item.get('id')
+                try:
+                    container.delete_item(item=item['id'], partition_key=pk_val)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    _bulk_delete(invoices_container, 'customer_id')
+    _bulk_delete(customers_container, 'customer_id')
+    _bulk_delete(products_container, 'product_id')
+    _bulk_delete(stock_container, 'product_id')
+    _bulk_delete(bank_accounts_container, 'user_id')
+    _bulk_delete(quotes_container, 'customer_id')
+    _bulk_delete(recurring_profiles_container, 'customer_id')
+    _bulk_delete(sales_orders_container, 'customer_id')
+    _bulk_delete(vendors_container, 'vendor_id')
+    _bulk_delete(purchase_orders_container, 'vendor_id')
+    _bulk_delete(bills_container, 'vendor_id')
+    _bulk_delete(expenses_container, 'id')
+    _bulk_delete(settings_container, 'tenant_id')
+
+    # Delete the user record (partition key field: userid)
+    try:
+        items = list(users_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": user_id}],
+            enable_cross_partition_query=True
+        ))
+        if items:
+            u = items[0]
+            users_container.delete_item(
+                item=u['id'],
+                partition_key=u.get('userid', u['id'])
+            )
+    except Exception:
+        pass
+
+    return jsonify({"message": "Account deleted successfully."}), 200

@@ -134,6 +134,7 @@ def create_quote():
         'items': data.get('items', []),
         'converted_to_invoice_id': data.get('converted_to_invoice_id', None),
         'converted_to_sales_order_id': data.get('converted_to_sales_order_id', None),
+        'tenant_id': request.tenant_id,
         'created_at': now,
         'updated_at': now
     }
@@ -174,26 +175,25 @@ def create_quote():
     }
 })
 def get_quotes():
-    """Get all quotes with optional filters"""
     try:
         status_filter = request.args.get('status')
-        customer_id_filter = request.args.get('customer_id', type=int)
+        customer_id_filter = request.args.get('customer_id')
         
-        query = "SELECT * FROM c"
-        conditions = []
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+        parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
         
         if status_filter:
-            conditions.append(f"c.status = '{status_filter}'")
+            query += " AND c.status = @status"
+            parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
-            conditions.append(f"c.customer_id = {customer_id_filter}")
-        
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
+            query += " AND c.customer_id = @customer_id"
+            parameters.append({"name": "@customer_id", "value": customer_id_filter})
         
         query += " ORDER BY c.created_at DESC"
         
         items = list(quotes_container.query_items(
             query=query,
+            parameters=parameters,
             enable_cross_partition_query=True
         ))
         
@@ -225,16 +225,21 @@ def get_quotes():
 def get_quote(quote_id):
     """Get a specific quote by ID"""
     try:
-        query = f"SELECT * FROM c WHERE c.id = '{quote_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id"
         items = list(quotes_container.query_items(
             query=query,
+            parameters=[{"name": "@id", "value": quote_id}],
             enable_cross_partition_query=True
         ))
         
         if not items:
             return jsonify({"error": "Quote not found"}), 404
+            
+        quote = items[0]
+        if quote.get('tenant_id') != request.tenant_id:
+            return jsonify({"error": "Forbidden"}), 403
         
-        return jsonify(items[0]), 200
+        return jsonify(quote), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch quote: {str(e)}"}), 500
 
@@ -284,16 +289,19 @@ def update_quote(quote_id):
     
     try:
         # Fetch existing quote
-        query = f"SELECT * FROM c WHERE c.id = '{quote_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id"
         items = list(quotes_container.query_items(
             query=query,
+            parameters=[{"name": "@id", "value": quote_id}],
             enable_cross_partition_query=True
         ))
         
         if not items:
             return jsonify({"error": "Quote not found"}), 404
-        
+            
         existing_quote = items[0]
+        if existing_quote.get('tenant_id') != request.tenant_id:
+            return jsonify({"error": "Forbidden"}), 403
         
         # Update fields
         for key, value in data.items():
@@ -337,9 +345,10 @@ def delete_quote(quote_id):
     """Delete a quote"""
     try:
         # Fetch existing quote to get partition key
-        query = f"SELECT * FROM c WHERE c.id = '{quote_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id"
         items = list(quotes_container.query_items(
             query=query,
+            parameters=[{"name": "@id", "value": quote_id}],
             enable_cross_partition_query=True
         ))
         
@@ -347,6 +356,8 @@ def delete_quote(quote_id):
             return jsonify({"error": "Quote not found"}), 404
         
         quote = items[0]
+        if quote.get('tenant_id') != request.tenant_id:
+            return jsonify({"error": "Forbidden"}), 403
         
         # Delete the quote
         quotes_container.delete_item(
@@ -413,16 +424,19 @@ def convert_quote(quote_id):
     
     try:
         # Fetch the quote
-        query = f"SELECT * FROM c WHERE c.id = '{quote_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id"
         items = list(quotes_container.query_items(
             query=query,
+            parameters=[{"name": "@id", "value": quote_id}],
             enable_cross_partition_query=True
         ))
         
         if not items:
             return jsonify({"error": "Quote not found"}), 404
-        
+            
         quote = items[0]
+        if quote.get('tenant_id') != request.tenant_id:
+            return jsonify({"error": "Forbidden"}), 403
         
         # Check if already converted
         if quote.get('status') == 'Converted':
@@ -471,6 +485,7 @@ def convert_quote(quote_id):
                 'salesperson': quote.get('salesperson', ''),
                 'items': quote.get('items', []),
                 'converted_from_quote_id': quote_id,
+                'tenant_id': request.tenant_id,
                 'created_at': now,
                 'updated_at': now
             }
@@ -524,6 +539,7 @@ def convert_quote(quote_id):
                 'salesperson': quote.get('salesperson', ''),
                 'items': quote.get('items', []),
                 'converted_from_quote_id': quote_id,
+                'tenant_id': request.tenant_id,
                 'created_at': now,
                 'updated_at': now
             }
@@ -566,9 +582,10 @@ def convert_quote(quote_id):
 def get_next_quote_number():
     """Generate the next quote number"""
     try:
-        query = "SELECT * FROM c ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
         items = list(quotes_container.query_items(
             query=query,
+            parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
             enable_cross_partition_query=True
         ))
         
