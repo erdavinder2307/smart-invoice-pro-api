@@ -161,6 +161,10 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.gst_api.customers_container",
     # Cron (uses get_container inside function, so mock the factory)
     "smart_invoice_pro.api.cron_jobs.get_container",
+    # Admin API
+    "smart_invoice_pro.api.admin_api.tenants_container",
+    "smart_invoice_pro.api.admin_api.users_container",
+    "smart_invoice_pro.api.admin_api.feature_flags_container",
 ]
 
 

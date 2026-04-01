@@ -167,6 +167,7 @@ def login_user():
                 "user_id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
+                "is_super_admin": bool(items[0].get('is_super_admin', False)),
                 "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
             },
             jwt_secret,
@@ -192,7 +193,8 @@ def login_user():
                 "id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
-                "role": items[0].get('role', 'Sales')
+                "role": items[0].get('role', 'Sales'),
+                "is_super_admin": bool(items[0].get('is_super_admin', False))
             },
             "token": access_token,
             "access_token": access_token,

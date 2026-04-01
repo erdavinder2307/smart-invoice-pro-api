@@ -11,6 +11,7 @@ Flask-based REST API backend for Smart Invoice Pro, using Azure Cosmos DB for st
 - **Authentication**: JWT Bearer tokens (HS256)
 - **All blueprints** are registered in `smart_invoice_pro/app.py` with `url_prefix="/api"`
 - **Auth middleware**: `smart_invoice_pro/api/auth_middleware.py` — `enforce_api_auth()` runs as `@app.before_request`, decodes JWT, and sets `request.user_id` and `request.tenant_id`
+- **Super admin decorator**: `@super_admin_required` in `auth_middleware.py` — checks `is_super_admin` in JWT payload, returns 403 if missing
 
 ## Key Conventions
 
@@ -42,6 +43,19 @@ user_id = getattr(request, 'user_id', None)
 user_id = request.headers.get('X-User-Id')  # DON'T DO THIS
 ```
 
+### Super Admin Routes
+
+For admin-only endpoints, apply the `@super_admin_required` decorator after the route decorator. The JWT must contain `is_super_admin: true`.
+
+```python
+from smart_invoice_pro.api.auth_middleware import super_admin_required
+
+@admin_blueprint.route('/admin/tenants', methods=['GET'])
+@super_admin_required
+def list_tenants():
+    ...
+```
+
 ### Cosmos DB Container Access
 
 Import pre-created container instances from `cosmos_client.py`. Do NOT call `get_container()` directly — it requires a partition key argument and creates/gets the container each time.
@@ -49,6 +63,11 @@ Import pre-created container instances from `cosmos_client.py`. Do NOT call `get
 ```python
 # CORRECT — import pre-created containers
 from smart_invoice_pro.utils.cosmos_client import invoices_container, customers_container
+
+# Available containers: users, invoices, customers, products, stock,
+# bank_accounts, quotes, recurring_profiles, sales_orders, vendors,
+# purchase_orders, bills, expenses, settings, refresh_tokens,
+# notifications, audit_logs, tenants, feature_flags
 
 # WRONG — get_container requires 2 args (name, partition_key)
 container = get_container('invoices')  # DON'T DO THIS — missing partition_key
@@ -60,7 +79,7 @@ When adding a new blueprint:
 1. Define it in `smart_invoice_pro/api/<name>_api.py`
 2. Import and register in `smart_invoice_pro/app.py` with `url_prefix="/api"`
 3. Ensure the blueprint name (first arg to `Blueprint()`) is unique across all blueprints
-4. Auth-exempt paths are configured in `auth_middleware.py`
+4. Auth-exempt paths are configured in `auth_middleware.py` (current exempt: `/api/auth/login`, `/api/auth/register`, `/api/auth/refresh`, `/api/ping`)
 
 ## API Testing
 
@@ -73,7 +92,7 @@ cd smart-invoice-pro-api-2
 bash test_all_apis.sh
 ```
 
-The script automatically generates a fresh JWT token and tests all GET endpoints across all 34 blueprints.
+The script automatically generates a fresh JWT token and tests all GET endpoints across all 35 blueprints.
 
 ### When to Run Tests
 
@@ -118,7 +137,7 @@ python main.py
 # Runs on http://127.0.0.1:5001
 ```
 
-## API Endpoint Map (34 Blueprints, 56+ GET endpoints)
+## API Endpoint Map (35 Blueprints, 56+ GET endpoints)
 
 | Blueprint | Base Path | Key GET Endpoints |
 |-----------|-----------|-------------------|
@@ -147,6 +166,7 @@ python main.py
 | audit_logs | `/api/audit-logs` | list |
 | cron | `/api/cron` | check-low-stock, schedule-info |
 | gst | `/api/gst` | prefill, validate |
+| admin | `/api/admin` | tenants, users, feature-flags, stats (super admin only) |
 
 ## Unit Testing (pytest)
 
