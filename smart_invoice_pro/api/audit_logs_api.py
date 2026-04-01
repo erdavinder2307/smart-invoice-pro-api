@@ -5,6 +5,24 @@ from smart_invoice_pro.api.roles_api import require_role
 
 audit_logs_blueprint = Blueprint("audit_logs", __name__)
 
+
+def _clean_entry(entry):
+    safe = {k: v for k, v in entry.items() if not k.startswith("_")}
+
+    # Normalize legacy/new schemas for API consumers
+    before = safe.get("before")
+    after = safe.get("after")
+    if before is None and isinstance(safe.get("changes"), dict):
+        before = safe["changes"].get("before")
+    if after is None and isinstance(safe.get("changes"), dict):
+        after = safe["changes"].get("after")
+
+    safe["entity"] = safe.get("entity") or safe.get("entity_type")
+    safe["created_at"] = safe.get("created_at") or safe.get("timestamp")
+    safe["before"] = before
+    safe["after"] = after
+    return safe
+
 # ── GET /api/audit-logs ───────────────────────────────────────────────────────
 
 @audit_logs_blueprint.route("/audit-logs", methods=["GET"])
@@ -31,11 +49,13 @@ def list_audit_logs():
 
     # Parse query params
     entity_type = request.args.get("entity_type", "").strip()
+    entity = request.args.get("entity", "").strip() or entity_type
     entity_id   = request.args.get("entity_id", "").strip()
     user_id     = request.args.get("user_id", "").strip()
-    action      = request.args.get("action", "").strip()
-    from_date   = request.args.get("from_date", "").strip()
-    to_date     = request.args.get("to_date", "").strip()
+    action      = request.args.get("action", "").strip().upper()
+    from_date   = request.args.get("from_date", "").strip() or request.args.get("start_date", "").strip()
+    to_date     = request.args.get("to_date", "").strip() or request.args.get("end_date", "").strip()
+    search      = request.args.get("search", "").strip().lower()
     try:
         page  = max(0, int(request.args.get("page", 0)))
         limit = min(200, max(1, int(request.args.get("limit", 50))))
@@ -46,9 +66,9 @@ def list_audit_logs():
     conditions = ["c.tenant_id = @tid"]
     params: list = [{"name": "@tid", "value": tenant_id}]
 
-    if entity_type:
-        conditions.append("c.entity_type = @entity_type")
-        params.append({"name": "@entity_type", "value": entity_type})
+    if entity:
+        conditions.append("(c.entity = @entity OR c.entity_type = @entity)")
+        params.append({"name": "@entity", "value": entity.lower()})
 
     if entity_id:
         conditions.append("c.entity_id = @entity_id")
@@ -59,17 +79,21 @@ def list_audit_logs():
         params.append({"name": "@filter_user_id", "value": user_id})
 
     if action:
-        conditions.append("c.action = @action")
+        conditions.append("UPPER(c.action) = @action")
         params.append({"name": "@action", "value": action})
 
     if from_date:
-        conditions.append("c.timestamp >= @from_date")
+        conditions.append("(c.created_at >= @from_date OR c.timestamp >= @from_date)")
         params.append({"name": "@from_date", "value": from_date})
 
     if to_date:
         # to_date is inclusive: append 'T23:59:59' to cover the full day
-        conditions.append("c.timestamp <= @to_date")
+        conditions.append("(c.created_at <= @to_date OR c.timestamp <= @to_date)")
         params.append({"name": "@to_date", "value": to_date + "T23:59:59"})
+
+    if search:
+        conditions.append("(CONTAINS(LOWER(c.entity_id), @search) OR CONTAINS(LOWER(c.user_id), @search) OR CONTAINS(LOWER(c.user_email), @search))")
+        params.append({"name": "@search", "value": search})
 
     where_sql = " AND ".join(conditions)
     offset = page * limit
@@ -89,7 +113,7 @@ def list_audit_logs():
         # Fetch paginated results
         data_query = (
             f"SELECT * FROM c WHERE {where_sql} "
-            f"ORDER BY c.timestamp DESC "
+            f"ORDER BY c.created_at DESC "
             f"OFFSET {offset} LIMIT {limit}"
         )
         items = list(
@@ -100,13 +124,7 @@ def list_audit_logs():
             )
         )
 
-        # Strip internal Cosmos fields from log entries before returning
-        clean_items = []
-        for entry in items:
-            clean_items.append({
-                k: v for k, v in entry.items()
-                if not k.startswith("_")
-            })
+        clean_items = [_clean_entry(entry) for entry in items]
 
         return jsonify({
             "logs": clean_items,

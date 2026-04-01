@@ -16,6 +16,7 @@ from smart_invoice_pro.utils.cosmos_client import (
     tenants_container,
     users_container,
     feature_flags_container,
+    audit_logs_container,
 )
 from smart_invoice_pro.utils.audit_logger import log_audit
 
@@ -50,6 +51,22 @@ def _admin_user_id():
 
 def _admin_tenant_id():
     return getattr(request, "tenant_id", None)
+
+
+def _clean_audit_entry(entry: dict) -> dict:
+    safe = _sanitize_doc(entry)
+    before = safe.get("before")
+    after = safe.get("after")
+    if before is None and isinstance(safe.get("changes"), dict):
+        before = safe["changes"].get("before")
+    if after is None and isinstance(safe.get("changes"), dict):
+        after = safe["changes"].get("after")
+
+    safe["entity"] = safe.get("entity") or safe.get("entity_type")
+    safe["created_at"] = safe.get("created_at") or safe.get("timestamp")
+    safe["before"] = before
+    safe["after"] = after
+    return safe
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -336,6 +353,88 @@ def update_feature_flags(tenant_id):
         user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
     )
     return jsonify(_sanitize_doc(doc)), 200
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AUDIT LOGS (CROSS-TENANT)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@admin_blueprint.route("/admin/audit-logs", methods=["GET"])
+@super_admin_required
+def list_audit_logs_admin():
+    """List audit logs across all tenants (super admin only)."""
+    tenant_id = (request.args.get("tenant_id") or "").strip()
+    user_id = (request.args.get("user_id") or "").strip()
+    entity = ((request.args.get("entity") or request.args.get("entity_type") or "").strip().lower())
+    action = (request.args.get("action") or "").strip().upper()
+    start_date = (request.args.get("start_date") or request.args.get("from_date") or "").strip()
+    end_date = (request.args.get("end_date") or request.args.get("to_date") or "").strip()
+    search = (request.args.get("search") or "").strip().lower()
+
+    try:
+        page = max(0, int(request.args.get("page", 0)))
+        limit = min(200, max(1, int(request.args.get("limit", 50))))
+    except ValueError:
+        page, limit = 0, 50
+
+    conditions = ["1=1"]
+    params = []
+
+    if tenant_id:
+        conditions.append("c.tenant_id = @tenant_id")
+        params.append({"name": "@tenant_id", "value": tenant_id})
+    if user_id:
+        conditions.append("c.user_id = @user_id")
+        params.append({"name": "@user_id", "value": user_id})
+    if entity:
+        conditions.append("(c.entity = @entity OR c.entity_type = @entity)")
+        params.append({"name": "@entity", "value": entity})
+    if action:
+        conditions.append("UPPER(c.action) = @action")
+        params.append({"name": "@action", "value": action})
+    if start_date:
+        conditions.append("(c.created_at >= @start_date OR c.timestamp >= @start_date)")
+        params.append({"name": "@start_date", "value": start_date})
+    if end_date:
+        conditions.append("(c.created_at <= @end_date OR c.timestamp <= @end_date)")
+        params.append({"name": "@end_date", "value": end_date + "T23:59:59"})
+    if search:
+        conditions.append("(CONTAINS(LOWER(c.entity_id), @search) OR CONTAINS(LOWER(c.user_id), @search) OR CONTAINS(LOWER(c.user_email), @search))")
+        params.append({"name": "@search", "value": search})
+
+    where_sql = " AND ".join(conditions)
+    offset = page * limit
+
+    count_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql}"
+    total_rows = list(
+        audit_logs_container.query_items(
+            query=count_query,
+            parameters=params,
+            enable_cross_partition_query=True,
+        )
+    )
+    total = int(total_rows[0]) if total_rows else 0
+
+    data_query = (
+        f"SELECT * FROM c WHERE {where_sql} "
+        f"ORDER BY c.created_at DESC "
+        f"OFFSET {offset} LIMIT {limit}"
+    )
+    items = list(
+        audit_logs_container.query_items(
+            query=data_query,
+            parameters=params,
+            enable_cross_partition_query=True,
+        )
+    )
+
+    return jsonify({
+        "logs": [_clean_audit_entry(x) for x in items],
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": max(1, -(-total // limit)),
+    }), 200
 
 
 # ═════════════════════════════════════════════════════════════════════════════

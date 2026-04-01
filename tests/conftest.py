@@ -165,6 +165,7 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.admin_api.tenants_container",
     "smart_invoice_pro.api.admin_api.users_container",
     "smart_invoice_pro.api.admin_api.feature_flags_container",
+    "smart_invoice_pro.api.admin_api.audit_logs_container",
 ]
 
 

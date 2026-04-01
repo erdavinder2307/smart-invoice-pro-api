@@ -1,31 +1,26 @@
-"""
-Audit Logger — fire-and-forget helper.
+"""Structured audit logging utilities.
 
-Usage:
-    log_audit(
-        entity_type="invoice",
-        action="update",
-        entity_id=invoice_id,
-        before=snapshot_before,
-        after=snapshot_after,
-        user_id=request.user_id,
-        tenant_id=request.tenant_id,
-    )
+This module provides:
+1) ``log_audit_event``: canonical helper for writing audit records.
+2) ``log_audit``: compatibility wrapper for legacy call sites.
+3) ``audit_log``: decorator for low-friction endpoint instrumentation.
 
-Sensitive fields (passwords, tokens) are stripped before storage.
-Records are immutable — the API only exposes GET.
+Writes are fire-and-forget to avoid API latency impact.
 """
 import copy
-import uuid
 import logging
+import threading
+import uuid
 from datetime import datetime
+from functools import wraps
+
+from flask import request
 
 from smart_invoice_pro.utils.cosmos_client import audit_logs_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item
 
 logger = logging.getLogger(__name__)
 
-# Fields never stored in audit logs
 _AUDIT_SENSITIVE = {
     "password",
     "portal_password",
@@ -33,58 +28,168 @@ _AUDIT_SENSITIVE = {
     "token",
     "refresh_token",
     "hashed_pw",
+    "secret",
+    "api_key",
+    "access_token",
+    "authorization",
 }
 
 
-def _clean(doc):
-    """Strip sensitive + Cosmos internal fields from a document snapshot."""
-    if doc is None:
-        return None
-    if not isinstance(doc, dict):
-        return doc
-    return sanitize_item(doc, additional_sensitive_fields=_AUDIT_SENSITIVE)
+def _normalize_action(action):
+    return str(action or "").strip().upper()
 
 
-def log_audit(
-    entity_type: str,
-    action: str,
-    entity_id: str,
-    before,
-    after,
-    *,
-    user_id: str = None,
-    tenant_id: str = None,
-):
-    """
-    Persist an audit log entry.
-
-    Parameters
-    ----------
-    entity_type : str   "invoice" | "customer" | "payment" | "user"
-    action      : str   "create" | "update" | "delete"
-    entity_id   : str   The ID of the affected record
-    before      : dict  State before the change (None for creates)
-    after       : dict  State after the change  (None for deletes)
-    user_id     : str   Actor (from JWT)
-    tenant_id   : str   Tenant scope (mandatory — logs not written without it)
-    """
-    if not tenant_id:
-        return
-
+def _safe_request_attr(name, default=None):
     try:
-        doc = {
-            "id": str(uuid.uuid4()),
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "action": action,
-            "entity_type": entity_type,
-            "entity_id": str(entity_id) if entity_id else None,
-            "changes": {
-                "before": _clean(copy.deepcopy(before)) if before is not None else None,
-                "after": _clean(copy.deepcopy(after)) if after is not None else None,
-            },
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+        return getattr(request, name, default)
+    except RuntimeError:
+        return default
+
+
+def _extract_actor(data):
+    return {
+        "tenant_id": data.get("tenant_id") or _safe_request_attr("tenant_id"),
+        "user_id": data.get("user_id") or _safe_request_attr("user_id"),
+        "user_email": data.get("user_email") or _safe_request_attr("user_email"),
+    }
+
+
+def _extract_request_meta(data):
+    try:
+        headers = request.headers
+        ip_address = data.get("ip_address") or request.headers.get("X-Forwarded-For", request.remote_addr)
+        user_agent = data.get("user_agent") or headers.get("User-Agent")
+    except RuntimeError:
+        ip_address = data.get("ip_address")
+        user_agent = data.get("user_agent")
+    return {
+        "ip_address": ip_address,
+        "user_agent": user_agent,
+    }
+
+
+def _deep_clean(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        cleaned = sanitize_item(value, additional_sensitive_fields=_AUDIT_SENSITIVE)
+        return {k: _deep_clean(v) for k, v in cleaned.items()}
+    if isinstance(value, list):
+        return [_deep_clean(v) for v in value]
+    return value
+
+
+def _write_audit_doc(doc):
+    try:
         audit_logs_container.create_item(body=doc)
     except Exception as exc:
-        logger.warning(f"[audit] Failed to write audit log: {exc}")
+        logger.warning("[audit] Failed to write audit log: %s", exc)
+
+
+def _fire_and_forget_write(doc):
+    t = threading.Thread(target=_write_audit_doc, args=(doc,), daemon=True)
+    t.start()
+
+
+def log_audit_event(data):
+    """Write a structured audit log entry.
+
+    Expected keys in ``data``
+    - action, entity, entity_id, before, after, metadata
+    Optional auto-populated from request context when absent:
+    - tenant_id, user_id, user_email, ip_address, user_agent
+    """
+    if not isinstance(data, dict):
+        return
+
+    actor = _extract_actor(data)
+    if not actor["tenant_id"]:
+        return
+
+    req_meta = _extract_request_meta(data)
+    now = datetime.utcnow().isoformat()
+
+    before = _deep_clean(copy.deepcopy(data.get("before")))
+    after = _deep_clean(copy.deepcopy(data.get("after")))
+    metadata = _deep_clean(copy.deepcopy(data.get("metadata")))
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "tenant_id": actor["tenant_id"],
+        "user_id": actor["user_id"],
+        "user_email": actor["user_email"],
+        "action": _normalize_action(data.get("action")),
+        "entity": str(data.get("entity") or "").strip().lower() or "unknown",
+        "entity_id": str(data.get("entity_id")) if data.get("entity_id") is not None else None,
+        "before": before,
+        "after": after,
+        "metadata": metadata,
+        "ip_address": req_meta["ip_address"],
+        "user_agent": req_meta["user_agent"],
+        "created_at": now,
+        # Backward-compatible aliases for existing consumers
+        "entity_type": str(data.get("entity") or "").strip().lower() or "unknown",
+        "changes": {"before": before, "after": after},
+        "timestamp": now,
+    }
+
+    _fire_and_forget_write(doc)
+
+
+def log_audit(entity_type, action, entity_id, before, after, *, user_id=None, tenant_id=None):
+    """Backward-compatible wrapper used by existing APIs."""
+    log_audit_event(
+        {
+            "entity": entity_type,
+            "action": action,
+            "entity_id": entity_id,
+            "before": before,
+            "after": after,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+        }
+    )
+
+
+def audit_log(action, entity):
+    """Decorator to record request/response snapshots for endpoint calls."""
+    def _decorator(func):
+        @wraps(func)
+        def _wrapped(*args, **kwargs):
+            req_payload = request.get_json(silent=True) if request else None
+            response = func(*args, **kwargs)
+
+            status_code = 200
+            resp_payload = None
+            try:
+                if isinstance(response, tuple):
+                    resp_obj = response[0]
+                    status_code = response[1] if len(response) > 1 else 200
+                else:
+                    resp_obj = response
+                if hasattr(resp_obj, "get_json"):
+                    resp_payload = resp_obj.get_json(silent=True)
+            except Exception:
+                resp_payload = None
+
+            if status_code < 400:
+                log_audit_event(
+                    {
+                        "action": action,
+                        "entity": entity,
+                        "entity_id": kwargs.get("id") or kwargs.get("invoice_id") or kwargs.get("customer_id") or kwargs.get("product_id") or kwargs.get("vendor_id"),
+                        "before": None,
+                        "after": resp_payload,
+                        "metadata": {
+                            "method": request.method,
+                            "path": request.path,
+                            "request": _deep_clean(req_payload),
+                        },
+                    }
+                )
+
+            return response
+
+        return _wrapped
+
+    return _decorator

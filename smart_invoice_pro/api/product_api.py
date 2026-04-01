@@ -5,6 +5,7 @@ import uuid
 from flasgger import swag_from
 from datetime import datetime
 from fastapi import APIRouter
+from smart_invoice_pro.utils.audit_logger import log_audit_event
 
 # Create or get the products container (partition key: /product_id)
 products_container = get_container("products", "/product_id")
@@ -86,7 +87,7 @@ def _item_used_in_invoices(product_id):
     Returns the count of invoices containing this product.
     """
     try:
-        invoices_container = get_container("invoices")
+        invoices_container = get_container("invoices", "/customer_id")
         query = (
             "SELECT VALUE COUNT(1) FROM c "
             "JOIN item IN c.items "
@@ -199,6 +200,16 @@ def create_product():
         'updated_at': now
     }
     products_container.create_item(body=item)
+    log_audit_event({
+        "action": "CREATE",
+        "entity": "product",
+        "entity_id": item["id"],
+        "before": None,
+        "after": item,
+        "metadata": {"event": "create_product"},
+        "tenant_id": request.tenant_id,
+        "user_id": getattr(request, "user_id", None),
+    })
     return jsonify(sanitize_item(item)), 201
 
 
@@ -358,6 +369,8 @@ def update_product(product_id):
     if item.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
 
+    before_snapshot = dict(item)
+
     # Duplicate name check (exclude current item)
     if 'name' in data:
         new_name = str(data['name']).strip()
@@ -376,6 +389,16 @@ def update_product(product_id):
             item[field] = data[field]
     item['updated_at'] = datetime.utcnow().isoformat()
     products_container.replace_item(item=item['id'], body=item)
+    log_audit_event({
+        "action": "UPDATE",
+        "entity": "product",
+        "entity_id": product_id,
+        "before": before_snapshot,
+        "after": item,
+        "metadata": {"event": "update_product"},
+        "tenant_id": request.tenant_id,
+        "user_id": getattr(request, "user_id", None),
+    })
     return jsonify(sanitize_item(item))
 
 
@@ -422,6 +445,8 @@ def delete_product(product_id):
     if item.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
 
+    before_snapshot = dict(item)
+
     # Check if item is referenced in any invoice
     invoice_count = _item_used_in_invoices(product_id)
     if invoice_count > 0:
@@ -437,6 +462,16 @@ def delete_product(product_id):
     item['deleted_at'] = now
     item['updated_at'] = now
     products_container.replace_item(item=item['id'], body=item)
+    log_audit_event({
+        "action": "DELETE",
+        "entity": "product",
+        "entity_id": product_id,
+        "before": before_snapshot,
+        "after": item,
+        "metadata": {"event": "delete_product", "soft_delete": True},
+        "tenant_id": request.tenant_id,
+        "user_id": getattr(request, "user_id", None),
+    })
     return jsonify({'message': 'Product deleted'})
 
 
