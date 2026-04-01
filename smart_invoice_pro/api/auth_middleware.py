@@ -93,3 +93,28 @@ def enforce_api_auth():
         return error_response
 
     return None
+
+
+def super_admin_required(f):
+    """Decorator that enforces super-admin access.
+
+    Must be applied *after* JWT auth (enforce_api_auth already runs as
+    before_request, so the token is decoded).  Checks ``is_super_admin``
+    in the JWT payload.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Re-decode the token to inspect the full payload
+        token = _extract_bearer_token()
+        if not token:
+            return jsonify({"error": "Unauthorized"}), 401
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        if not payload.get("is_super_admin"):
+            return jsonify({"error": "Forbidden — super admin access required"}), 403
+
+        return f(*args, **kwargs)
+    return decorated

@@ -3,6 +3,7 @@ from smart_invoice_pro.utils.cosmos_client import vendors_container
 import uuid
 from flasgger import swag_from
 from datetime import datetime
+from smart_invoice_pro.utils.audit_logger import log_audit_event
 
 vendors_blueprint = Blueprint('vendors', __name__)
 
@@ -97,12 +98,23 @@ def create_vendor():
         'tax_id': data.get('tax_id', ''),
         'payment_terms': data.get('payment_terms', 'Net 30'),
         'notes': data.get('notes', ''),
+        'tenant_id': request.tenant_id,
         'created_at': now,
         'updated_at': now
     }
     
     try:
         created_item = vendors_container.create_item(body=item)
+        log_audit_event({
+            "action": "CREATE",
+            "entity": "vendor",
+            "entity_id": vendor_id,
+            "before": None,
+            "after": created_item,
+            "metadata": {"event": "create_vendor"},
+            "tenant_id": request.tenant_id,
+            "user_id": getattr(request, "user_id", None),
+        })
         return jsonify(created_item), 201
     except Exception as e:
         return jsonify({"error": f"Failed to create vendor: {str(e)}"}), 500
@@ -135,14 +147,17 @@ def get_vendors():
     try:
         search_term = request.args.get('search', '')
         
-        query = "SELECT * FROM c"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+        params = [{"name": "@tenant_id", "value": request.tenant_id}]
         if search_term:
-            query += f" WHERE CONTAINS(LOWER(c.name), '{search_term.lower()}')"
+            query += " AND CONTAINS(LOWER(c.name), @search)"
+            params.append({"name": "@search", "value": search_term.lower()})
         
         query += " ORDER BY c.created_at DESC"
         
         items = list(vendors_container.query_items(
             query=query,
+            parameters=params,
             enable_cross_partition_query=True
         ))
         
@@ -174,9 +189,13 @@ def get_vendors():
 def get_vendor(vendor_id):
     """Get a vendor by ID"""
     try:
-        query = f"SELECT * FROM c WHERE c.id = '{vendor_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(vendors_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": vendor_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -240,9 +259,13 @@ def update_vendor(vendor_id):
     
     try:
         # Fetch existing vendor
-        query = f"SELECT * FROM c WHERE c.id = '{vendor_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(vendors_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": vendor_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -250,6 +273,7 @@ def update_vendor(vendor_id):
             return jsonify({"error": "Vendor not found"}), 404
         
         vendor = items[0]
+        before_snapshot = dict(vendor)
         
         # Update fields
         updatable_fields = [
@@ -267,6 +291,17 @@ def update_vendor(vendor_id):
             item=vendor['id'],
             body=vendor
         )
+
+        log_audit_event({
+            "action": "UPDATE",
+            "entity": "vendor",
+            "entity_id": vendor_id,
+            "before": before_snapshot,
+            "after": updated_item,
+            "metadata": {"event": "update_vendor"},
+            "tenant_id": request.tenant_id,
+            "user_id": getattr(request, "user_id", None),
+        })
         
         return jsonify(updated_item), 200
     except Exception as e:
@@ -297,9 +332,13 @@ def delete_vendor(vendor_id):
     """Delete a vendor"""
     try:
         # Fetch the vendor to get partition key
-        query = f"SELECT * FROM c WHERE c.id = '{vendor_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(vendors_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": vendor_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -307,11 +346,23 @@ def delete_vendor(vendor_id):
             return jsonify({"error": "Vendor not found"}), 404
         
         vendor = items[0]
+        before_snapshot = dict(vendor)
         
         vendors_container.delete_item(
             item=vendor['id'],
             partition_key=vendor['vendor_id']
         )
+
+        log_audit_event({
+            "action": "DELETE",
+            "entity": "vendor",
+            "entity_id": vendor_id,
+            "before": before_snapshot,
+            "after": None,
+            "metadata": {"event": "delete_vendor"},
+            "tenant_id": request.tenant_id,
+            "user_id": getattr(request, "user_id", None),
+        })
         
         return jsonify({"message": "Vendor deleted successfully"}), 200
     except Exception as e:

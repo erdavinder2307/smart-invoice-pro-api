@@ -7,6 +7,7 @@ from flasgger import swag_from
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import datetime
+from smart_invoice_pro.utils.audit_logger import log_audit_event
 
 api_blueprint = Blueprint('api_core', __name__)
 auth_blueprint = Blueprint('auth', __name__)
@@ -167,6 +168,7 @@ def login_user():
                 "user_id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
+                "is_super_admin": bool(items[0].get('is_super_admin', False)),
                 "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
             },
             jwt_secret,
@@ -186,13 +188,32 @@ def login_user():
         }
         refresh_tokens_container.create_item(body=refresh_token_record)
 
+        log_audit_event({
+            "action": "LOGIN",
+            "entity": "auth",
+            "entity_id": user_id,
+            "before": None,
+            "after": {
+                "login": "success",
+                "username": items[0]['username'],
+                "is_super_admin": bool(items[0].get('is_super_admin', False)),
+            },
+            "metadata": {
+                "event": "login",
+            },
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "user_email": items[0].get("email") or items[0].get("username"),
+        })
+
         return jsonify({
             "message": "Login successful!",
             "user": {
                 "id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
-                "role": items[0].get('role', 'Sales')
+                "role": items[0].get('role', 'Sales'),
+                "is_super_admin": bool(items[0].get('is_super_admin', False))
             },
             "token": access_token,
             "access_token": access_token,
@@ -296,6 +317,8 @@ def logout_user():
     """
     data = request.get_json(silent=True) or {}
     incoming = data.get('refresh_token', '').strip()
+    actor_user_id = None
+    actor_tenant_id = None
     if incoming:
         items = list(refresh_tokens_container.query_items(
             query="SELECT * FROM c WHERE c.token = @token",
@@ -303,12 +326,27 @@ def logout_user():
             enable_cross_partition_query=True
         ))
         for record in items:
+            actor_user_id = record.get("user_id")
+            actor_tenant_id = record.get("tenant_id")
             try:
                 refresh_tokens_container.delete_item(
                     item=record['id'], partition_key=record['user_id']
                 )
             except Exception:
                 pass
+
+    if actor_tenant_id:
+        log_audit_event({
+            "action": "LOGOUT",
+            "entity": "auth",
+            "entity_id": actor_user_id,
+            "before": None,
+            "after": {"logout": "success"},
+            "metadata": {"event": "logout"},
+            "tenant_id": actor_tenant_id,
+            "user_id": actor_user_id,
+        })
+
     return jsonify({"message": "Logout successful."}), 200
 
 
