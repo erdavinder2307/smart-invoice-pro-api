@@ -1,3 +1,5 @@
+import os
+
 from flask import Flask, request
 from flasgger import Swagger
 from flask_cors import CORS
@@ -44,6 +46,34 @@ import atexit
 def create_app():
     app = Flask(__name__, template_folder="../templates")
 
+    def _get_allowed_origins():
+        local_origins = {
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+        }
+
+        configured = set()
+
+        # Primary frontend URL used across the app (payments redirects, etc.)
+        frontend_url = (os.getenv("FRONTEND_URL", "") or "").strip()
+        if frontend_url:
+            configured.add(frontend_url.rstrip("/"))
+
+        # Comma-separated override for multi-env deployments.
+        # Example:
+        # CORS_ALLOWED_ORIGINS=https://app.example.com,https://<site>.azurestaticapps.net
+        cors_list = (os.getenv("CORS_ALLOWED_ORIGINS", "") or "").strip()
+        if cors_list:
+            configured.update(
+                origin.strip().rstrip("/")
+                for origin in cors_list.split(",")
+                if origin.strip()
+            )
+
+        return local_origins | configured
+
     # Swagger config (optional)
     app.config['SWAGGER'] = {
         'title': 'Smart Invoice Pro API',
@@ -64,10 +94,12 @@ def create_app():
     from smart_invoice_pro.api.routes import login_user
     limiter.limit("5 per minute")(login_user)
 
+    allowed_origins = _get_allowed_origins()
+
     # Enable CORS – explicit origins so that credentialed requests work correctly
     CORS(
         app,
-        resources={r"/api/*": {"origins": ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8080", "http://127.0.0.1:8080"]}},
+        resources={r"/api/*": {"origins": sorted(allowed_origins)}},
         allow_headers=["Content-Type", "Authorization", "X-User-Id", "X-Username"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         supports_credentials=True,
@@ -86,9 +118,12 @@ def create_app():
 
     @app.after_request
     def _add_cors_headers(response):
-        origin = request.headers.get("Origin", "")
-        allowed = {"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8080", "http://127.0.0.1:8080"}
-        if origin in allowed:
+        origin = (request.headers.get("Origin", "") or "").rstrip("/")
+
+        # Allow configured exact origins. Also allow HTTPS Azure Static Web Apps
+        # origins so branch/preview environments continue to work after deploy.
+        is_azure_static_app = origin.startswith("https://") and origin.endswith(".azurestaticapps.net")
+        if origin in allowed_origins or is_azure_static_app:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Headers"] = (
