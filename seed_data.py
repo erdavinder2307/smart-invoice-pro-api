@@ -1,5 +1,5 @@
 """
-seed_data.py — Data seeding script for Smart Invoice Pro
+seed_data.py — Data seeding script for Solidev Books
 
 Populates the Cosmos DB database with realistic Indian business data across
 Customers, Products, Invoices (+ Stock), Vendors, Bills, and Expenses.
@@ -664,7 +664,7 @@ def seed_expenses(tenant_id: str, count: int, vendors: list) -> list:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Seed Smart Invoice Pro with realistic Indian business data.",
+        description="Seed Solidev Books with realistic Indian business data.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--tenant_id",  required=True,       help="Tenant ID to seed data for")

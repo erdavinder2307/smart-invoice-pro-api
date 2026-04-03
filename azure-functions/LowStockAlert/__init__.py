@@ -114,7 +114,7 @@ def main(mytimer: func.TimerRequest) -> None:
                 </tbody>
             </table>
             <p><strong>Action Required:</strong> Please review and create purchase orders for these items.</p>
-            <p class="footer">This is an automated alert from Smart Invoice Pro Inventory Management System</p>
+            <p class="footer">This is an automated alert from Solidev Books Inventory Management System</p>
         </body>
         </html>
         """

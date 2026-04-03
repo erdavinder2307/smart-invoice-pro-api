@@ -1,5 +1,5 @@
 """
-cleanup_seed_data.py — Remove all seeded data for a given tenant from Smart Invoice Pro.
+cleanup_seed_data.py — Remove all seeded data for a given tenant from Solidev Books.
 
 Deletes every document whose tenant_id matches the supplied value from:
   customers, products, invoices, vendors, bills, expenses, stock
@@ -90,7 +90,7 @@ def _delete_tenant_docs(tenant_id: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Delete all data for a given tenant from Smart Invoice Pro.",
+        description="Delete all data for a given tenant from Solidev Books.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(

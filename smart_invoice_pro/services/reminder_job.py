@@ -157,7 +157,7 @@ def _send_reminder_email(invoice, days_label):
           </table>
           <p>Please arrange payment at your earliest convenience to avoid any late fees.</p>
           <p style="color:#999; font-size:12px; margin-top:32px;">
-            This is an automated reminder from Smart Invoice Pro.
+            This is an automated reminder from Solidev Books.
           </p>
         </div>
       </div>
