@@ -76,7 +76,7 @@ def send_low_stock_email(low_stock_products):
             <br>
             <p><strong>Action Required:</strong> Please review and create purchase orders for these items.</p>
             <p style="color: #999; font-size: 12px; margin-top: 30px;">
-                <em>This is an automated alert from Smart Invoice Pro Inventory Management System</em>
+                <em>This is an automated alert from Solidev Books Inventory Management System</em>
             </p>
         </body>
         </html>

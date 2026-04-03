@@ -786,7 +786,7 @@ def send_so_email(so_id):
             </table>
             <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
             <p style='color:#475569'><strong>Order Date:</strong> {order_date}</p>
-            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Smart Invoice Pro.</p>
+            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Solidev Books.</p>
         </div>
     </body></html>
     """

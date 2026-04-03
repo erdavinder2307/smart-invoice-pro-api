@@ -1130,7 +1130,7 @@ def send_invoice_email(invoice_id):
                 </p>
                 {view_link}
                 <p style='color:#94A3B8;font-size:12px;margin-top:32px'>
-                    This is an automated email from Smart Invoice Pro.
+                    This is an automated email from Solidev Books.
                 </p>
             </div>
         </body>
@@ -1268,7 +1268,7 @@ def send_invoice_reminder(invoice_id):
         f"Balance Due: \u20b9{balance_due:,.2f}\n"
         f"Due Date: {due_date}\n\n"
         f"Please arrange payment at your earliest convenience.\n\n"
-        f"Thank you,\nSmart Invoice Pro"
+        f"Thank you,\nSolidev Books"
     )
     html = f"""
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
@@ -1284,7 +1284,7 @@ def send_invoice_reminder(invoice_id):
             <td style="padding:8px">{due_date}</td></tr>
       </table>
       <p>Please arrange payment at your earliest convenience.</p>
-      <p>Thank you,<br/><strong>Smart Invoice Pro</strong></p>
+      <p>Thank you,<br/><strong>Solidev Books</strong></p>
     </div>
     """
 

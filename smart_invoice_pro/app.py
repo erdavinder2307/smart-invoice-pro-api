@@ -76,7 +76,7 @@ def create_app():
 
     # Swagger config (optional)
     app.config['SWAGGER'] = {
-        'title': 'Smart Invoice Pro API',
+        'title': 'Solidev Books API',
         'uiversion': 3
     }
 
@@ -114,7 +114,7 @@ def create_app():
           200:
             description: Returns a simple message
         """
-        return "Smart Invoice Pro API is running!"
+        return "Solidev Books API is running!"
 
     @app.after_request
     def _add_cors_headers(response):

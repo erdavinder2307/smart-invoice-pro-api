@@ -97,7 +97,7 @@ def build_invoice_pdf(invoice_data: dict, branding: dict | None = None) -> bytes
 
     # ── Header ────────────────────────────────────────────────────────────────
     header_table = Table([[
-        Paragraph('<b>Smart Invoice Pro</b>', styles['Company']),
+        Paragraph('<b>Solidev Books</b>', styles['Company']),
         Paragraph('<b>INVOICE</b>', styles['InvoiceTitle']),
     ]], colWidths=[doc.width * 0.5, doc.width * 0.5])
     header_table.setStyle(TableStyle([
@@ -191,7 +191,7 @@ def build_invoice_pdf(invoice_data: dict, branding: dict | None = None) -> bytes
     ))
     story.append(Spacer(1, 24))
     story.append(Paragraph(
-        f'\u00a9 {date.today().year} Smart Invoice Pro. All rights reserved.',
+        f'\u00a9 {date.today().year} Solidev Books. All rights reserved.',
         ParagraphStyle('Footer', fontSize=9, alignment=1, textColor=colors.grey),
     ))
     doc.build(story)
