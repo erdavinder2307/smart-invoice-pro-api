@@ -166,6 +166,12 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.admin_api.users_container",
     "smart_invoice_pro.api.admin_api.feature_flags_container",
     "smart_invoice_pro.api.admin_api.audit_logs_container",
+    # Search API
+    "smart_invoice_pro.api.search_api.search_history_container",
+    "smart_invoice_pro.api.search_api.recently_viewed_container",
+    "smart_invoice_pro.api.search_api.customers_container",
+    "smart_invoice_pro.api.search_api.invoices_container",
+    "smart_invoice_pro.api.search_api.products_container",
 ]
 
 
