@@ -38,4 +38,6 @@ notifications_container = get_container("notifications", "/tenant_id")
 audit_logs_container = get_container("audit_logs", "/tenant_id")
 tenants_container = get_container("tenants", "/id")
 feature_flags_container = get_container("feature_flags", "/tenant_id")
+search_history_container = get_container("search_history", "/user_id")
+recently_viewed_container = get_container("recently_viewed", "/user_id")
 

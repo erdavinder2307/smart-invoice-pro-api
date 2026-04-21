@@ -39,6 +39,7 @@ from smart_invoice_pro.api.integrations_settings_api import integrations_bluepri
 from smart_invoice_pro.api.notifications_api import notifications_blueprint
 from smart_invoice_pro.api.audit_logs_api import audit_logs_blueprint
 from smart_invoice_pro.api.admin_api import admin_blueprint
+from smart_invoice_pro.api.search_api import search_blueprint
 from smart_invoice_pro.api.auth_middleware import enforce_api_auth
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
@@ -174,6 +175,7 @@ def create_app():
     app.register_blueprint(notifications_blueprint, url_prefix="/api")
     app.register_blueprint(audit_logs_blueprint, url_prefix="/api")
     app.register_blueprint(admin_blueprint, url_prefix="/api")
+    app.register_blueprint(search_blueprint, url_prefix="/api")
 
     # Start the background scheduler for recurring invoices
     try:
