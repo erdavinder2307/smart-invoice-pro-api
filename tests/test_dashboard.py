@@ -51,6 +51,64 @@ class TestDashboardSummary:
             assert data["total_customers"] == 0
             assert data["total_revenue"] == 0
 
+    def test_summary_range_this_year_filters_invoices(self, client, headers_a):
+        """range=this_year filters out invoices outside current year."""
+        import datetime
+        current_year = datetime.date.today().year
+        with patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
+             patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
+             patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills:
+            mock_cust.read_all_items.return_value = []
+            mock_prod.read_all_items.return_value = []
+            mock_inv.read_all_items.return_value = [
+                {"id": "i1", "total_amount": 5000, "balance_due": 0, "status": "Paid",
+                 "issue_date": f"{current_year}-03-01"},
+                {"id": "i2", "total_amount": 9999, "balance_due": 0, "status": "Paid",
+                 "issue_date": f"{current_year - 1}-12-31"},  # last year — excluded
+            ]
+            mock_bills.read_all_items.return_value = []
+
+            resp = client.get("/api/dashboard/summary?range=this_year", headers=headers_a)
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["total_invoices"] == 1
+            assert data["total_revenue"] == 5000.0
+
+    def test_summary_range_custom_filters_invoices(self, client, headers_a):
+        """range=custom with start_date/end_date filters invoices to the window."""
+        with patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
+             patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
+             patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills:
+            mock_cust.read_all_items.return_value = []
+            mock_prod.read_all_items.return_value = []
+            mock_inv.read_all_items.return_value = [
+                {"id": "i1", "total_amount": 1000, "balance_due": 0, "status": "Paid",
+                 "issue_date": "2025-06-15"},
+                {"id": "i2", "total_amount": 2000, "balance_due": 0, "status": "Paid",
+                 "issue_date": "2025-08-01"},  # outside window
+            ]
+            mock_bills.read_all_items.return_value = []
+
+            resp = client.get(
+                "/api/dashboard/summary?range=custom&start_date=2025-05-01&end_date=2025-07-31",
+                headers=headers_a
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["total_invoices"] == 1
+            assert data["total_revenue"] == 1000.0
+
+    def test_summary_range_custom_missing_dates(self, client, headers_a):
+        """range=custom without dates returns 400."""
+        with patch("smart_invoice_pro.api.dashboard_api.customers_container"), \
+             patch("smart_invoice_pro.api.dashboard_api.products_container"), \
+             patch("smart_invoice_pro.api.dashboard_api.invoices_container"), \
+             patch("smart_invoice_pro.api.dashboard_api.bills_container"):
+            resp = client.get("/api/dashboard/summary?range=custom", headers=headers_a)
+            assert resp.status_code == 400
+
 
 class TestDashboardLowStock:
     """GET /api/dashboard/low-stock tests."""
@@ -123,6 +181,41 @@ class TestDashboardMonthlyRevenue:
             assert resp.status_code == 200
             data = resp.get_json()
             assert isinstance(data, list)
+
+    def test_monthly_revenue_custom_range_success(self, client, headers_a):
+        """Custom range accepts start_date/end_date and returns matching months."""
+        with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
+            mock_inv.read_all_items.return_value = [
+                {"total_amount": 1000, "created_at": "2026-03-15T00:00:00"},
+                {"total_amount": 2000, "created_at": "2026-04-20T00:00:00"},
+                {"total_amount": 3000, "created_at": "2026-05-01T00:00:00"},
+            ]
+            resp = client.get(
+                "/api/dashboard/monthly-revenue?range=custom&start_date=2026-03-01&end_date=2026-04-30",
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert isinstance(data, list)
+            months = [d["month"] for d in data]
+            assert months == ["2026-03", "2026-04"]
+
+    def test_monthly_revenue_custom_range_missing_dates(self, client, headers_a):
+        """Custom range without required dates returns 400."""
+        with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
+            mock_inv.read_all_items.return_value = []
+            resp = client.get("/api/dashboard/monthly-revenue?range=custom", headers=headers_a)
+            assert resp.status_code == 400
+
+    def test_monthly_revenue_custom_range_invalid_order(self, client, headers_a):
+        """start_date after end_date returns 400."""
+        with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
+            mock_inv.read_all_items.return_value = []
+            resp = client.get(
+                "/api/dashboard/monthly-revenue?range=custom&start_date=2026-05-01&end_date=2026-04-01",
+                headers=headers_a,
+            )
+            assert resp.status_code == 400
 
 
 class TestDashboardRecentInvoices:

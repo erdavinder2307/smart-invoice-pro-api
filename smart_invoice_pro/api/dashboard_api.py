@@ -29,13 +29,75 @@ dashboard_blueprint = Blueprint('dashboard', __name__)
 })
 def dashboard_summary():
     try:
+        range_type = request.args.get('range', 'all')
+        today = datetime.utcnow().date()
+
+        def parse_iso_date(value):
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(value[:10]).date()
+            except Exception:
+                return None
+
+        # Determine date bounds for filtering
+        if range_type == 'this_week':
+            start_date = today - timedelta(days=6)
+            end_date = today
+        elif range_type == 'this_month':
+            start_date = today.replace(day=1)
+            end_date = today
+        elif range_type == 'this_quarter':
+            quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+            start_date = today.replace(month=quarter_start_month, day=1)
+            end_date = today
+        elif range_type == 'this_year':
+            start_date = today.replace(month=1, day=1)
+            end_date = today
+        elif range_type == 'custom':
+            start_date = parse_iso_date(request.args.get('start_date'))
+            end_date = parse_iso_date(request.args.get('end_date'))
+            if not start_date or not end_date:
+                return jsonify({'error': 'start_date and end_date are required for custom range'}), 400
+            if start_date > end_date:
+                return jsonify({'error': 'start_date cannot be after end_date'}), 400
+        else:
+            start_date = None
+            end_date = None
+
+        def invoice_in_range(inv):
+            if start_date is None:
+                return True
+            date_str = inv.get('issue_date') or inv.get('created_at')
+            if not date_str:
+                return False
+            try:
+                inv_date = datetime.fromisoformat(date_str[:10]).date()
+                return start_date <= inv_date <= end_date
+            except Exception:
+                return False
+
+        def bill_in_range(b):
+            if start_date is None:
+                return True
+            date_str = b.get('bill_date') or b.get('issue_date') or b.get('created_at')
+            if not date_str:
+                return False
+            try:
+                bill_date = datetime.fromisoformat(date_str[:10]).date()
+                return start_date <= bill_date <= end_date
+            except Exception:
+                return False
+
         total_customers = len(list(customers_container.read_all_items()))
         total_products = len(list(products_container.read_all_items()))
-        invoices = list(invoices_container.read_all_items())
+        all_invoices = list(invoices_container.read_all_items())
+        invoices = [inv for inv in all_invoices if invoice_in_range(inv)]
+
         total_invoices = len(invoices)
         total_revenue = sum(float(inv.get('total_amount', 0)) for inv in invoices)
 
-        # Receivables: balance_due on unpaid/partially-paid invoices
+        # Receivables: balance_due on unpaid/partially-paid invoices in range
         receivable_statuses = {'issued', 'partially paid', 'overdue', 'sent'}
         total_receivables = sum(
             float(inv.get('balance_due', inv.get('total_amount', 0)))
@@ -43,8 +105,7 @@ def dashboard_summary():
             if inv.get('status', '').lower() in receivable_statuses
         )
 
-        # Overdue: due_date is past and invoice is still open
-        today = datetime.utcnow().date()
+        # Overdue: due_date is past and invoice is still open (within range)
         overdue_count = 0
         for inv in invoices:
             if inv.get('status', '').lower() not in {'issued', 'partially paid', 'sent', 'overdue'}:
@@ -58,9 +119,10 @@ def dashboard_summary():
             except Exception:
                 pass
 
-        # Payables: balance_due on unpaid bills
+        # Payables: balance_due on unpaid bills in range
         payable_statuses = {'unpaid', 'partially paid', 'overdue'}
-        bills = list(bills_container.read_all_items())
+        all_bills = list(bills_container.read_all_items())
+        bills = [b for b in all_bills if bill_in_range(b)]
         total_payables = sum(
             float(b.get('balance_due', b.get('total_amount', 0)))
             for b in bills
@@ -156,13 +218,53 @@ def dashboard_low_stock():
 })
 def dashboard_monthly_revenue():
     try:
-        invoices = list(invoices_container.read_all_items())
+        range_type = request.args.get('range', 'this_year')
         now = datetime.utcnow()
+        today = now.date()
+
+        def parse_iso_date(value):
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(value[:10]).date()
+            except Exception:
+                return None
+
+        if range_type == 'this_week':
+            start_date = today - timedelta(days=6)
+            end_date = today
+        elif range_type == 'this_month':
+            start_date = today.replace(day=1)
+            end_date = today
+        elif range_type == 'this_quarter':
+            quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+            start_date = today.replace(month=quarter_start_month, day=1)
+            end_date = today
+        elif range_type == 'custom':
+            start_date = parse_iso_date(request.args.get('start_date'))
+            end_date = parse_iso_date(request.args.get('end_date'))
+            if not start_date or not end_date:
+                return jsonify({'error': 'start_date and end_date are required for custom range'}), 400
+            if start_date > end_date:
+                return jsonify({'error': 'start_date cannot be after end_date'}), 400
+        else:
+            start_date = today.replace(month=1, day=1)
+            end_date = today
+
+        # Build monthly buckets across the selected date range.
         monthly = {}
-        for i in range(6):
-            month = (now - timedelta(days=now.day-1)).replace(day=1) - timedelta(days=30*i)
-            key = month.strftime('%Y-%m')
+        month_cursor = start_date.replace(day=1)
+        range_end_month = end_date.replace(day=1)
+        while month_cursor <= range_end_month:
+            key = month_cursor.strftime('%Y-%m')
             monthly[key] = 0.0
+            if month_cursor.month == 12:
+                month_cursor = month_cursor.replace(year=month_cursor.year + 1, month=1, day=1)
+            else:
+                month_cursor = month_cursor.replace(month=month_cursor.month + 1, day=1)
+
+        invoices = list(invoices_container.read_all_items())
+
         for inv in invoices:
             date_str = inv.get('created_at') or inv.get('issue_date')
             if not date_str:
@@ -171,10 +273,16 @@ def dashboard_monthly_revenue():
                 dt = datetime.fromisoformat(date_str[:19])
             except Exception:
                 continue
+
+            inv_date = dt.date()
+            if inv_date < start_date or inv_date > end_date:
+                continue
+
             key = dt.strftime('%Y-%m')
             if key in monthly:
                 monthly[key] += float(inv.get('total_amount', 0))
-        result = [{'month': k, 'revenue': monthly[k]} for k in sorted(monthly.keys())[-6:]]
+
+        result = [{'month': k, 'revenue': monthly[k]} for k in sorted(monthly.keys())]
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': f'Error fetching monthly revenue: {str(e)}'}), 500
