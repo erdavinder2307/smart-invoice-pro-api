@@ -26,8 +26,10 @@ class TestCreateProduct:
         mock_prod.query_items.return_value = [{"id": "existing-id"}]
         resp = client.post("/api/products", json=sample_product, headers=headers_a)
         assert resp.status_code == 400
-        assert "already exists" in resp.get_json()["error"]
-        assert resp.get_json()["field"] == "name"
+        error = resp.get_json()["error"]
+        assert error["type"] == "business_error"
+        assert "already exists" in error["message"]
+        assert error["fields"]["name"]
 
     @patch("smart_invoice_pro.api.product_api.products_container")
     def test_create_product_empty_name(self, mock_prod, client, headers_a):
@@ -37,7 +39,9 @@ class TestCreateProduct:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "name" in resp.get_json()["error"].lower()
+        error = resp.get_json()["error"]
+        assert error["type"] == "validation_error"
+        assert "name" in error["fields"]
 
     @patch("smart_invoice_pro.api.product_api.products_container")
     def test_create_product_negative_price(self, mock_prod, client, headers_a):
@@ -48,7 +52,9 @@ class TestCreateProduct:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "negative" in resp.get_json()["error"].lower()
+        error = resp.get_json()["error"]
+        assert error["type"] == "validation_error"
+        assert "negative" in error["fields"]["name"].lower()
 
     @patch("smart_invoice_pro.api.product_api.products_container")
     def test_create_product_price_exceeds_max(self, mock_prod, client, headers_a):
@@ -59,7 +65,9 @@ class TestCreateProduct:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "exceed" in resp.get_json()["error"].lower()
+        error = resp.get_json()["error"]
+        assert error["type"] == "validation_error"
+        assert "exceed" in error["fields"]["name"].lower()
 
 
 class TestListProducts:

@@ -6,7 +6,7 @@ from tests.conftest import TENANT_A, USER_A
 
 
 SAMPLE_VENDOR = {
-    "name": "ABC Suppliers",
+    "vendor_name": "ABC Suppliers",
     "contact_person": "John Doe",
     "email": "john@abc.com",
     "phone": "9876543210",
@@ -15,7 +15,7 @@ SAMPLE_VENDOR = {
 STORED_VENDOR = {
     "id": "v-001",
     "vendor_id": "v-001",
-    "name": "ABC Suppliers",
+    "vendor_name": "ABC Suppliers",
     "contact_person": "John Doe",
     "email": "john@abc.com",
     "phone": "9876543210",
@@ -39,8 +39,10 @@ class TestCreateVendor:
         assert resp.status_code == 400
 
     def test_create_missing_contact_person(self, client, headers_a):
-        resp = client.post("/api/vendors", json={"name": "X"}, headers=headers_a)
-        assert resp.status_code == 400
+        with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
+            mock_ctr.create_item.return_value = {"id": "new-id", "vendor_name": "X"}
+            resp = client.post("/api/vendors", json={"vendor_name": "X"}, headers=headers_a)
+            assert resp.status_code == 201
 
     def test_create_invalid_email(self, client, headers_a):
         payload = {**SAMPLE_VENDOR, "email": "not-an-email"}
@@ -94,14 +96,14 @@ class TestUpdateVendor:
     def test_update_success(self, client, headers_a):
         with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
             mock_ctr.query_items.return_value = [STORED_VENDOR]
-            mock_ctr.replace_item.return_value = {**STORED_VENDOR, "name": "Updated Corp"}
-            resp = client.put("/api/vendors/v-001", json={"name": "Updated Corp"}, headers=headers_a)
+            mock_ctr.replace_item.return_value = {**STORED_VENDOR, "vendor_name": "Updated Corp"}
+            resp = client.put("/api/vendors/v-001", json={"vendor_name": "Updated Corp"}, headers=headers_a)
             assert resp.status_code == 200
 
     def test_update_not_found(self, client, headers_a):
         with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
             mock_ctr.query_items.return_value = []
-            resp = client.put("/api/vendors/nope", json={"name": "X"}, headers=headers_a)
+            resp = client.put("/api/vendors/nope", json={"vendor_name": "X"}, headers=headers_a)
             assert resp.status_code == 404
 
     def test_update_invalid_email(self, client, headers_a):

@@ -10,6 +10,10 @@ from tests.conftest import TENANT_A, TENANT_B, USER_A, auth_headers
 
 class TestCreateCustomer:
 
+    @staticmethod
+    def _error_payload(resp):
+        return resp.get_json()["error"]
+
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_success(self, mock_cust, client, headers_a, sample_customer):
         resp = client.post("/api/customers", json=sample_customer, headers=headers_a)
@@ -28,7 +32,9 @@ class TestCreateCustomer:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "display name" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "display_name" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_missing_email(self, mock_cust, client, headers_a):
@@ -38,7 +44,9 @@ class TestCreateCustomer:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "email" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "email" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_missing_phone(self, mock_cust, client, headers_a):
@@ -48,7 +56,9 @@ class TestCreateCustomer:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "phone" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "phone" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_invalid_email(self, mock_cust, client, headers_a):
@@ -58,14 +68,18 @@ class TestCreateCustomer:
             headers=headers_a,
         )
         assert resp.status_code == 400
-        assert "email" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "email" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_invalid_gst(self, mock_cust, client, headers_a, sample_customer):
         sample_customer["gst_number"] = "INVALID-GST"
         resp = client.post("/api/customers", json=sample_customer, headers=headers_a)
         assert resp.status_code == 400
-        assert "gst" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "gst_number" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_valid_gst(self, mock_cust, client, headers_a, sample_customer):
@@ -78,14 +92,18 @@ class TestCreateCustomer:
         sample_customer["pan"] = "INVALID"
         resp = client.post("/api/customers", json=sample_customer, headers=headers_a)
         assert resp.status_code == 400
-        assert "pan" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "pan" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_invalid_mobile(self, mock_cust, client, headers_a, sample_customer):
         sample_customer["mobile"] = "12345"
         resp = client.post("/api/customers", json=sample_customer, headers=headers_a)
         assert resp.status_code == 400
-        assert "mobile" in resp.get_json()["error"].lower()
+        error = self._error_payload(resp)
+        assert error["type"] == "validation_error"
+        assert "mobile" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_response_excludes_password(self, mock_cust, client, headers_a, sample_customer):
