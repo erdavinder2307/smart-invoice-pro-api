@@ -232,7 +232,7 @@ class TestDashboardMonthlyRevenue:
             assert isinstance(data, list)
 
     def test_monthly_revenue_custom_range_success(self, client, headers_a):
-        """Custom range accepts start_date/end_date and returns matching months."""
+        """Custom range accepts start_date/end_date and returns matching chart buckets."""
         with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
             mock_inv.read_all_items.return_value = [
                 {"tenant_id": TENANT_A, "total_amount": 1000, "created_at": "2026-03-15T00:00:00"},
@@ -246,8 +246,9 @@ class TestDashboardMonthlyRevenue:
             assert resp.status_code == 200
             data = resp.get_json()
             assert isinstance(data, list)
-            months = [d["month"] for d in data]
-            assert months == ["2026-03", "2026-04"]
+            assert all(item["month"].startswith("2026-W") for item in data)
+            assert sum(item["revenue"] for item in data) == 3000
+            assert len(data) == 9
 
     def test_monthly_revenue_custom_range_missing_dates(self, client, headers_a):
         """Custom range without required dates returns 400."""

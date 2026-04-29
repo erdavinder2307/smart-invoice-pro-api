@@ -8,7 +8,7 @@ from tests.conftest import TENANT_A, USER_A
 SAMPLE_EXPENSE = {
     "vendor_name": "Office Supplies Inc",
     "date": "2026-03-15",
-    "category": "Office",
+    "category": "Office Supplies",
     "amount": 250.0,
 }
 
@@ -16,7 +16,7 @@ STORED_EXPENSE = {
     "id": "exp-001",
     "vendor_name": "Office Supplies Inc",
     "date": "2026-03-15",
-    "category": "Office",
+    "category": "Office Supplies",
     "amount": 250.0,
     "currency": "INR",
     "notes": "",
@@ -137,8 +137,8 @@ class TestExpenseStats:
     def test_stats_returns_summary(self, client, headers_a):
         with patch("smart_invoice_pro.api.expenses_api.expenses_container") as mock_ctr:
             mock_ctr.query_items.return_value = [
-                {"amount": 100, "category": "Office"},
-                {"amount": 200, "category": "Office"},
+                {"amount": 100, "category": "Office Supplies"},
+                {"amount": 200, "category": "Office Supplies"},
                 {"amount": 300, "category": "Travel"},
             ]
             resp = client.get("/api/expenses/stats/summary", headers=headers_a)
@@ -147,7 +147,7 @@ class TestExpenseStats:
             assert data["total_amount"] == 600
             assert data["total_count"] == 3
             assert data["average_amount"] == 200.0
-            assert "Office" in data["by_category"]
+            assert "Office Supplies" in data["by_category"]
             assert "Travel" in data["by_category"]
 
     def test_stats_empty(self, client, headers_a):

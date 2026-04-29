@@ -61,8 +61,9 @@ def test_create_product_duplicate_name(mock_container, client):
     response = client.post('/api/products', json=payload, headers=_auth_headers())
     assert response.status_code == 400
     data = json.loads(response.data)
-    assert 'already exists' in data['error']
-    assert data['field'] == 'name'
+    assert data['error']['type'] == 'business_error'
+    assert 'already exists' in data['error']['message']
+    assert 'name' in data['error']['fields']
 
 @patch('smart_invoice_pro.api.product_api.products_container')
 def test_create_product_validation_error(mock_container, client):
@@ -76,8 +77,8 @@ def test_create_product_validation_error(mock_container, client):
     response = client.post('/api/products', json=payload, headers=_auth_headers())
     assert response.status_code == 400
     data = json.loads(response.data)
-    # Should flag the empty name first
-    assert 'Item name is required' in data['errors'] or 'Selling price cannot be negative' in data['errors']
+    assert data['error']['type'] == 'validation_error'
+    assert 'name' in data['error']['fields']
 
 @patch('smart_invoice_pro.api.product_api._item_used_in_invoices')
 @patch('smart_invoice_pro.api.product_api.products_container')

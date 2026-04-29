@@ -1,4 +1,5 @@
 import os
+import sys
 
 from flask import Flask, request
 from flasgger import Swagger
@@ -43,6 +44,17 @@ from smart_invoice_pro.api.search_api import search_blueprint
 from smart_invoice_pro.api.auth_middleware import enforce_api_auth
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
+
+
+def _should_start_scheduler():
+    """Return False when running under pytest or when explicitly disabled."""
+    if os.getenv("ENABLE_BACKGROUND_SCHEDULER", "true").strip().lower() in {"0", "false", "no"}:
+        return False
+    if "pytest" in sys.modules:
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
 
 def create_app():
     app = Flask(__name__, template_folder="../templates")
@@ -177,16 +189,17 @@ def create_app():
     app.register_blueprint(admin_blueprint, url_prefix="/api")
     app.register_blueprint(search_blueprint, url_prefix="/api")
 
-    # Start the background scheduler for recurring invoices
-    try:
-        start_scheduler(app)
-        
-        # Register cleanup on app shutdown
-        @atexit.register
-        def cleanup():
-            from smart_invoice_pro.services.scheduler import shutdown_scheduler
-            shutdown_scheduler(app)
-    except Exception as e:
-        print(f"Warning: Could not start background scheduler: {e}")
+    # Start the background scheduler for recurring invoices outside test runs.
+    if _should_start_scheduler():
+        try:
+            start_scheduler(app)
+
+            # Register cleanup on app shutdown
+            @atexit.register
+            def cleanup():
+                from smart_invoice_pro.services.scheduler import shutdown_scheduler
+                shutdown_scheduler(app)
+        except Exception as e:
+            print(f"Warning: Could not start background scheduler: {e}")
 
     return app

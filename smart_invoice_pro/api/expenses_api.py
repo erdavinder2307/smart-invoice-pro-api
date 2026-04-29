@@ -34,8 +34,8 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def _validate_expense(data):
-    """Validate expense payload.  Returns {field: error} or None."""
+def _validate_expense(data, is_update=False):
+    """Validate expense payload. Returns {field: error} or None."""
     vendor_name = (data.get('vendor_name') or '').strip()
     date        = (data.get('date') or '').strip()
     category    = (data.get('category') or '').strip()
@@ -46,10 +46,13 @@ def _validate_expense(data):
         category_error = f"Invalid category. Choose from: {', '.join(sorted(VALID_CATEGORIES))}"
 
     return collect_errors(
-        vendor_name=validate_required(vendor_name, 'Vendor / Payee'),
-        date=validate_date(date, 'Date'),
-        category=validate_required(category, 'Category') or category_error,
-        amount=validate_positive_number(amount, 'Amount', allow_zero=False),
+        vendor_name=(validate_required(vendor_name, 'Vendor / Payee')
+                     if (not is_update or 'vendor_name' in data) else None),
+        date=validate_date(date, 'Date') if (not is_update or 'date' in data) else None,
+        category=((validate_required(category, 'Category') or category_error)
+                  if (not is_update or 'category' in data) else None),
+        amount=(validate_positive_number(amount, 'Amount', allow_zero=False)
+                if (not is_update or 'amount' in data) else None),
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,7 +300,7 @@ def update_expense(expense_id):
         data = request.get_json() or {}
 
         # Validate fields that are present in the payload
-        errors = _validate_expense(data)
+        errors = _validate_expense(data, is_update=True)
         if errors:
             return make_error_response(
                 VALIDATION_ERROR, "Please fix the highlighted fields", errors
