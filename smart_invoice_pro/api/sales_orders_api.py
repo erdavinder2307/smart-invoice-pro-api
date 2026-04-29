@@ -185,29 +185,37 @@ def get_sales_orders():
     try:
         status_filter = request.args.get('status')
         customer_id_filter = request.args.get('customer_id', type=int)
-        
+
+        _ALLOWED_SORT_FIELDS = {'created_at', 'so_number', 'order_date', 'delivery_date', 'total_amount'}
+        sort_by = request.args.get('sort_by', 'created_at')
+        sort_order = request.args.get('sort_order', 'desc').upper()
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'created_at'
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'DESC'
+
         query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         conditions = []
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
-        
+
         if status_filter:
             conditions.append("c.status = @status")
             parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
             conditions.append("c.customer_id = @customer_id")
             parameters.append({"name": "@customer_id", "value": customer_id_filter})
-        
+
         if conditions:
             query += " AND " + " AND ".join(conditions)
-        
-        query += " ORDER BY c.created_at DESC"
-        
+
+        query += f" ORDER BY c.{sort_by} {sort_order}"
+
         items = list(sales_orders_container.query_items(
             query=query,
             parameters=parameters,
             enable_cross_partition_query=True
         ))
-        
+
         return jsonify(items), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve sales orders: {str(e)}"}), 500

@@ -5,6 +5,13 @@ from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_i
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.validation_utils import (
+    make_error_response, collect_errors,
+    validate_required, validate_email as _validate_email,
+    validate_gst as _validate_gst, validate_pan as _validate_pan,
+    validate_mobile as _validate_mobile,
+    VALIDATION_ERROR, NOT_FOUND_ERROR,
+)
 import copy
 import uuid
 from flasgger import swag_from
@@ -22,11 +29,10 @@ customers_blueprint = Blueprint('customers', __name__)
 CUSTOMER_UPLOAD_FOLDER = 'uploads/customer_documents'
 os.makedirs(CUSTOMER_UPLOAD_FOLDER, exist_ok=True)
 
-# ─── Validation Helpers ──────────────────────────────────────────────────────
+# ─── Validation Helpers (kept for backward compatibility with any direct calls) ─
 def validate_email(email):
-    """Validate email format"""
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return re.match(pattern, email) is not None
+    """Validate email format — returns bool (legacy helper)."""
+    return _validate_email(email) is None
 
 def validate_gst_number(gst):
     """Validate GST number format: 22ZZZZZ9999Z9Z9"""
@@ -163,27 +169,34 @@ def create_customer():
     
     # Validate required fields
     if not data.get('display_name'):
-        return jsonify({'error': 'Display name is required'}), 400
-    if not data.get('email'):
-        return jsonify({'error': 'Email is required'}), 400
-    if not data.get('phone'):
-        return jsonify({'error': 'Phone is required'}), 400
-    
-    # Validate email format
-    if not validate_email(data['email']):
-        return jsonify({'error': 'Invalid email format'}), 400
-    
-    # Validate GST number if provided
-    if data.get('gst_number') and not validate_gst_number(data['gst_number']):
-        return jsonify({'error': 'Invalid GST number format. Expected: 22ZZZZZ9999Z9Z9'}), 400
-    
-    # Validate PAN if provided
-    if data.get('pan') and not validate_pan(data['pan']):
-        return jsonify({'error': 'Invalid PAN format. Expected: ZZZZZ9999Z'}), 400
-    
-    # Validate mobile if provided
-    if data.get('mobile') and not validate_mobile(data['mobile']):
-        return jsonify({'error': 'Invalid mobile number format'}), 400
+        pass  # handled below
+    # ── Collect all field errors at once ────────────────────────────────────
+    display_name  = (data.get('display_name') or '').strip()
+    email_val     = (data.get('email') or '').strip()
+    phone_val     = (data.get('phone') or '').strip()
+    gst_val       = (data.get('gst_number') or '').strip()
+    pan_val       = (data.get('pan') or '').strip()
+    mobile_val    = (data.get('mobile') or '').strip()
+    customer_type = data.get('customer_type', 'business')
+    company_name  = (data.get('company_name') or '').strip()
+
+    company_name_error = None
+    if customer_type == 'business' and not company_name:
+        company_name_error = 'Company name is required for business customers'
+
+    field_errors = collect_errors(
+        display_name=validate_required(display_name, 'Display Name'),
+        email=validate_required(email_val, 'Email') or _validate_email(email_val),
+        phone=validate_required(phone_val, 'Phone'),
+        gst_number=_validate_gst(gst_val),
+        pan=_validate_pan(pan_val),
+        mobile=_validate_mobile(mobile_val) if mobile_val else None,
+        company_name=company_name_error,
+    )
+    if field_errors:
+        return make_error_response(
+            VALIDATION_ERROR, "Please fix the highlighted fields", field_errors
+        )
     
     now = datetime.utcnow().isoformat()
     customer_uuid = str(uuid.uuid4())
@@ -291,9 +304,30 @@ def create_customer():
 })
 def list_customers():
     query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+    parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
+    created_from = request.args.get('created_from')
+    created_to = request.args.get('created_to')
+    if created_from and created_to:
+        query += " AND c.created_at >= @created_from AND c.created_at <= @created_to"
+        parameters.extend([
+            {"name": "@created_from", "value": created_from},
+            {"name": "@created_to", "value": created_to},
+        ])
+
+    _ALLOWED_SORT_FIELDS = {'created_at', 'display_name', 'name', 'company_name'}
+    sort_by = request.args.get('sort_by', 'display_name')
+    sort_order = request.args.get('sort_order', 'asc').upper()
+    if sort_by not in _ALLOWED_SORT_FIELDS:
+        sort_by = 'display_name'
+    if sort_order not in ('ASC', 'DESC'):
+        sort_order = 'ASC'
+
+    query += f" ORDER BY c.{sort_by} {sort_order}"
+
     items = list(customers_container.query_items(
         query=query,
-        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        parameters=parameters,
         enable_cross_partition_query=True
     ))
     return jsonify(sanitize_items(items))

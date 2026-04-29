@@ -184,25 +184,33 @@ def get_bills():
     try:
         status_filter = request.args.get('payment_status')
         vendor_id_filter = request.args.get('vendor_id')
-        
-        query = "SELECT * FROM c"
-        conditions = []
-        
+
+        _ALLOWED_SORT_FIELDS = {'created_at', 'bill_number', 'bill_date', 'due_date', 'total_amount'}
+        sort_by = request.args.get('sort_by', 'created_at')
+        sort_order = request.args.get('sort_order', 'desc').upper()
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'created_at'
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'DESC'
+
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+        parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
         if status_filter:
-            conditions.append(f"c.payment_status = '{status_filter}'")
+            query += " AND c.payment_status = @payment_status"
+            parameters.append({"name": "@payment_status", "value": status_filter})
         if vendor_id_filter:
-            conditions.append(f"c.vendor_id = '{vendor_id_filter}'")
-        
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        
-        query += " ORDER BY c.created_at DESC"
-        
+            query += " AND c.vendor_id = @vendor_id"
+            parameters.append({"name": "@vendor_id", "value": vendor_id_filter})
+
+        query += f" ORDER BY c.{sort_by} {sort_order}"
+
         items = list(bills_container.query_items(
             query=query,
+            parameters=parameters,
             enable_cross_partition_query=True
         ))
-        
+
         return jsonify(items), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve bills: {str(e)}"}), 500

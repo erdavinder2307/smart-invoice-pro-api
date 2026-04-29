@@ -125,6 +125,27 @@ class TestListCustomers:
         assert resp.status_code == 200
         assert resp.get_json() == []
 
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_list_applies_created_at_filter(self, mock_cust, client, headers_a):
+        mock_cust.query_items.return_value = [
+            {"id": "c-1", "display_name": "C1", "tenant_id": TENANT_A, "created_at": "2026-04-10T12:00:00"},
+        ]
+
+        resp = client.get(
+            "/api/customers?created_from=2026-04-01T00:00:00&created_to=2026-04-30T23:59:59.999999",
+            headers=headers_a,
+        )
+
+        assert resp.status_code == 200
+        call_kwargs = mock_cust.query_items.call_args.kwargs
+        assert "c.created_at >= @created_from" in call_kwargs["query"]
+        assert "c.created_at <= @created_to" in call_kwargs["query"]
+        assert call_kwargs["parameters"] == [
+            {"name": "@tenant_id", "value": TENANT_A},
+            {"name": "@created_from", "value": "2026-04-01T00:00:00"},
+            {"name": "@created_to", "value": "2026-04-30T23:59:59.999999"},
+        ]
+
 
 class TestGetCustomer:
 

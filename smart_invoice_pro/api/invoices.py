@@ -328,9 +328,37 @@ def create_invoice():
     }
 })
 def list_invoices():
+    tenant_id = request.tenant_id
+    status_filter = request.args.get('status')
+    created_from = request.args.get('created_from')
+    created_to = request.args.get('created_to')
+
+    _ALLOWED_SORT_FIELDS = {'created_at', 'issue_date', 'due_date', 'invoice_number', 'total_amount'}
+    sort_by = request.args.get('sort_by', 'created_at')
+    sort_order = request.args.get('sort_order', 'desc').upper()
+    if sort_by not in _ALLOWED_SORT_FIELDS:
+        sort_by = 'created_at'
+    if sort_order not in ('ASC', 'DESC'):
+        sort_order = 'DESC'
+
+    query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+    parameters = [{"name": "@tenant_id", "value": tenant_id}]
+
+    if status_filter:
+        query += " AND c.status = @status"
+        parameters.append({"name": "@status", "value": status_filter})
+    if created_from:
+        query += " AND c.created_at >= @created_from"
+        parameters.append({"name": "@created_from", "value": created_from})
+    if created_to:
+        query += " AND c.created_at <= @created_to"
+        parameters.append({"name": "@created_to", "value": created_to})
+
+    query += f" ORDER BY c.{sort_by} {sort_order}"
+
     items = list(invoices_container.query_items(
-        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
-        parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
+        query=query,
+        parameters=parameters,
         enable_cross_partition_query=True
     ))
     return jsonify(sanitize_items(items))

@@ -180,25 +180,33 @@ def get_quotes():
     try:
         status_filter = request.args.get('status')
         customer_id_filter = request.args.get('customer_id')
-        
+
+        _ALLOWED_SORT_FIELDS = {'created_at', 'quote_number', 'issue_date', 'expiry_date', 'total_amount'}
+        sort_by = request.args.get('sort_by', 'created_at')
+        sort_order = request.args.get('sort_order', 'desc').upper()
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'created_at'
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'DESC'
+
         query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
-        
+
         if status_filter:
             query += " AND c.status = @status"
             parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
             query += " AND c.customer_id = @customer_id"
             parameters.append({"name": "@customer_id", "value": customer_id_filter})
-        
-        query += " ORDER BY c.created_at DESC"
-        
+
+        query += f" ORDER BY c.{sort_by} {sort_order}"
+
         items = list(quotes_container.query_items(
             query=query,
             parameters=parameters,
             enable_cross_partition_query=True
         ))
-        
+
         return jsonify(items), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch quotes: {str(e)}"}), 500
