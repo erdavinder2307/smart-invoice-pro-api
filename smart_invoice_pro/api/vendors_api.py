@@ -1,5 +1,10 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import vendors_container
+from smart_invoice_pro.utils.validation_utils import (
+    make_error_response, collect_errors,
+    validate_required, validate_email, validate_gst, validate_mobile,
+    VALIDATION_ERROR, NOT_FOUND_ERROR, SERVER_ERROR,
+)
 import uuid
 from flasgger import swag_from
 from datetime import datetime
@@ -7,24 +12,24 @@ from smart_invoice_pro.utils.audit_logger import log_audit_event
 
 vendors_blueprint = Blueprint('vendors', __name__)
 
-def validate_vendor_data(data, is_update=False):
-    """Validate vendor data"""
-    errors = {}
-    
-    if not is_update:
-        required_fields = ['name', 'contact_person']
-        for field in required_fields:
-            if field not in data:
-                errors[field] = f'{field} is required'
-    
-    # Validate email format if provided
-    if 'email' in data and data['email']:
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, data['email']):
-            errors['email'] = 'Invalid email format'
-    
-    return errors
+
+def _validate_vendor(data, is_update=False):
+    """
+    Validate vendor payload.  Returns a dict of {field: error_msg} or None.
+    On CREATE all required fields must be present; on UPDATE only provided
+    fields are validated.
+    """
+    vendor_name = data.get('vendor_name', '').strip()
+    email       = data.get('email', '').strip()
+    phone       = data.get('phone', '').strip()
+    gst_number  = data.get('gst_number', '').strip()
+
+    return collect_errors(
+        vendor_name=validate_required(vendor_name, 'Vendor Name') if not is_update else None,
+        email=validate_email(email) if email else None,
+        phone=validate_mobile(phone) if phone else None,
+        gst_number=validate_gst(gst_number) if gst_number else None,
+    )
 
 @vendors_blueprint.route('/vendors', methods=['POST'])
 @swag_from({
@@ -73,36 +78,34 @@ def validate_vendor_data(data, is_update=False):
 })
 def create_vendor():
     """Create a new vendor"""
-    data = request.get_json()
-    
-    # Validate data
-    errors = validate_vendor_data(data)
+    data = request.get_json() or {}
+
+    errors = _validate_vendor(data, is_update=False)
     if errors:
-        return jsonify({"error": "Validation failed", "details": errors}), 400
-    
+        return make_error_response(
+            VALIDATION_ERROR, "Please fix the highlighted fields", errors
+        )
+
     now = datetime.utcnow().isoformat()
     vendor_id = str(uuid.uuid4())
-    
+
     item = {
         'id': vendor_id,
-        'vendor_id': vendor_id,  # For partition key
-        'name': data['name'],
-        'contact_person': data['contact_person'],
-        'email': data.get('email', ''),
-        'phone': data.get('phone', ''),
-        'address': data.get('address', ''),
-        'city': data.get('city', ''),
-        'state': data.get('state', ''),
-        'postal_code': data.get('postal_code', ''),
-        'country': data.get('country', ''),
-        'tax_id': data.get('tax_id', ''),
+        'vendor_id': vendor_id,
+        'vendor_name': data.get('vendor_name', '').strip(),
+        'contact_person': data.get('contact_person', '').strip(),
+        'email': data.get('email', '').strip(),
+        'phone': data.get('phone', '').strip(),
+        'address': data.get('address', '').strip(),
+        'gst_number': data.get('gst_number', '').strip().upper(),
         'payment_terms': data.get('payment_terms', 'Net 30'),
-        'notes': data.get('notes', ''),
+        'status': data.get('status', 'Active'),
+        'notes': data.get('notes', '').strip(),
         'tenant_id': request.tenant_id,
         'created_at': now,
-        'updated_at': now
+        'updated_at': now,
     }
-    
+
     try:
         created_item = vendors_container.create_item(body=item)
         log_audit_event({
@@ -117,7 +120,7 @@ def create_vendor():
         })
         return jsonify(created_item), 201
     except Exception as e:
-        return jsonify({"error": f"Failed to create vendor: {str(e)}"}), 500
+        return make_error_response(SERVER_ERROR, "Failed to create vendor", status=500)
 
 @vendors_blueprint.route('/vendors', methods=['GET'])
 @swag_from({
@@ -146,14 +149,22 @@ def get_vendors():
     """Get all vendors with optional search"""
     try:
         search_term = request.args.get('search', '')
-        
+
+        _ALLOWED_SORT_FIELDS = {'created_at', 'vendor_name', 'name'}
+        sort_by = request.args.get('sort_by', 'vendor_name')
+        sort_order = request.args.get('sort_order', 'asc').upper()
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'vendor_name'
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'ASC'
+
         query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         params = [{"name": "@tenant_id", "value": request.tenant_id}]
         if search_term:
             query += " AND CONTAINS(LOWER(c.name), @search)"
             params.append({"name": "@search", "value": search_term.lower()})
-        
-        query += " ORDER BY c.created_at DESC"
+
+        query += f" ORDER BY c.{sort_by} {sort_order}"
         
         items = list(vendors_container.query_items(
             query=query,
@@ -250,15 +261,15 @@ def get_vendor(vendor_id):
 })
 def update_vendor(vendor_id):
     """Update a vendor"""
-    data = request.get_json()
-    
-    # Validate data
-    errors = validate_vendor_data(data, is_update=True)
+    data = request.get_json() or {}
+
+    errors = _validate_vendor(data, is_update=True)
     if errors:
-        return jsonify({"error": "Validation failed", "details": errors}), 400
-    
+        return make_error_response(
+            VALIDATION_ERROR, "Please fix the highlighted fields", errors
+        )
+
     try:
-        # Fetch existing vendor
         query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(vendors_container.query_items(
             query=query,
@@ -268,29 +279,27 @@ def update_vendor(vendor_id):
             ],
             enable_cross_partition_query=True
         ))
-        
+
         if not items:
-            return jsonify({"error": "Vendor not found"}), 404
-        
+            return make_error_response(NOT_FOUND_ERROR, "Vendor not found", status=404)
+
         vendor = items[0]
         before_snapshot = dict(vendor)
-        
-        # Update fields
+
         updatable_fields = [
-            'name', 'contact_person', 'email', 'phone', 'address', 'city', 'state',
-            'postal_code', 'country', 'tax_id', 'payment_terms', 'notes'
+            'vendor_name', 'contact_person', 'email', 'phone',
+            'address', 'gst_number', 'payment_terms', 'status', 'notes',
         ]
-        
         for field in updatable_fields:
             if field in data:
-                vendor[field] = data[field]
-        
+                value = data[field]
+                if field == 'gst_number' and value:
+                    value = value.strip().upper()
+                vendor[field] = value
+
         vendor['updated_at'] = datetime.utcnow().isoformat()
-        
-        updated_item = vendors_container.replace_item(
-            item=vendor['id'],
-            body=vendor
-        )
+
+        updated_item = vendors_container.replace_item(item=vendor['id'], body=vendor)
 
         log_audit_event({
             "action": "UPDATE",
@@ -302,10 +311,10 @@ def update_vendor(vendor_id):
             "tenant_id": request.tenant_id,
             "user_id": getattr(request, "user_id", None),
         })
-        
+
         return jsonify(updated_item), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to update vendor: {str(e)}"}), 500
+        return make_error_response(SERVER_ERROR, "Failed to update vendor", status=500)
 
 @vendors_blueprint.route('/vendors/<vendor_id>', methods=['DELETE'])
 @swag_from({

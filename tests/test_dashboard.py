@@ -10,46 +10,90 @@ class TestDashboardSummary:
 
     def test_summary_returns_all_metrics(self, client, headers_a):
         """Happy path — returns all summary fields."""
+        import datetime
+        current_year = datetime.date.today().year
+
         with patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
              patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
              patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
-             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills:
-            mock_cust.read_all_items.return_value = [{"id": "c1"}, {"id": "c2"}]
-            mock_prod.read_all_items.return_value = [{"id": "p1"}]
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills, \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container") as mock_exp:
+            mock_cust.read_all_items.return_value = [
+                {"id": "c1", "tenant_id": TENANT_A, "created_at": f"{current_year}-01-10"},
+                {"id": "c2", "tenant_id": TENANT_A, "created_at": f"{current_year}-02-10"},
+            ]
+            mock_prod.read_all_items.return_value = [{"id": "p1", "tenant_id": TENANT_A}]
             mock_inv.read_all_items.return_value = [
-                {"id": "i1", "total_amount": 1000, "balance_due": 500, "status": "Issued", "due_date": "2020-01-01"},
-                {"id": "i2", "total_amount": 2000, "balance_due": 0, "status": "Paid"},
+                {
+                    "id": "i1",
+                    "tenant_id": TENANT_A,
+                    "created_at": f"{current_year}-03-01",
+                    "total_amount": 1000,
+                    "balance_due": 500,
+                    "amount_paid": 500,
+                    "status": "Issued",
+                    "due_date": "2020-01-01",
+                },
+                {
+                    "id": "i2",
+                    "tenant_id": TENANT_A,
+                    "created_at": f"{current_year}-03-05",
+                    "total_amount": 2000,
+                    "balance_due": 0,
+                    "amount_paid": 2000,
+                    "status": "Paid",
+                },
             ]
             mock_bills.read_all_items.return_value = [
-                {"total_amount": 500, "balance_due": 500, "payment_status": "Unpaid"},
+                {
+                    "tenant_id": TENANT_A,
+                    "created_at": f"{current_year}-03-02",
+                    "total_amount": 500,
+                    "balance_due": 500,
+                    "payment_status": "Unpaid",
+                },
+            ]
+            mock_exp.read_all_items.return_value = [
+                {"tenant_id": TENANT_A, "created_at": f"{current_year}-03-03", "amount": 250}
             ]
 
             resp = client.get("/api/dashboard/summary", headers=headers_a)
             assert resp.status_code == 200
             data = resp.get_json()
+
             assert data["total_customers"] == 2
             assert data["total_products"] == 1
             assert data["total_invoices"] == 2
             assert data["total_revenue"] == 3000.0
             assert data["total_receivables"] == 500.0
-            assert data["total_payables"] == 500.0
+            assert data["total_payables"] == 750.0
+            assert "metrics" in data
+            assert data["metrics"]["customers_added"]["value"] == 2
+            assert data["metrics"]["invoices_created"]["value"] == 2
+            assert data["metrics"]["revenue"]["value"] == 3000.0
+            assert data["metrics"]["payments_received"]["value"] == 2500.0
+            assert data["metrics"]["payables"]["value"] == 750.0
+            assert data["metrics"]["overdue_invoices_current"]["value"] == 1
 
     def test_summary_empty_data(self, client, headers_a):
         """Empty database returns zeroes."""
         with patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
              patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
              patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
-             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills:
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills, \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container") as mock_exp:
             mock_cust.read_all_items.return_value = []
             mock_prod.read_all_items.return_value = []
             mock_inv.read_all_items.return_value = []
             mock_bills.read_all_items.return_value = []
+            mock_exp.read_all_items.return_value = []
 
             resp = client.get("/api/dashboard/summary", headers=headers_a)
             assert resp.status_code == 200
             data = resp.get_json()
             assert data["total_customers"] == 0
             assert data["total_revenue"] == 0
+            assert data["metrics"]["customers_added"]["value"] == 0
 
     def test_summary_range_this_year_filters_invoices(self, client, headers_a):
         """range=this_year filters out invoices outside current year."""
@@ -58,16 +102,18 @@ class TestDashboardSummary:
         with patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
              patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
              patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
-             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills:
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills, \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container") as mock_exp:
             mock_cust.read_all_items.return_value = []
             mock_prod.read_all_items.return_value = []
             mock_inv.read_all_items.return_value = [
-                {"id": "i1", "total_amount": 5000, "balance_due": 0, "status": "Paid",
+                {"id": "i1", "tenant_id": TENANT_A, "total_amount": 5000, "balance_due": 0, "status": "Paid",
                  "issue_date": f"{current_year}-03-01"},
-                {"id": "i2", "total_amount": 9999, "balance_due": 0, "status": "Paid",
+                {"id": "i2", "tenant_id": TENANT_A, "total_amount": 9999, "balance_due": 0, "status": "Paid",
                  "issue_date": f"{current_year - 1}-12-31"},  # last year — excluded
             ]
             mock_bills.read_all_items.return_value = []
+            mock_exp.read_all_items.return_value = []
 
             resp = client.get("/api/dashboard/summary?range=this_year", headers=headers_a)
             assert resp.status_code == 200
@@ -80,16 +126,18 @@ class TestDashboardSummary:
         with patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
              patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
              patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
-             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills:
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills, \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container") as mock_exp:
             mock_cust.read_all_items.return_value = []
             mock_prod.read_all_items.return_value = []
             mock_inv.read_all_items.return_value = [
-                {"id": "i1", "total_amount": 1000, "balance_due": 0, "status": "Paid",
+                {"id": "i1", "tenant_id": TENANT_A, "total_amount": 1000, "balance_due": 0, "status": "Paid",
                  "issue_date": "2025-06-15"},
-                {"id": "i2", "total_amount": 2000, "balance_due": 0, "status": "Paid",
+                {"id": "i2", "tenant_id": TENANT_A, "total_amount": 2000, "balance_due": 0, "status": "Paid",
                  "issue_date": "2025-08-01"},  # outside window
             ]
             mock_bills.read_all_items.return_value = []
+            mock_exp.read_all_items.return_value = []
 
             resp = client.get(
                 "/api/dashboard/summary?range=custom&start_date=2025-05-01&end_date=2025-07-31",
@@ -105,7 +153,8 @@ class TestDashboardSummary:
         with patch("smart_invoice_pro.api.dashboard_api.customers_container"), \
              patch("smart_invoice_pro.api.dashboard_api.products_container"), \
              patch("smart_invoice_pro.api.dashboard_api.invoices_container"), \
-             patch("smart_invoice_pro.api.dashboard_api.bills_container"):
+             patch("smart_invoice_pro.api.dashboard_api.bills_container"), \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container"):
             resp = client.get("/api/dashboard/summary?range=custom", headers=headers_a)
             assert resp.status_code == 400
 
@@ -118,7 +167,7 @@ class TestDashboardLowStock:
         with patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
              patch("smart_invoice_pro.api.dashboard_api.stock_container") as mock_stock:
             mock_prod.read_all_items.return_value = [
-                {"id": "p1", "name": "Widget", "reorder_level": 10},
+                {"id": "p1", "tenant_id": TENANT_A, "name": "Widget", "reorder_level": 10},
             ]
             # Stock: 3 IN, 0 OUT → current = 3, below threshold 10
             mock_stock.query_items.return_value = [
@@ -137,7 +186,7 @@ class TestDashboardLowStock:
         with patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
              patch("smart_invoice_pro.api.dashboard_api.stock_container") as mock_stock:
             mock_prod.read_all_items.return_value = [
-                {"id": "p1", "name": "Widget", "reorder_level": 5},
+                {"id": "p1", "tenant_id": TENANT_A, "name": "Widget", "reorder_level": 5},
             ]
             mock_stock.query_items.return_value = [
                 {"type": "IN", "quantity": 10},
@@ -174,8 +223,8 @@ class TestDashboardMonthlyRevenue:
         """Invoices are bucketed by month."""
         with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
             mock_inv.read_all_items.return_value = [
-                {"total_amount": 1000, "created_at": "2026-03-15T00:00:00"},
-                {"total_amount": 2000, "created_at": "2026-03-20T00:00:00"},
+                {"tenant_id": TENANT_A, "total_amount": 1000, "created_at": "2026-03-15T00:00:00"},
+                {"tenant_id": TENANT_A, "total_amount": 2000, "created_at": "2026-03-20T00:00:00"},
             ]
             resp = client.get("/api/dashboard/monthly-revenue", headers=headers_a)
             assert resp.status_code == 200
@@ -186,9 +235,9 @@ class TestDashboardMonthlyRevenue:
         """Custom range accepts start_date/end_date and returns matching months."""
         with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
             mock_inv.read_all_items.return_value = [
-                {"total_amount": 1000, "created_at": "2026-03-15T00:00:00"},
-                {"total_amount": 2000, "created_at": "2026-04-20T00:00:00"},
-                {"total_amount": 3000, "created_at": "2026-05-01T00:00:00"},
+                {"tenant_id": TENANT_A, "total_amount": 1000, "created_at": "2026-03-15T00:00:00"},
+                {"tenant_id": TENANT_A, "total_amount": 2000, "created_at": "2026-04-20T00:00:00"},
+                {"tenant_id": TENANT_A, "total_amount": 3000, "created_at": "2026-05-01T00:00:00"},
             ]
             resp = client.get(
                 "/api/dashboard/monthly-revenue?range=custom&start_date=2026-03-01&end_date=2026-04-30",
@@ -225,7 +274,7 @@ class TestDashboardRecentInvoices:
         """Returns recent invoices sorted by date."""
         with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
             mock_inv.read_all_items.return_value = [
-                {"id": "i1", "invoice_number": "INV-001", "customer_name": "Acme",
+                {"id": "i1", "tenant_id": TENANT_A, "invoice_number": "INV-001", "customer_name": "Acme",
                  "total_amount": 1000, "status": "Issued", "issue_date": "2026-03-01",
                  "due_date": "2026-03-15", "created_at": "2026-03-01T00:00:00"},
             ]
@@ -239,7 +288,7 @@ class TestDashboardRecentInvoices:
         """Limit query param controls count."""
         with patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv:
             invoices = [
-                {"id": f"i{i}", "total_amount": 100, "status": "Draft",
+                {"id": f"i{i}", "tenant_id": TENANT_A, "total_amount": 100, "status": "Draft",
                  "created_at": f"2026-03-{i+1:02d}T00:00:00",
                  "issue_date": f"2026-03-{i+1:02d}", "due_date": "2026-03-30"}
                 for i in range(5)

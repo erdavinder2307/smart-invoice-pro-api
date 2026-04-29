@@ -11,7 +11,10 @@ from tests.conftest import TENANT_A
 class TestStockAdd:
 
     @patch("smart_invoice_pro.api.stock_api.stock_container")
-    def test_add_stock_success(self, mock_stock, client, headers_a):
+    @patch("smart_invoice_pro.api.stock_api.products_container")
+    def test_add_stock_success(self, mock_products, mock_stock, client, headers_a):
+        mock_products.query_items.return_value = [{"id": "p-1", "tenant_id": TENANT_A, "is_deleted": False}]
+        mock_stock.query_items.return_value = [{"type": "IN", "quantity": 50}]
         resp = client.post(
             "/api/stock/add",
             json={"product_id": "p-1", "quantity": 50, "source": "Purchase"},
@@ -23,13 +26,19 @@ class TestStockAdd:
         txn = data["transaction"]
         assert txn["type"] == "IN"
         assert txn["quantity"] == 50.0
+        assert txn["tenant_id"] == TENANT_A
+        assert data["current_stock"] == 50.0
+        assert data["operation"] == "increase"
         mock_stock.create_item.assert_called_once()
 
 
 class TestStockReduce:
 
     @patch("smart_invoice_pro.api.stock_api.stock_container")
-    def test_reduce_stock_success(self, mock_stock, client, headers_a):
+    @patch("smart_invoice_pro.api.stock_api.products_container")
+    def test_reduce_stock_success(self, mock_products, mock_stock, client, headers_a):
+        mock_products.query_items.return_value = [{"id": "p-1", "tenant_id": TENANT_A, "is_deleted": False}]
+        mock_stock.query_items.return_value = [{"type": "OUT", "quantity": 10}]
         resp = client.post(
             "/api/stock/reduce",
             json={"product_id": "p-1", "quantity": 10, "source": "Sale"},
@@ -41,6 +50,9 @@ class TestStockReduce:
         txn = data["transaction"]
         assert txn["type"] == "OUT"
         assert txn["quantity"] == 10.0
+        assert txn["tenant_id"] == TENANT_A
+        assert data["current_stock"] == -10.0
+        assert data["operation"] == "decrease"
 
 
 class TestCurrentStock:
@@ -60,15 +72,15 @@ class TestCurrentStock:
         assert data["stock_out"] == 30.0
 
     @patch("smart_invoice_pro.api.stock_api.stock_container")
-    def test_current_stock_non_negative(self, mock_stock, client, headers_a):
-        """Stock should never report negative values."""
+    def test_current_stock_can_be_negative(self, mock_stock, client, headers_a):
+        """Negative stock is allowed and should be reported accurately."""
         mock_stock.query_items.return_value = [
             {"type": "IN", "quantity": 10},
             {"type": "OUT", "quantity": 50},
         ]
         resp = client.get("/api/stock/p-1", headers=headers_a)
         data = resp.get_json()
-        assert data["current_stock"] >= 0
+        assert data["current_stock"] == -40.0
 
     @patch("smart_invoice_pro.api.stock_api.stock_container")
     def test_current_stock_no_transactions(self, mock_stock, client, headers_a):

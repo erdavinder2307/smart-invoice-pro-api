@@ -7,18 +7,50 @@ import base64
 from werkzeug.utils import secure_filename
 
 from smart_invoice_pro.utils.cosmos_client import expenses_container
+from smart_invoice_pro.utils.validation_utils import (
+    make_error_response, collect_errors,
+    validate_required, validate_positive_number, validate_date,
+    VALIDATION_ERROR, NOT_FOUND_ERROR, SERVER_ERROR,
+)
 
 expenses_blueprint = Blueprint('expenses', __name__)
 
 # Allowed file extensions for receipts
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf', 'gif'}
-UPLOAD_FOLDER = 'uploads/receipts'
+ALLOWED_EXTENSIONS  = {'png', 'jpg', 'jpeg', 'pdf', 'gif'}
+ALLOWED_MIMETYPES   = {'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'}
+UPLOAD_FOLDER       = 'uploads/receipts'
+MAX_RECEIPT_BYTES   = 5 * 1024 * 1024  # 5 MB
+
+VALID_CATEGORIES = {
+    'Office Supplies', 'Travel', 'Utilities', 'Marketing', 'Software',
+    'Equipment', 'Meals & Entertainment', 'Professional Services',
+    'Rent', 'Insurance', 'Other',
+}
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _validate_expense(data):
+    """Validate expense payload.  Returns {field: error} or None."""
+    vendor_name = (data.get('vendor_name') or '').strip()
+    date        = (data.get('date') or '').strip()
+    category    = (data.get('category') or '').strip()
+    amount      = data.get('amount')
+
+    category_error = None
+    if category and category not in VALID_CATEGORIES:
+        category_error = f"Invalid category. Choose from: {', '.join(sorted(VALID_CATEGORIES))}"
+
+    return collect_errors(
+        vendor_name=validate_required(vendor_name, 'Vendor / Payee'),
+        date=validate_date(date, 'Date'),
+        category=validate_required(category, 'Category') or category_error,
+        amount=validate_positive_number(amount, 'Amount', allow_zero=False),
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CREATE EXPENSE
@@ -53,64 +85,61 @@ def allowed_file(filename):
 })
 def create_expense():
     try:
-        data = request.get_json()
-        
-        # Generate unique ID
-        expense_id = str(uuid.uuid4())
-        
-        # Validate required fields
-        required = ['vendor_name', 'date', 'category', 'amount']
-        for field in required:
-            if field not in data:
-                return jsonify({"error": f"Missing required field: {field}"}), 400
-        
+        data = request.get_json() or {}
+
+        # Validate fields
+        errors = _validate_expense(data)
+        if errors:
+            return make_error_response(
+                VALIDATION_ERROR, "Please fix the highlighted fields", errors
+            )
+
         # Handle receipt upload if provided
         receipt_url = None
-        if 'receipt_base64' in data and data['receipt_base64']:
+        if data.get('receipt_base64'):
             try:
-                receipt_data = data['receipt_base64']
+                receipt_data     = data['receipt_base64']
                 receipt_filename = data.get('receipt_filename', 'receipt')
-                
-                # Remove data URL prefix if present
+                expense_id_tmp   = str(uuid.uuid4())
+
                 if ',' in receipt_data:
                     receipt_data = receipt_data.split(',')[1]
-                
-                # Decode base64
+
                 file_bytes = base64.b64decode(receipt_data)
-                
-                # Generate safe filename
-                safe_filename = secure_filename(f"{expense_id}_{receipt_filename}")
+                if len(file_bytes) > MAX_RECEIPT_BYTES:
+                    return make_error_response(
+                        VALIDATION_ERROR, "Receipt file size must be less than 5 MB"
+                    )
+
+                safe_filename = secure_filename(f"{expense_id_tmp}_{receipt_filename}")
                 file_path = os.path.join(UPLOAD_FOLDER, safe_filename)
-                
-                # Save file
                 with open(file_path, 'wb') as f:
                     f.write(file_bytes)
-                
                 receipt_url = f"/uploads/receipts/{safe_filename}"
-            except Exception as e:
-                print(f"Error saving receipt: {str(e)}")
-                # Continue without receipt if upload fails
-        
-        # Create expense document
+                expense_id  = expense_id_tmp
+            except Exception:
+                expense_id = str(uuid.uuid4())
+        else:
+            expense_id = str(uuid.uuid4())
+
         expense = {
-            'id': expense_id,
-            'vendor_name': data['vendor_name'],
-            'date': data['date'],
-            'category': data['category'],
-            'amount': float(data['amount']),
-            'currency': data.get('currency', 'INR'),
-            'notes': data.get('notes', ''),
+            'id':          expense_id,
+            'vendor_name': data['vendor_name'].strip(),
+            'date':        data['date'].strip(),
+            'category':    data['category'].strip(),
+            'amount':      float(data['amount']),
+            'currency':    data.get('currency', 'INR'),
+            'notes':       data.get('notes', '').strip(),
             'receipt_url': receipt_url,
-            'created_at': datetime.utcnow().isoformat(),
-            'updated_at': datetime.utcnow().isoformat()
+            'tenant_id':   request.tenant_id,
+            'created_at':  datetime.utcnow().isoformat(),
+            'updated_at':  datetime.utcnow().isoformat(),
         }
-        
-        # Save to Cosmos DB
+
         expenses_container.create_item(body=expense)
-        
         return jsonify(expense), 201
     except Exception as e:
-        return jsonify({"error": f"Failed to create expense: {str(e)}"}), 500
+        return make_error_response(SERVER_ERROR, "Failed to create expense", status=500)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET ALL EXPENSES
@@ -151,32 +180,40 @@ def get_expenses():
         category = request.args.get('category')
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
-        
-        # Build query
-        query = "SELECT * FROM c WHERE 1=1"
-        parameters = []
-        
+
+        _ALLOWED_SORT_FIELDS = {'date', 'amount', 'category', 'vendor_name', 'created_at'}
+        sort_by = request.args.get('sort_by', 'date')
+        sort_order = request.args.get('sort_order', 'desc').upper()
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'date'
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'DESC'
+
+        # Build query with tenant isolation
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+        parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
         if category:
             query += " AND c.category = @category"
             parameters.append({"name": "@category", "value": category})
-        
+
         if start_date:
             query += " AND c.date >= @start_date"
             parameters.append({"name": "@start_date", "value": start_date})
-        
+
         if end_date:
             query += " AND c.date <= @end_date"
             parameters.append({"name": "@end_date", "value": end_date})
-        
-        query += " ORDER BY c.date DESC"
-        
+
+        query += f" ORDER BY c.{sort_by} {sort_order}"
+
         # Execute query
         items = list(expenses_container.query_items(
             query=query,
             parameters=parameters,
             enable_cross_partition_query=True
         ))
-        
+
         return jsonify(items), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch expenses: {str(e)}"}), 500
@@ -257,68 +294,66 @@ def get_expense(expense_id):
 })
 def update_expense(expense_id):
     try:
-        # Fetch existing expense
-        query = "SELECT * FROM c WHERE c.id = @id"
-        parameters = [{"name": "@id", "value": expense_id}]
-        
+        data = request.get_json() or {}
+
+        # Validate fields that are present in the payload
+        errors = _validate_expense(data)
+        if errors:
+            return make_error_response(
+                VALIDATION_ERROR, "Please fix the highlighted fields", errors
+            )
+
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(expenses_container.query_items(
             query=query,
-            parameters=parameters,
+            parameters=[
+                {"name": "@id",        "value": expense_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
-        
+
         if not items:
-            return jsonify({"error": "Expense not found"}), 404
-        
+            return make_error_response(NOT_FOUND_ERROR, "Expense not found", status=404)
+
         expense = items[0]
-        data = request.get_json()
-        
-        # Update fields
-        expense['vendor_name'] = data.get('vendor_name', expense['vendor_name'])
-        expense['date'] = data.get('date', expense['date'])
-        expense['category'] = data.get('category', expense['category'])
-        expense['amount'] = float(data.get('amount', expense['amount']))
-        expense['currency'] = data.get('currency', expense['currency'])
-        expense['notes'] = data.get('notes', expense['notes'])
+
+        # Update only provided fields
+        for field in ('vendor_name', 'date', 'category', 'currency', 'notes'):
+            if field in data:
+                expense[field] = data[field]
+        if 'amount' in data:
+            expense['amount'] = float(data['amount'])
         expense['updated_at'] = datetime.utcnow().isoformat()
-        
+
         # Handle new receipt upload
-        if 'receipt_base64' in data and data['receipt_base64']:
+        if data.get('receipt_base64'):
             try:
-                receipt_data = data['receipt_base64']
+                receipt_data     = data['receipt_base64']
                 receipt_filename = data.get('receipt_filename', 'receipt')
-                
-                # Remove data URL prefix if present
                 if ',' in receipt_data:
                     receipt_data = receipt_data.split(',')[1]
-                
-                # Decode base64
                 file_bytes = base64.b64decode(receipt_data)
-                
-                # Generate safe filename
+                if len(file_bytes) > MAX_RECEIPT_BYTES:
+                    return make_error_response(
+                        VALIDATION_ERROR, "Receipt file size must be less than 5 MB"
+                    )
                 safe_filename = secure_filename(f"{expense_id}_{receipt_filename}")
                 file_path = os.path.join(UPLOAD_FOLDER, safe_filename)
-                
-                # Delete old receipt if exists
                 if expense.get('receipt_url'):
-                    old_file_path = expense['receipt_url'].lstrip('/')
-                    if os.path.exists(old_file_path):
-                        os.remove(old_file_path)
-                
-                # Save new file
+                    old_path = expense['receipt_url'].lstrip('/')
+                    if os.path.exists(old_path):
+                        os.remove(old_path)
                 with open(file_path, 'wb') as f:
                     f.write(file_bytes)
-                
                 expense['receipt_url'] = f"/uploads/receipts/{safe_filename}"
-            except Exception as e:
-                print(f"Error updating receipt: {str(e)}")
-        
-        # Replace in Cosmos DB
+            except Exception:
+                pass  # Continue without updating receipt on error
+
         expenses_container.replace_item(item=expense['id'], body=expense)
-        
         return jsonify(expense), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to update expense: {str(e)}"}), 500
+    except Exception:
+        return make_error_response(SERVER_ERROR, "Failed to update expense", status=500)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DELETE EXPENSE

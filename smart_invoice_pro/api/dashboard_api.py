@@ -1,10 +1,221 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flasgger import swag_from
 from datetime import datetime, timedelta
-from smart_invoice_pro.utils.cosmos_client import customers_container, products_container, invoices_container, bills_container, get_container
+from smart_invoice_pro.utils.cosmos_client import (
+    customers_container,
+    products_container,
+    invoices_container,
+    bills_container,
+    expenses_container,
+    stock_container,
+)
 
-stock_container = get_container("stock", "/product_id")
 dashboard_blueprint = Blueprint('dashboard', __name__)
+
+_SUMMARY_CACHE = {}
+_SUMMARY_CACHE_TTL_SECONDS = 180
+
+OPEN_INVOICE_STATUSES = {'issued', 'partially paid', 'overdue', 'sent'}
+OPEN_BILL_STATUSES = {'unpaid', 'partially paid', 'overdue'}
+
+
+def _safe_float(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except Exception:
+        return None
+
+
+def _doc_date(document, fields):
+    for field in fields:
+        parsed = _parse_iso_date(document.get(field))
+        if parsed:
+            return parsed
+    return None
+
+
+def _filter_docs_by_period(documents, date_fields, start_date, end_date):
+    filtered = []
+    for document in documents:
+        doc_date = _doc_date(document, date_fields)
+        if not doc_date:
+            continue
+        if start_date <= doc_date <= end_date:
+            filtered.append(document)
+    return filtered
+
+
+def _metric_payload(current_value, previous_value):
+    change = 0.0 if previous_value == 0 else ((current_value - previous_value) / previous_value) * 100
+    return {
+        'value': current_value,
+        'previous_value': previous_value,
+        'percentage_change': round(change, 2),
+    }
+
+
+def _period_label(range_type, start_date, end_date):
+    if range_type == 'this_week':
+        return 'This Week'
+    if range_type == 'this_month':
+        return 'This Month'
+    if range_type == 'this_quarter':
+        return 'This Quarter'
+    if range_type == 'this_year':
+        return 'This Year'
+    return f"{start_date.isoformat()} to {end_date.isoformat()}"
+
+
+def _resolve_period_from_request(range_type, args, today):
+    if range_type == 'this_week':
+        return today - timedelta(days=6), today, None
+    if range_type == 'this_month':
+        return today.replace(day=1), today, None
+    if range_type == 'this_quarter':
+        quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+        return today.replace(month=quarter_start_month, day=1), today, None
+    if range_type == 'this_year':
+        return today.replace(month=1, day=1), today, None
+    if range_type == 'custom':
+        start_date = _parse_iso_date(args.get('start_date'))
+        end_date = _parse_iso_date(args.get('end_date'))
+        if not start_date or not end_date:
+            return None, None, 'start_date and end_date are required for custom range'
+        if start_date > end_date:
+            return None, None, 'start_date cannot be after end_date'
+        return start_date, end_date, None
+    return None, None, 'Invalid range. Supported: this_week, this_month, this_quarter, this_year, custom'
+
+
+def _previous_period(start_date, end_date):
+    day_count = (end_date - start_date).days + 1
+    previous_end = start_date - timedelta(days=1)
+    previous_start = previous_end - timedelta(days=day_count - 1)
+    return previous_start, previous_end
+
+
+def _tenant_docs(container, tenant_id):
+    docs = list(container.read_all_items())
+    if not tenant_id:
+        return docs
+    return [doc for doc in docs if doc.get('tenant_id') == tenant_id]
+
+
+def _invoice_payments_in_period(invoices, start_date, end_date):
+    total = 0.0
+    for invoice in invoices:
+        payment_history = invoice.get('payment_history')
+        if isinstance(payment_history, list) and payment_history:
+            for payment in payment_history:
+                payment_date = _doc_date(payment, ['payment_date', 'paid_date', 'created_at', 'date'])
+                if payment_date and start_date <= payment_date <= end_date:
+                    total += _safe_float(
+                        payment.get('amount')
+                        or payment.get('paid_amount')
+                        or payment.get('amount_paid')
+                    )
+            continue
+
+        invoice_date = _doc_date(invoice, ['created_at', 'issue_date'])
+        if invoice_date and start_date <= invoice_date <= end_date:
+            total += _safe_float(invoice.get('amount_paid'))
+
+    return total
+
+
+def _summary_cache_key(tenant_id, range_type, args):
+    return (
+        tenant_id or 'public',
+        range_type,
+        args.get('start_date') or '',
+        args.get('end_date') or '',
+    )
+
+
+def _summary_cache_get(key):
+    cached = _SUMMARY_CACHE.get(key)
+    if not cached:
+        return None
+    if cached['expires_at'] < datetime.utcnow().timestamp():
+        _SUMMARY_CACHE.pop(key, None)
+        return None
+
+
+# ── Revenue chart helpers ─────────────────────────────────────────────────────
+
+def _chart_granularity(start_date, end_date):
+    """Return 'day', 'week', or 'month' based on span length."""
+    span = (end_date - start_date).days
+    if span <= 31:
+        return 'day'
+    if span <= 92:
+        return 'week'
+    return 'month'
+
+
+def _build_chart_buckets(granularity, start_date, end_date):
+    """Return list of (key, label, bucket_start, bucket_end) for the given period."""
+    buckets = []
+    if granularity == 'day':
+        cursor = start_date
+        while cursor <= end_date:
+            key = cursor.strftime('%Y-%m-%d')
+            label = cursor.strftime('%d %b')
+            buckets.append((key, label, cursor, cursor))
+            cursor += timedelta(days=1)
+    elif granularity == 'week':
+        cursor = start_date
+        while cursor <= end_date:
+            week_end = min(cursor + timedelta(days=6), end_date)
+            key = cursor.strftime('%Y-W%V')
+            label = f"{cursor.strftime('%d %b')} – {week_end.strftime('%d %b')}"
+            buckets.append((key, label, cursor, week_end))
+            cursor = week_end + timedelta(days=1)
+    else:  # month
+        month_cursor = start_date.replace(day=1)
+        while month_cursor <= end_date:
+            key = month_cursor.strftime('%Y-%m')
+            label = month_cursor.strftime('%b %Y')
+            if month_cursor.month == 12:
+                next_month = month_cursor.replace(year=month_cursor.year + 1, month=1, day=1)
+            else:
+                next_month = month_cursor.replace(month=month_cursor.month + 1, day=1)
+            bucket_end = min(next_month - timedelta(days=1), end_date)
+            buckets.append((key, label, month_cursor, bucket_end))
+            month_cursor = next_month
+    return buckets
+
+
+def _revenue_by_chart_buckets(invoices, buckets):
+    """Sum total_amount per (bucket_start, bucket_end) bucket."""
+    totals = {key: 0.0 for key, _, _, _ in buckets}
+    for inv in invoices:
+        inv_date = _doc_date(inv, ['created_at', 'issue_date'])
+        if not inv_date:
+            continue
+        amount = _safe_float(inv.get('total_amount'))
+        for key, _, b_start, b_end in buckets:
+            if b_start <= inv_date <= b_end:
+                totals[key] += amount
+                break
+    return totals
+    return cached['payload']
+
+
+def _summary_cache_set(key, payload):
+    _SUMMARY_CACHE[key] = {
+        'payload': payload,
+        'expires_at': datetime.utcnow().timestamp() + _SUMMARY_CACHE_TTL_SECONDS,
+    }
 
 @dashboard_blueprint.route('/dashboard/summary', methods=['GET'])
 @swag_from({
@@ -29,115 +240,141 @@ dashboard_blueprint = Blueprint('dashboard', __name__)
 })
 def dashboard_summary():
     try:
-        range_type = request.args.get('range', 'all')
+        range_type = request.args.get('range', 'this_year')
         today = datetime.utcnow().date()
+        tenant_id = getattr(request, 'tenant_id', None)
+        use_cache = not bool(current_app.config.get('TESTING'))
+        cache_key = _summary_cache_key(tenant_id, range_type, request.args)
+        if use_cache:
+            cached_payload = _summary_cache_get(cache_key)
+            if cached_payload:
+                return jsonify(cached_payload)
 
-        def parse_iso_date(value):
-            if not value:
-                return None
-            try:
-                return datetime.fromisoformat(value[:10]).date()
-            except Exception:
-                return None
+        start_date, end_date, error = _resolve_period_from_request(range_type, request.args, today)
+        if error:
+            return jsonify({'error': error}), 400
 
-        # Determine date bounds for filtering
-        if range_type == 'this_week':
-            start_date = today - timedelta(days=6)
-            end_date = today
-        elif range_type == 'this_month':
-            start_date = today.replace(day=1)
-            end_date = today
-        elif range_type == 'this_quarter':
-            quarter_start_month = ((today.month - 1) // 3) * 3 + 1
-            start_date = today.replace(month=quarter_start_month, day=1)
-            end_date = today
-        elif range_type == 'this_year':
-            start_date = today.replace(month=1, day=1)
-            end_date = today
-        elif range_type == 'custom':
-            start_date = parse_iso_date(request.args.get('start_date'))
-            end_date = parse_iso_date(request.args.get('end_date'))
-            if not start_date or not end_date:
-                return jsonify({'error': 'start_date and end_date are required for custom range'}), 400
-            if start_date > end_date:
-                return jsonify({'error': 'start_date cannot be after end_date'}), 400
-        else:
-            start_date = None
-            end_date = None
+        previous_start, previous_end = _previous_period(start_date, end_date)
 
-        def invoice_in_range(inv):
-            if start_date is None:
-                return True
-            date_str = inv.get('issue_date') or inv.get('created_at')
-            if not date_str:
-                return False
-            try:
-                inv_date = datetime.fromisoformat(date_str[:10]).date()
-                return start_date <= inv_date <= end_date
-            except Exception:
-                return False
+        all_customers = _tenant_docs(customers_container, tenant_id)
+        all_products = _tenant_docs(products_container, tenant_id)
+        all_invoices = _tenant_docs(invoices_container, tenant_id)
+        all_bills = _tenant_docs(bills_container, tenant_id)
+        all_expenses = _tenant_docs(expenses_container, tenant_id)
 
-        def bill_in_range(b):
-            if start_date is None:
-                return True
-            date_str = b.get('bill_date') or b.get('issue_date') or b.get('created_at')
-            if not date_str:
-                return False
-            try:
-                bill_date = datetime.fromisoformat(date_str[:10]).date()
-                return start_date <= bill_date <= end_date
-            except Exception:
-                return False
+        current_customers = _filter_docs_by_period(all_customers, ['created_at', 'customer_since'], start_date, end_date)
+        previous_customers = _filter_docs_by_period(all_customers, ['created_at', 'customer_since'], previous_start, previous_end)
 
-        total_customers = len(list(customers_container.read_all_items()))
-        total_products = len(list(products_container.read_all_items()))
-        all_invoices = list(invoices_container.read_all_items())
-        invoices = [inv for inv in all_invoices if invoice_in_range(inv)]
+        current_invoices = _filter_docs_by_period(all_invoices, ['created_at', 'issue_date'], start_date, end_date)
+        previous_invoices = _filter_docs_by_period(all_invoices, ['created_at', 'issue_date'], previous_start, previous_end)
 
-        total_invoices = len(invoices)
-        total_revenue = sum(float(inv.get('total_amount', 0)) for inv in invoices)
+        current_bills = _filter_docs_by_period(all_bills, ['created_at', 'bill_date', 'issue_date'], start_date, end_date)
+        previous_bills = _filter_docs_by_period(all_bills, ['created_at', 'bill_date', 'issue_date'], previous_start, previous_end)
 
-        # Receivables: balance_due on unpaid/partially-paid invoices in range
-        receivable_statuses = {'issued', 'partially paid', 'overdue', 'sent'}
-        total_receivables = sum(
-            float(inv.get('balance_due', inv.get('total_amount', 0)))
-            for inv in invoices
-            if inv.get('status', '').lower() in receivable_statuses
+        current_expenses = _filter_docs_by_period(all_expenses, ['created_at', 'expense_date', 'date'], start_date, end_date)
+        previous_expenses = _filter_docs_by_period(all_expenses, ['created_at', 'expense_date', 'date'], previous_start, previous_end)
+
+        customers_added_current = len(current_customers)
+        customers_added_previous = len(previous_customers)
+
+        invoices_created_current = len(current_invoices)
+        invoices_created_previous = len(previous_invoices)
+
+        revenue_current = sum(_safe_float(inv.get('total_amount')) for inv in current_invoices)
+        revenue_previous = sum(_safe_float(inv.get('total_amount')) for inv in previous_invoices)
+
+        payments_current = _invoice_payments_in_period(all_invoices, start_date, end_date)
+        payments_previous = _invoice_payments_in_period(all_invoices, previous_start, previous_end)
+
+        receivables_current = sum(
+            _safe_float(inv.get('balance_due', inv.get('total_amount')))
+            for inv in current_invoices
+            if str(inv.get('status', '')).lower() in OPEN_INVOICE_STATUSES
+        )
+        receivables_previous = sum(
+            _safe_float(inv.get('balance_due', inv.get('total_amount')))
+            for inv in previous_invoices
+            if str(inv.get('status', '')).lower() in OPEN_INVOICE_STATUSES
         )
 
-        # Overdue: due_date is past and invoice is still open (within range)
+        bill_payables_current = sum(
+            _safe_float(bill.get('balance_due', bill.get('total_amount')))
+            for bill in current_bills
+            if str(bill.get('payment_status', '')).lower() in OPEN_BILL_STATUSES
+        )
+        bill_payables_previous = sum(
+            _safe_float(bill.get('balance_due', bill.get('total_amount')))
+            for bill in previous_bills
+            if str(bill.get('payment_status', '')).lower() in OPEN_BILL_STATUSES
+        )
+        expense_total_current = sum(_safe_float(exp.get('amount', exp.get('total_amount'))) for exp in current_expenses)
+        expense_total_previous = sum(_safe_float(exp.get('amount', exp.get('total_amount'))) for exp in previous_expenses)
+
+        payables_current = bill_payables_current + expense_total_current
+        payables_previous = bill_payables_previous + expense_total_previous
+
         overdue_count = 0
-        for inv in invoices:
-            if inv.get('status', '').lower() not in {'issued', 'partially paid', 'sent', 'overdue'}:
+        for inv in all_invoices:
+            if str(inv.get('status', '')).lower() not in OPEN_INVOICE_STATUSES:
                 continue
-            due_str = inv.get('due_date')
-            if not due_str:
-                continue
-            try:
-                if datetime.fromisoformat(due_str[:10]).date() < today:
-                    overdue_count += 1
-            except Exception:
-                pass
+            due_date = _parse_iso_date(inv.get('due_date'))
+            if due_date and due_date < today:
+                overdue_count += 1
 
-        # Payables: balance_due on unpaid bills in range
-        payable_statuses = {'unpaid', 'partially paid', 'overdue'}
-        all_bills = list(bills_container.read_all_items())
-        bills = [b for b in all_bills if bill_in_range(b)]
-        total_payables = sum(
-            float(b.get('balance_due', b.get('total_amount', 0)))
-            for b in bills
-            if b.get('payment_status', '').lower() in payable_statuses
-        )
+        metrics = {
+            'customers_added': _metric_payload(customers_added_current, customers_added_previous),
+            'invoices_created': _metric_payload(invoices_created_current, invoices_created_previous),
+            'revenue': _metric_payload(revenue_current, revenue_previous),
+            'payments_received': _metric_payload(payments_current, payments_previous),
+            'receivables': _metric_payload(receivables_current, receivables_previous),
+            'payables': _metric_payload(payables_current, payables_previous),
+            'overdue_invoices_current': {
+                'value': overdue_count,
+                'is_time_based': False,
+            },
+            'total_customers': {
+                'value': len(all_customers),
+                'is_time_based': False,
+            },
+            'total_products': {
+                'value': len(all_products),
+                'is_time_based': False,
+            },
+        }
 
-        return jsonify({
-            'total_customers': total_customers,
-            'total_products': total_products,
-            'total_invoices': total_invoices,
-            'total_revenue': total_revenue,
-            'total_receivables': total_receivables,
-            'total_payables': total_payables,
+        payload = {
+            'range': range_type,
+            'period': {
+                'current': {
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat(),
+                    'label': _period_label(range_type, start_date, end_date),
+                },
+                'previous': {
+                    'start_date': previous_start.isoformat(),
+                    'end_date': previous_end.isoformat(),
+                    'label': f"Previous {_period_label(range_type, start_date, end_date)}",
+                },
+            },
+            'metrics': metrics,
+            # Backward-compatible aliases consumed by older clients.
+            'customers_added': metrics['customers_added']['value'],
+            'invoices_created': metrics['invoices_created']['value'],
+            'revenue': metrics['revenue']['value'],
+            'payments_received': metrics['payments_received']['value'],
+            'receivables': metrics['receivables']['value'],
+            'payables': metrics['payables']['value'],
             'overdue_count': overdue_count,
-        })
+            'total_customers': len(all_customers),
+            'total_products': len(all_products),
+            'total_invoices': invoices_created_current,
+            'total_revenue': revenue_current,
+            'total_receivables': receivables_current,
+            'total_payables': payables_current,
+        }
+        if use_cache:
+            _summary_cache_set(cache_key, payload)
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': f'Error fetching dashboard summary: {str(e)}'}), 500
 
@@ -176,7 +413,8 @@ def dashboard_summary():
 def dashboard_low_stock():
     try:
         threshold = float(request.args.get('threshold', 10))
-        products = list(products_container.read_all_items())
+        tenant_id = getattr(request, 'tenant_id', None)
+        products = _tenant_docs(products_container, tenant_id)
         low_stock = []
         for product in products:
             product_id = product['id']
@@ -219,70 +457,41 @@ def dashboard_low_stock():
 def dashboard_monthly_revenue():
     try:
         range_type = request.args.get('range', 'this_year')
-        now = datetime.utcnow()
-        today = now.date()
+        today = datetime.utcnow().date()
+        tenant_id = getattr(request, 'tenant_id', None)
 
-        def parse_iso_date(value):
-            if not value:
-                return None
-            try:
-                return datetime.fromisoformat(value[:10]).date()
-            except Exception:
-                return None
+        start_date, end_date, error = _resolve_period_from_request(range_type, request.args, today)
+        if error:
+            return jsonify({'error': error}), 400
 
-        if range_type == 'this_week':
-            start_date = today - timedelta(days=6)
-            end_date = today
-        elif range_type == 'this_month':
-            start_date = today.replace(day=1)
-            end_date = today
-        elif range_type == 'this_quarter':
-            quarter_start_month = ((today.month - 1) // 3) * 3 + 1
-            start_date = today.replace(month=quarter_start_month, day=1)
-            end_date = today
-        elif range_type == 'custom':
-            start_date = parse_iso_date(request.args.get('start_date'))
-            end_date = parse_iso_date(request.args.get('end_date'))
-            if not start_date or not end_date:
-                return jsonify({'error': 'start_date and end_date are required for custom range'}), 400
-            if start_date > end_date:
-                return jsonify({'error': 'start_date cannot be after end_date'}), 400
-        else:
-            start_date = today.replace(month=1, day=1)
-            end_date = today
+        previous_start, previous_end = _previous_period(start_date, end_date)
+        granularity = _chart_granularity(start_date, end_date)
+        buckets = _build_chart_buckets(granularity, start_date, end_date)
 
-        # Build monthly buckets across the selected date range.
-        monthly = {}
-        month_cursor = start_date.replace(day=1)
-        range_end_month = end_date.replace(day=1)
-        while month_cursor <= range_end_month:
-            key = month_cursor.strftime('%Y-%m')
-            monthly[key] = 0.0
-            if month_cursor.month == 12:
-                month_cursor = month_cursor.replace(year=month_cursor.year + 1, month=1, day=1)
-            else:
-                month_cursor = month_cursor.replace(month=month_cursor.month + 1, day=1)
+        # Shift each bucket back by the same period offset to get the previous window
+        period_offset = timedelta(days=(end_date - start_date).days + 1)
+        prev_buckets = [
+            (key, label, b_start - period_offset, b_end - period_offset)
+            for key, label, b_start, b_end in buckets
+        ]
 
-        invoices = list(invoices_container.read_all_items())
+        invoices = _tenant_docs(invoices_container, tenant_id)
+        current_totals = _revenue_by_chart_buckets(invoices, buckets)
+        prev_totals = _revenue_by_chart_buckets(invoices, prev_buckets)
 
-        for inv in invoices:
-            date_str = inv.get('created_at') or inv.get('issue_date')
-            if not date_str:
-                continue
-            try:
-                dt = datetime.fromisoformat(date_str[:19])
-            except Exception:
-                continue
-
-            inv_date = dt.date()
-            if inv_date < start_date or inv_date > end_date:
-                continue
-
-            key = dt.strftime('%Y-%m')
-            if key in monthly:
-                monthly[key] += float(inv.get('total_amount', 0))
-
-        result = [{'month': k, 'revenue': monthly[k]} for k in sorted(monthly.keys())]
+        result = []
+        for key, label, _, _ in buckets:
+            curr = current_totals[key]
+            prev = prev_totals[key]
+            change = 0.0 if prev == 0 else round(((curr - prev) / prev) * 100, 2)
+            result.append({
+                'period_key': key,
+                'label': label,
+                'month': key,           # backward-compat alias used by older consumers
+                'revenue': curr,
+                'previous_revenue': prev,
+                'percentage_change': change,
+            })
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': f'Error fetching monthly revenue: {str(e)}'}), 500
@@ -293,11 +502,22 @@ def dashboard_recent_invoices():
     """Return the 10 most recent invoices for the dashboard activity feed."""
     try:
         limit = int(request.args.get('limit', 10))
-        invoices = list(invoices_container.read_all_items())
+        range_type = request.args.get('range')
+        tenant_id = getattr(request, 'tenant_id', None)
+        invoices = _tenant_docs(invoices_container, tenant_id)
+
+        if range_type:
+            today = datetime.utcnow().date()
+            start_date, end_date, error = _resolve_period_from_request(range_type, request.args, today)
+            if error:
+                return jsonify({'error': error}), 400
+            invoices = _filter_docs_by_period(invoices, ['created_at', 'issue_date'], start_date, end_date)
+
         # Sort by created_at or issue_date descending
         def sort_key(inv):
-            ds = inv.get('created_at') or inv.get('issue_date') or ''
-            return ds[:19]
+            doc_date = _doc_date(inv, ['created_at', 'issue_date'])
+            return doc_date.isoformat() if doc_date else ''
+
         invoices.sort(key=sort_key, reverse=True)
         recent = invoices[:limit]
         result = []

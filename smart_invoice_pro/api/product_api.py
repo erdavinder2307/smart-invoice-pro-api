@@ -1,6 +1,9 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import get_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
+from smart_invoice_pro.utils.validation_utils import (
+    make_error_response, VALIDATION_ERROR, BUSINESS_ERROR, NOT_FOUND_ERROR,
+)
 import uuid
 from flasgger import swag_from
 from datetime import datetime
@@ -161,15 +164,20 @@ def create_product():
     # Field-level validation
     errors = _validate_product_fields(data)
     if errors:
-        return jsonify({'error': errors[0], 'errors': errors}), 400
+        return make_error_response(
+            VALIDATION_ERROR,
+            "Please fix the highlighted fields",
+            {'name': errors[0]} if errors else None,
+        )
 
     # Duplicate name check
     name = str(data.get('name', '')).strip()
     if _name_exists(name):
-        return jsonify({
-            'error': 'An item with this name already exists',
-            'field': 'name'
-        }), 400
+        return make_error_response(
+            BUSINESS_ERROR,
+            'An item with this name already exists',
+            {'name': 'An item with this name already exists'},
+        )
 
     now = datetime.utcnow().isoformat()
     item = {
@@ -226,7 +234,15 @@ def create_product():
     }
 })
 def list_products():
-    query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+    _ALLOWED_SORT_FIELDS = {'name', 'price', 'purchase_rate'}
+    sort_by = request.args.get('sort_by', 'name')
+    sort_order = request.args.get('sort_order', 'asc').upper()
+    if sort_by not in _ALLOWED_SORT_FIELDS:
+        sort_by = 'name'
+    if sort_order not in ('ASC', 'DESC'):
+        sort_order = 'ASC'
+
+    query = f"SELECT * FROM c WHERE c.tenant_id = @tenant_id ORDER BY c.{sort_by} {sort_order}"
     items = list(products_container.query_items(
         query=query,
         parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
@@ -353,7 +369,11 @@ def update_product(product_id):
     # Field-level validation (update mode — only validate fields present in payload)
     errors = _validate_product_fields(data, is_update=True)
     if errors:
-        return jsonify({'error': errors[0], 'errors': errors}), 400
+        return make_error_response(
+            VALIDATION_ERROR,
+            "Please fix the highlighted fields",
+            {'name': errors[0]} if errors else None,
+        )
 
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(products_container.query_items(
@@ -375,15 +395,16 @@ def update_product(product_id):
     if 'name' in data:
         new_name = str(data['name']).strip()
         if _name_exists(new_name, exclude_id=product_id):
-            return jsonify({
-                'error': 'An item with this name already exists',
-                'field': 'name'
-            }), 400
+            return make_error_response(
+                BUSINESS_ERROR,
+                'An item with this name already exists',
+                {'name': 'An item with this name already exists'},
+            )
 
     for field in [
         'item_type', 'name', 'hsn_sac', 'tax_preference', 'description', 'purchase_description',
         'category', 'price', 'purchase_rate', 'tax_rate', 'unit', 'sales_enabled', 'purchase_enabled',
-        'sales_account', 'purchase_account', 'reorder_level', 'reorder_qty', 'preferred_vendor_id'
+        'sales_account', 'purchase_account', 'reorder_level', 'reorder_qty', 'preferred_vendor_id',
     ]:
         if field in data:
             item[field] = data[field]

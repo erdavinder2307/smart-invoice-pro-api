@@ -103,7 +103,9 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.dashboard_api.invoices_container",
     "smart_invoice_pro.api.dashboard_api.customers_container",
     "smart_invoice_pro.api.dashboard_api.products_container",
-    "smart_invoice_pro.api.dashboard_api.get_container",
+    "smart_invoice_pro.api.dashboard_api.bills_container",
+    "smart_invoice_pro.api.dashboard_api.expenses_container",
+    "smart_invoice_pro.api.dashboard_api.stock_container",
     # Webhook dispatcher (prevent real HTTP calls)
     "smart_invoice_pro.utils.webhook_dispatcher.settings_container",
     # Notifications
