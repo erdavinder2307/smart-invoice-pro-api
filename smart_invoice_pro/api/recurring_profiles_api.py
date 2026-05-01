@@ -1,471 +1,747 @@
-from flask import Blueprint, request, jsonify
-from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container
-import uuid
-from flasgger import swag_from
 from datetime import datetime, timedelta
 from enum import Enum
+import uuid
+
+from flask import Blueprint, jsonify, request
+
+from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container
+
 
 recurring_profiles_blueprint = Blueprint('recurring_profiles', __name__)
+
 
 class RecurringStatus(Enum):
     Active = 'Active'
     Paused = 'Paused'
+    Completed = 'Completed'
+    Cancelled = 'Cancelled'
+    # Legacy statuses still accepted for backward compatibility.
     Expired = 'Expired'
     Stopped = 'Stopped'
 
+
 class FrequencyType(Enum):
-    Daily = 'Daily'
     Weekly = 'Weekly'
     Monthly = 'Monthly'
-    Quarterly = 'Quarterly'
     Yearly = 'Yearly'
+    Custom = 'Custom'
+    # Legacy values still accepted for existing profiles.
+    Daily = 'Daily'
+    Quarterly = 'Quarterly'
 
-def calculate_next_run_date(current_date, frequency):
-    """Calculate the next run date based on frequency"""
-    if frequency == 'Daily':
-        return (datetime.fromisoformat(current_date.replace('Z', '+00:00')) + timedelta(days=1)).date().isoformat()
-    elif frequency == 'Weekly':
-        return (datetime.fromisoformat(current_date.replace('Z', '+00:00')) + timedelta(weeks=1)).date().isoformat()
-    elif frequency == 'Monthly':
-        current = datetime.fromisoformat(current_date.replace('Z', '+00:00'))
-        # Add one month (handle different month lengths)
-        next_month = current.month + 1
-        next_year = current.year
-        if next_month > 12:
-            next_month = 1
-            next_year += 1
-        try:
-            return current.replace(year=next_year, month=next_month).date().isoformat()
-        except ValueError:
-            # Handle case where day doesn't exist in next month (e.g., Jan 31 -> Feb 31)
-            # Use last day of the month instead
-            if next_month == 2:
-                last_day = 28 if next_year % 4 != 0 else 29
-            elif next_month in [4, 6, 9, 11]:
-                last_day = 30
-            else:
-                last_day = 31
-            return current.replace(year=next_year, month=next_month, day=last_day).date().isoformat()
-    elif frequency == 'Quarterly':
-        current = datetime.fromisoformat(current_date.replace('Z', '+00:00'))
-        return (current + timedelta(days=90)).date().isoformat()
-    elif frequency == 'Yearly':
-        current = datetime.fromisoformat(current_date.replace('Z', '+00:00'))
-        try:
-            return current.replace(year=current.year + 1).date().isoformat()
-        except ValueError:
-            # Handle Feb 29 on non-leap years
-            return current.replace(year=current.year + 1, day=28).date().isoformat()
-    else:
+
+_ALLOWED_SORT_FIELDS = {
+    'created_at',
+    'updated_at',
+    'profile_name',
+    'customer_name',
+    'amount',
+    'frequency',
+    'next_run_date',
+    'last_run_date',
+    'status',
+}
+
+_VALID_ENDS_TYPES = {'never', 'on_date', 'after_occurrences'}
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _to_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).date()
+    except ValueError:
+        return None
+
+
+def _clamp(value, min_value, max_value):
+    return max(min_value, min(max_value, value))
+
+
+def _days_in_month(year, month):
+    if month == 2:
+        leap = (year % 400 == 0) or (year % 4 == 0 and year % 100 != 0)
+        return 29 if leap else 28
+    if month in (4, 6, 9, 11):
+        return 30
+    return 31
+
+
+def _normalize_week_days(values):
+    if not isinstance(values, list):
+        return []
+    normalized = []
+    for value in values:
+        as_int = _to_int(value)
+        if as_int is not None and 0 <= as_int <= 6:
+            normalized.append(as_int)
+    return sorted(set(normalized))
+
+
+def _normalize_frequency(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    mapping = {
+        'daily': 'Daily',
+        'weekly': 'Weekly',
+        'monthly': 'Monthly',
+        'quarterly': 'Quarterly',
+        'yearly': 'Yearly',
+        'custom': 'Custom',
+    }
+    return mapping.get(text.lower(), text)
+
+
+def _normalize_status(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    mapping = {
+        'active': 'Active',
+        'paused': 'Paused',
+        'completed': 'Completed',
+        'cancelled': 'Cancelled',
+        'expired': 'Expired',
+        'stopped': 'Stopped',
+    }
+    return mapping.get(text.lower(), text)
+
+
+def _calculate_amount(data):
+    items = data.get('items') or []
+    if not isinstance(items, list):
+        return 0.0
+
+    subtotal = 0.0
+    for item in items:
+        qty = max(0.0, _to_float(item.get('quantity', 0)))
+        rate = max(0.0, _to_float(item.get('rate', 0)))
+        discount = max(0.0, _to_float(item.get('discount', 0)))
+        line = max(0.0, qty * rate - discount)
+        tax = max(0.0, _to_float(item.get('tax', 0)))
+        line += (line * tax) / 100.0
+        subtotal += line
+
+    cgst = max(0.0, _to_float(data.get('cgst_amount', 0)))
+    sgst = max(0.0, _to_float(data.get('sgst_amount', 0)))
+    igst = max(0.0, _to_float(data.get('igst_amount', 0)))
+    return subtotal + cgst + sgst + igst
+
+
+def _build_recurrence_rule(data):
+    start_date = _parse_date(data.get('start_date'))
+    base_rule = data.get('recurrence_rule') if isinstance(data.get('recurrence_rule'), dict) else {}
+
+    frequency = _normalize_frequency(
+        base_rule.get('frequency')
+        or data.get('frequency')
+        or 'Monthly'
+    )
+    interval = _to_int(
+        base_rule.get('interval')
+        if base_rule.get('interval') is not None
+        else data.get('recurrence_interval'),
+        1,
+    )
+    interval = max(1, interval or 1)
+
+    default_day = start_date.day if start_date else 1
+    default_month = start_date.month if start_date else 1
+
+    weekly_days = _normalize_week_days(
+        base_rule.get('weekly_days')
+        if 'weekly_days' in base_rule
+        else data.get('recurrence_week_days')
+    )
+    day_of_month = _to_int(
+        base_rule.get('day_of_month')
+        if base_rule.get('day_of_month') is not None
+        else data.get('recurrence_day_of_month'),
+        default_day,
+    )
+    month_of_year = _to_int(
+        base_rule.get('month_of_year')
+        if base_rule.get('month_of_year') is not None
+        else data.get('recurrence_month_of_year'),
+        default_month,
+    )
+
+    day_of_month = _clamp(day_of_month or default_day, 1, 31)
+    month_of_year = _clamp(month_of_year or default_month, 1, 12)
+
+    ends_type = str(
+        data.get('ends_type')
+        or base_rule.get('ends_type')
+        or ('on_date' if data.get('end_date') else 'after_occurrences' if data.get('occurrence_limit') else 'never')
+    ).strip().lower()
+    if ends_type not in _VALID_ENDS_TYPES:
+        ends_type = 'never'
+
+    end_date = data.get('end_date') if ends_type == 'on_date' else None
+    occurrence_limit = None
+    if ends_type == 'after_occurrences':
+        occurrence_limit = _to_int(
+            data.get('occurrence_limit')
+            if data.get('occurrence_limit') not in (None, '')
+            else base_rule.get('occurrence_limit'),
+            None,
+        )
+
+    return {
+        'frequency': frequency,
+        'interval': interval,
+        'weekly_days': weekly_days,
+        'day_of_month': day_of_month,
+        'month_of_year': month_of_year,
+        'ends_type': ends_type,
+        'end_date': end_date,
+        'occurrence_limit': occurrence_limit,
+    }
+
+
+def calculate_next_run_date(current_date, frequency, recurrence_rule=None):
+    """Calculate next run date using frequency and optional recurrence rule."""
+    dt = _parse_date(current_date)
+    if not dt:
         return current_date
 
+    normalized_frequency = _normalize_frequency(frequency)
+    recurrence_rule = recurrence_rule or {}
+    interval = max(1, _to_int(recurrence_rule.get('interval'), 1) or 1)
+
+    if normalized_frequency == 'Daily':
+        return (dt + timedelta(days=interval)).isoformat()
+    if normalized_frequency == 'Weekly':
+        weekly_days = _normalize_week_days(recurrence_rule.get('weekly_days'))
+        if not weekly_days:
+            return (dt + timedelta(weeks=interval)).isoformat()
+
+        current_dow = int((dt.weekday() + 1) % 7)
+        next_dow = next((day for day in weekly_days if day > current_dow), None)
+        if next_dow is not None:
+            return (dt + timedelta(days=(next_dow - current_dow))).isoformat()
+
+        days_until_week_end = 7 - current_dow
+        week_jump_days = max(0, interval - 1) * 7
+        return (dt + timedelta(days=days_until_week_end + week_jump_days + weekly_days[0])).isoformat()
+
+    if normalized_frequency == 'Monthly':
+        next_month = dt.month + interval
+        next_year = dt.year
+        while next_month > 12:
+            next_month -= 12
+            next_year += 1
+
+        target_day = _to_int(recurrence_rule.get('day_of_month'), dt.day) or dt.day
+        target_day = _clamp(target_day, 1, _days_in_month(next_year, next_month))
+        return dt.replace(year=next_year, month=next_month, day=target_day).isoformat()
+
+    if normalized_frequency == 'Quarterly':
+        return (dt + timedelta(days=90)).isoformat()
+
+    if normalized_frequency == 'Yearly':
+        next_year = dt.year + interval
+        target_month = _clamp(_to_int(recurrence_rule.get('month_of_year'), dt.month) or dt.month, 1, 12)
+        target_day_raw = _to_int(recurrence_rule.get('day_of_month'), dt.day) or dt.day
+        target_day = _clamp(target_day_raw, 1, _days_in_month(next_year, target_month))
+        return dt.replace(year=next_year, month=target_month, day=target_day).isoformat()
+
+    return dt.isoformat()
+
+
+def _generate_schedule_preview(start_date, recurrence_rule, count=5):
+    dt = _parse_date(start_date)
+    if not dt:
+        return []
+
+    dates = []
+    end_date = _parse_date(recurrence_rule.get('end_date'))
+    occurrence_limit = _to_int(recurrence_rule.get('occurrence_limit'), None)
+
+    while len(dates) < count:
+        if recurrence_rule.get('ends_type') == 'on_date' and end_date and dt > end_date:
+            break
+        if (
+            recurrence_rule.get('ends_type') == 'after_occurrences'
+            and occurrence_limit
+            and len(dates) >= occurrence_limit
+        ):
+            break
+
+        dates.append(dt.isoformat())
+        next_date = calculate_next_run_date(dt.isoformat(), recurrence_rule.get('frequency'), recurrence_rule)
+        parsed_next = _parse_date(next_date)
+        if not parsed_next or parsed_next <= dt:
+            break
+        dt = parsed_next
+
+    return dates
+
+
 def validate_recurring_profile_data(data, is_update=False):
-    """Validate recurring profile data"""
     errors = {}
-    
+    if not isinstance(data, dict):
+        return {'payload': 'Invalid JSON payload'}
+
+    required_fields = ['profile_name', 'customer_id', 'frequency', 'start_date']
     if not is_update:
-        required_fields = ['profile_name', 'customer_id', 'frequency', 'start_date']
         for field in required_fields:
-            if field not in data:
+            if not data.get(field):
                 errors[field] = f'{field} is required'
-    
-    # Validate status
-    if 'status' in data and data['status'] not in RecurringStatus._value2member_map_:
-        errors['status'] = f'Invalid status: {data["status"]}'
-    
-    # Validate frequency
-    if 'frequency' in data and data['frequency'] not in FrequencyType._value2member_map_:
-        errors['frequency'] = f'Invalid frequency: {data["frequency"]}'
-    
-    # Validate dates
-    if 'start_date' in data and 'end_date' in data and data.get('end_date'):
+
+    if 'profile_name' in data and not str(data.get('profile_name', '')).strip():
+        errors['profile_name'] = 'profile_name is required'
+
+    recurrence_rule = _build_recurrence_rule(data)
+
+    if 'frequency' in data or data.get('recurrence_rule'):
+        frequency = _normalize_frequency(recurrence_rule.get('frequency'))
+        if frequency not in FrequencyType._value2member_map_:
+            errors['frequency'] = f'Invalid frequency: {data.get("frequency")}'
+
+    if 'status' in data:
+        status = _normalize_status(data.get('status'))
+        if status not in RecurringStatus._value2member_map_:
+            errors['status'] = f'Invalid status: {data.get("status")}'
+
+    start_date = _parse_date(data.get('start_date')) if data.get('start_date') else None
+    end_date = _parse_date(data.get('end_date')) if data.get('end_date') else None
+    if data.get('start_date') and not start_date:
+        errors['start_date'] = 'Invalid date format (expected YYYY-MM-DD)'
+    if data.get('end_date') and not end_date:
+        errors['end_date'] = 'Invalid date format (expected YYYY-MM-DD)'
+    if start_date and end_date and end_date <= start_date:
+        errors['end_date'] = 'End date must be after start date'
+
+    interval = _to_int(recurrence_rule.get('interval'), 1)
+    if interval is None or interval < 1:
+        errors['recurrence_interval'] = 'recurrence_interval must be >= 1'
+
+    if recurrence_rule.get('frequency') == 'Weekly' and not recurrence_rule.get('weekly_days'):
+        errors['recurrence_week_days'] = 'Select at least one weekday for weekly recurrence'
+
+    if recurrence_rule.get('ends_type') not in _VALID_ENDS_TYPES:
+        errors['ends_type'] = 'Invalid ends_type. Allowed: never, on_date, after_occurrences'
+
+    if recurrence_rule.get('ends_type') == 'on_date':
+        if not data.get('end_date'):
+            errors['end_date'] = 'end_date is required when ends_type is on_date'
+        elif start_date and end_date and end_date <= start_date:
+            errors['end_date'] = 'End date must be after start date'
+
+    if recurrence_rule.get('ends_type') == 'after_occurrences':
+        if recurrence_rule.get('occurrence_limit') is None:
+            errors['occurrence_limit'] = 'occurrence_limit is required when ends_type is after_occurrences'
+        elif recurrence_rule.get('occurrence_limit') < 1:
+            errors['occurrence_limit'] = 'occurrence_limit must be a positive integer'
+
+    occurrence_limit = data.get('occurrence_limit')
+    if occurrence_limit not in (None, '',):
         try:
-            start = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00'))
-            end = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00'))
-            if end <= start:
-                errors['end_date'] = 'End date must be after start date'
-        except ValueError:
-            errors['dates'] = 'Invalid date format'
-    
+            if int(occurrence_limit) < 1:
+                errors['occurrence_limit'] = 'occurrence_limit must be >= 1'
+        except (TypeError, ValueError):
+            errors['occurrence_limit'] = 'occurrence_limit must be a positive integer'
+
     return errors
 
+
+def _query_single_profile(profile_id, tenant_id):
+    query = 'SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id'
+    params = [
+        {'name': '@id', 'value': profile_id},
+        {'name': '@tenant_id', 'value': tenant_id},
+    ]
+    items = list(recurring_profiles_container.query_items(
+        query=query,
+        parameters=params,
+        enable_cross_partition_query=True,
+    ))
+    return items[0] if items else None
+
+
+def _sanitize_profile(profile):
+    return {k: v for k, v in profile.items() if not k.startswith('_')}
+
+
+def _set_profile_status(profile_id, next_status):
+    tenant_id = request.tenant_id
+    profile = _query_single_profile(profile_id, tenant_id)
+    if not profile:
+        return jsonify({'error': 'Recurring profile not found'}), 404
+
+    profile['status'] = next_status
+    profile['updated_at'] = datetime.utcnow().isoformat()
+    updated = recurring_profiles_container.replace_item(item=profile['id'], body=profile)
+    return jsonify(_sanitize_profile(updated)), 200
+
+
 @recurring_profiles_blueprint.route('/recurring-profiles', methods=['POST'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'body',
-            'in': 'body',
-            'required': True,
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'profile_name': {'type': 'string'},
-                    'customer_id': {'type': 'integer'},
-                    'customer_name': {'type': 'string'},
-                    'frequency': {'type': 'string', 'enum': ['Daily', 'Weekly', 'Monthly', 'Quarterly', 'Yearly']},
-                    'start_date': {'type': 'string', 'format': 'date'},
-                    'end_date': {'type': 'string', 'format': 'date'},
-                    'occurrence_limit': {'type': 'integer'},
-                    'occurrences_created': {'type': 'integer'},
-                    'next_run_date': {'type': 'string', 'format': 'date'},
-                    'last_run_date': {'type': 'string', 'format': 'date'},
-                    'status': {'type': 'string', 'enum': ['Active', 'Paused', 'Expired', 'Stopped']},
-                    'email_reminder': {'type': 'boolean'},
-                    'items': {'type': 'array'},
-                    'payment_terms': {'type': 'string'},
-                    'notes': {'type': 'string'},
-                    'terms_conditions': {'type': 'string'},
-                    'is_gst_applicable': {'type': 'boolean'},
-                    'cgst_amount': {'type': 'number'},
-                    'sgst_amount': {'type': 'number'},
-                    'igst_amount': {'type': 'number'}
-                },
-                'required': ['profile_name', 'customer_id', 'frequency', 'start_date']
-            },
-            'description': 'Recurring profile data'
-        }
-    ],
-    'responses': {
-        '201': {
-            'description': 'Recurring profile created successfully'
-        },
-        '400': {
-            'description': 'Validation error'
-        }
-    }
-})
+@recurring_profiles_blueprint.route('/recurring-invoices', methods=['POST'])
 def create_recurring_profile():
-    """Create a new recurring profile"""
-    data = request.get_json()
-    
-    # Validate data
+    data = request.get_json() or {}
     errors = validate_recurring_profile_data(data)
     if errors:
-        return jsonify({"error": "Validation failed", "details": errors}), 400
-    
+        return jsonify({'error': 'Validation failed', 'details': errors}), 400
+
     now = datetime.utcnow().isoformat()
-    
-    # Calculate next run date (default to start date if not provided)
-    next_run_date = data.get('next_run_date', data['start_date'])
-    
+    tenant_id = request.tenant_id
+
+    start_date = data.get('start_date')
+    recurrence_rule = _build_recurrence_rule(data)
+    frequency = recurrence_rule.get('frequency')
+    preview = _generate_schedule_preview(start_date, recurrence_rule, 1)
+    next_run_date = data.get('next_run_date') or (preview[0] if preview else start_date)
+
     item = {
         'id': str(uuid.uuid4()),
-        'profile_name': data['profile_name'],
-        'customer_id': data['customer_id'],
+        'tenant_id': tenant_id,
+        'profile_name': str(data.get('profile_name', '')).strip(),
+        'customer_id': data.get('customer_id'),
         'customer_name': data.get('customer_name', ''),
-        'frequency': data['frequency'],
-        'start_date': data['start_date'],
-        'end_date': data.get('end_date', None),
-        'occurrence_limit': data.get('occurrence_limit', None),
-        'occurrences_created': data.get('occurrences_created', 0),
+        'amount': _to_float(data.get('amount', _calculate_amount(data))),
+        'frequency': frequency,
+        'recurrence_rule': recurrence_rule,
+        'recurrence_interval': recurrence_rule.get('interval'),
+        'recurrence_week_days': recurrence_rule.get('weekly_days'),
+        'recurrence_day_of_month': recurrence_rule.get('day_of_month'),
+        'recurrence_month_of_year': recurrence_rule.get('month_of_year'),
+        'ends_type': recurrence_rule.get('ends_type'),
+        'start_date': start_date,
+        'end_date': recurrence_rule.get('end_date'),
+        'occurrence_limit': recurrence_rule.get('occurrence_limit'),
+        'occurrences_created': int(data.get('occurrences_created', 0) or 0),
         'next_run_date': next_run_date,
-        'last_run_date': data.get('last_run_date', None),
-        'status': data.get('status', 'Active'),
-        'email_reminder': data.get('email_reminder', False),
+        'last_run_date': data.get('last_run_date') or None,
+        'status': _normalize_status(data.get('status')) or 'Active',
+        'auto_send': bool(data.get('auto_send', data.get('email_reminder', False))),
+        'email_reminder': bool(data.get('email_reminder', data.get('auto_send', False))),
         'items': data.get('items', []),
         'payment_terms': data.get('payment_terms', ''),
         'notes': data.get('notes', ''),
         'terms_conditions': data.get('terms_conditions', ''),
-        'is_gst_applicable': data.get('is_gst_applicable', False),
-        'cgst_amount': data.get('cgst_amount', 0.0),
-        'sgst_amount': data.get('sgst_amount', 0.0),
-        'igst_amount': data.get('igst_amount', 0.0),
+        'is_gst_applicable': bool(data.get('is_gst_applicable', False)),
+        'cgst_amount': _to_float(data.get('cgst_amount', 0.0)),
+        'sgst_amount': _to_float(data.get('sgst_amount', 0.0)),
+        'igst_amount': _to_float(data.get('igst_amount', 0.0)),
         'created_at': now,
-        'updated_at': now
+        'updated_at': now,
     }
-    
+
     try:
         created_item = recurring_profiles_container.create_item(body=item)
-        return jsonify(created_item), 201
+        return jsonify(_sanitize_profile(created_item)), 201
     except Exception as e:
-        return jsonify({"error": f"Failed to create recurring profile: {str(e)}"}), 500
+        return jsonify({'error': f'Failed to create recurring profile: {str(e)}'}), 500
+
 
 @recurring_profiles_blueprint.route('/recurring-profiles', methods=['GET'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'status',
-            'in': 'query',
-            'type': 'string',
-            'description': 'Filter by status'
-        },
-        {
-            'name': 'customer_id',
-            'in': 'query',
-            'type': 'integer',
-            'description': 'Filter by customer ID'
-        }
-    ],
-    'responses': {
-        '200': {
-            'description': 'List of recurring profiles'
-        }
-    }
-})
+@recurring_profiles_blueprint.route('/recurring-invoices', methods=['GET'])
 def get_recurring_profiles():
-    """Get all recurring profiles with optional filters"""
     try:
-        status_filter = request.args.get('status')
-        customer_id_filter = request.args.get('customer_id', type=int)
-        
-        query = "SELECT * FROM c"
-        conditions = []
-        
+        tenant_id = request.tenant_id
+
+        status_filter = _normalize_status(request.args.get('status'))
+        frequency_filter = _normalize_frequency(request.args.get('frequency'))
+        customer_id_filter = request.args.get('customer_id')
+        search_query = (request.args.get('q') or '').strip().lower()
+
+        date_range = (request.args.get('date_range') or '').strip().lower()
+        date_from = (request.args.get('date_from') or '').strip()
+        date_to = (request.args.get('date_to') or '').strip()
+
+        sort_by = request.args.get('sort_by', 'created_at')
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'created_at'
+        sort_order = (request.args.get('sort_order', 'desc') or 'desc').upper()
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'DESC'
+
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except ValueError:
+            page = 1
+        try:
+            limit = int(request.args.get('limit', request.args.get('page_size', 10)))
+        except ValueError:
+            limit = 10
+        limit = max(1, min(limit, 100))
+        offset = (page - 1) * limit
+
+        where = ['c.tenant_id = @tenant_id']
+        parameters = [{'name': '@tenant_id', 'value': tenant_id}]
+
         if status_filter:
-            conditions.append(f"c.status = '{status_filter}'")
+            where.append('c.status = @status')
+            parameters.append({'name': '@status', 'value': status_filter})
+
+        if frequency_filter:
+            where.append('c.frequency = @frequency')
+            parameters.append({'name': '@frequency', 'value': frequency_filter})
+
         if customer_id_filter:
-            conditions.append(f"c.customer_id = {customer_id_filter}")
-        
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        
-        query += " ORDER BY c.created_at DESC"
-        
-        items = list(recurring_profiles_container.query_items(
-            query=query,
-            enable_cross_partition_query=True
+            where.append('c.customer_id = @customer_id')
+            parameters.append({'name': '@customer_id', 'value': customer_id_filter})
+
+        if search_query:
+            where.append('(CONTAINS(LOWER(c.profile_name), @q) OR CONTAINS(LOWER(c.customer_name), @q))')
+            parameters.append({'name': '@q', 'value': search_query})
+
+        if date_range:
+            today = datetime.utcnow().date()
+            start = None
+            end = None
+            if date_range == 'this_week':
+                start = today - timedelta(days=today.weekday())
+                end = start + timedelta(days=6)
+            elif date_range == 'this_month':
+                start = today.replace(day=1)
+                if start.month == 12:
+                    next_month = start.replace(year=start.year + 1, month=1, day=1)
+                else:
+                    next_month = start.replace(month=start.month + 1, day=1)
+                end = next_month - timedelta(days=1)
+            elif date_range == 'this_quarter':
+                quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+                start = today.replace(month=quarter_start_month, day=1)
+                if quarter_start_month == 10:
+                    next_quarter = start.replace(year=start.year + 1, month=1, day=1)
+                else:
+                    next_quarter = start.replace(month=quarter_start_month + 3, day=1)
+                end = next_quarter - timedelta(days=1)
+            elif date_range == 'this_year':
+                start = today.replace(month=1, day=1)
+                end = today.replace(month=12, day=31)
+            elif date_range == 'custom':
+                if date_from:
+                    parsed = _parse_date(date_from)
+                    if parsed:
+                        start = parsed
+                if date_to:
+                    parsed = _parse_date(date_to)
+                    if parsed:
+                        end = parsed
+
+            if start:
+                where.append('c.next_run_date >= @date_start')
+                parameters.append({'name': '@date_start', 'value': start.isoformat()})
+            if end:
+                where.append('c.next_run_date <= @date_end')
+                parameters.append({'name': '@date_end', 'value': end.isoformat()})
+
+        where_sql = ' WHERE ' + ' AND '.join(where)
+
+        count_query = f'SELECT VALUE COUNT(1) FROM c{where_sql}'
+        count_items = list(recurring_profiles_container.query_items(
+            query=count_query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
         ))
-        
-        return jsonify(items), 200
+        total = int(count_items[0]) if count_items else 0
+
+        list_query = (
+            f'SELECT * FROM c{where_sql} '
+            f'ORDER BY c.{sort_by} {sort_order} '
+            f'OFFSET @offset LIMIT @limit'
+        )
+        list_params = [*parameters, {'name': '@offset', 'value': offset}, {'name': '@limit', 'value': limit}]
+        items = list(recurring_profiles_container.query_items(
+            query=list_query,
+            parameters=list_params,
+            enable_cross_partition_query=True,
+        ))
+
+        cleaned = []
+        for item in items:
+            clean = _sanitize_profile(item)
+            if clean.get('amount') in (None, ''):
+                clean['amount'] = _calculate_amount(clean)
+            cleaned.append(clean)
+
+        return jsonify({
+            'data': cleaned,
+            'total': total,
+            'page': page,
+            'limit': limit,
+        }), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch recurring profiles: {str(e)}"}), 500
+        return jsonify({'error': f'Failed to fetch recurring profiles: {str(e)}'}), 500
+
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['GET'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'profile_id',
-            'in': 'path',
-            'type': 'string',
-            'required': True,
-            'description': 'Profile ID'
-        }
-    ],
-    'responses': {
-        '200': {
-            'description': 'Profile details'
-        },
-        '404': {
-            'description': 'Profile not found'
-        }
-    }
-})
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['GET'])
 def get_recurring_profile(profile_id):
-    """Get a specific recurring profile by ID"""
     try:
-        query = f"SELECT * FROM c WHERE c.id = '{profile_id}'"
-        items = list(recurring_profiles_container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        
-        if not items:
-            return jsonify({"error": "Recurring profile not found"}), 404
-        
-        return jsonify(items[0]), 200
+        profile = _query_single_profile(profile_id, request.tenant_id)
+        if not profile:
+            return jsonify({'error': 'Recurring profile not found'}), 404
+        return jsonify(_sanitize_profile(profile)), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch recurring profile: {str(e)}"}), 500
+        return jsonify({'error': f'Failed to fetch recurring profile: {str(e)}'}), 500
+
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['PUT'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'profile_id',
-            'in': 'path',
-            'type': 'string',
-            'required': True,
-            'description': 'Profile ID'
-        },
-        {
-            'name': 'body',
-            'in': 'body',
-            'required': True,
-            'schema': {
-                'type': 'object'
-            },
-            'description': 'Fields to update'
-        }
-    ],
-    'responses': {
-        '200': {
-            'description': 'Profile updated successfully'
-        },
-        '404': {
-            'description': 'Profile not found'
-        }
-    }
-})
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['PUT'])
 def update_recurring_profile(profile_id):
-    """Update an existing recurring profile"""
-    data = request.get_json()
-    
-    # Validate data
+    data = request.get_json() or {}
     errors = validate_recurring_profile_data(data, is_update=True)
     if errors:
-        return jsonify({"error": "Validation failed", "details": errors}), 400
-    
+        return jsonify({'error': 'Validation failed', 'details': errors}), 400
+
     try:
-        # Fetch existing profile
-        query = f"SELECT * FROM c WHERE c.id = '{profile_id}'"
-        items = list(recurring_profiles_container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        
-        if not items:
-            return jsonify({"error": "Recurring profile not found"}), 404
-        
-        existing_profile = items[0]
-        
-        # Update fields
+        profile = _query_single_profile(profile_id, request.tenant_id)
+        if not profile:
+            return jsonify({'error': 'Recurring profile not found'}), 404
+
         for key, value in data.items():
-            if key != 'id' and key != 'created_at':
-                existing_profile[key] = value
-        
-        existing_profile['updated_at'] = datetime.utcnow().isoformat()
-        
-        # Replace the item
-        updated_item = recurring_profiles_container.replace_item(
-            item=existing_profile['id'],
-            body=existing_profile
-        )
-        
-        return jsonify(updated_item), 200
+            if key in {'id', 'tenant_id', 'created_at'}:
+                continue
+            if key == 'frequency':
+                profile[key] = _normalize_frequency(value)
+            elif key == 'status':
+                profile[key] = _normalize_status(value)
+            else:
+                profile[key] = value
+
+        recurrence_rule = _build_recurrence_rule(profile)
+        profile['frequency'] = recurrence_rule.get('frequency')
+        profile['recurrence_rule'] = recurrence_rule
+        profile['recurrence_interval'] = recurrence_rule.get('interval')
+        profile['recurrence_week_days'] = recurrence_rule.get('weekly_days')
+        profile['recurrence_day_of_month'] = recurrence_rule.get('day_of_month')
+        profile['recurrence_month_of_year'] = recurrence_rule.get('month_of_year')
+        profile['ends_type'] = recurrence_rule.get('ends_type')
+        profile['end_date'] = recurrence_rule.get('end_date')
+        profile['occurrence_limit'] = recurrence_rule.get('occurrence_limit')
+
+        start_for_preview = profile.get('start_date')
+        preview = _generate_schedule_preview(start_for_preview, recurrence_rule, 1)
+        if preview:
+            profile['next_run_date'] = preview[0]
+
+        profile['auto_send'] = bool(profile.get('auto_send', profile.get('email_reminder', False)))
+        profile['email_reminder'] = bool(profile.get('email_reminder', profile.get('auto_send', False)))
+        profile['amount'] = _to_float(profile.get('amount', _calculate_amount(profile)))
+        profile['updated_at'] = datetime.utcnow().isoformat()
+
+        updated_item = recurring_profiles_container.replace_item(item=profile['id'], body=profile)
+        return jsonify(_sanitize_profile(updated_item)), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to update recurring profile: {str(e)}"}), 500
+        return jsonify({'error': f'Failed to update recurring profile: {str(e)}'}), 500
+
+
+@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['PATCH'])
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['PATCH'])
+def patch_recurring_profile(profile_id):
+    data = request.get_json() or {}
+    action = str(data.get('action', '')).strip().lower()
+
+    if action in {'pause', 'resume', 'cancel'}:
+        if action == 'pause':
+            return _set_profile_status(profile_id, 'Paused')
+        if action == 'resume':
+            return _set_profile_status(profile_id, 'Active')
+        return _set_profile_status(profile_id, 'Cancelled')
+
+    return update_recurring_profile(profile_id)
+
+
+@recurring_profiles_blueprint.route('/recurring-profiles/bulk', methods=['POST'])
+@recurring_profiles_blueprint.route('/recurring-invoices/bulk', methods=['POST'])
+def bulk_recurring_profile_actions():
+    payload = request.get_json() or {}
+    action = str(payload.get('action', '')).strip().lower()
+    ids = payload.get('ids') or []
+
+    if action not in {'pause', 'resume', 'delete', 'cancel'}:
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty array'}), 400
+
+    updated = 0
+    deleted = 0
+    errors = []
+
+    for profile_id in ids:
+        try:
+            profile = _query_single_profile(profile_id, request.tenant_id)
+            if not profile:
+                errors.append({'id': profile_id, 'error': 'not found'})
+                continue
+
+            if action == 'delete':
+                recurring_profiles_container.delete_item(item=profile['id'], partition_key=profile.get('customer_id'))
+                deleted += 1
+                continue
+
+            if action == 'pause':
+                profile['status'] = 'Paused'
+            elif action == 'resume':
+                profile['status'] = 'Active'
+            elif action == 'cancel':
+                profile['status'] = 'Cancelled'
+
+            profile['updated_at'] = datetime.utcnow().isoformat()
+            recurring_profiles_container.replace_item(item=profile['id'], body=profile)
+            updated += 1
+        except Exception as exc:
+            errors.append({'id': profile_id, 'error': str(exc)})
+
+    return jsonify({
+        'action': action,
+        'processed': len(ids),
+        'updated': updated,
+        'deleted': deleted,
+        'errors': errors,
+    }), 200
+
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['DELETE'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'profile_id',
-            'in': 'path',
-            'type': 'string',
-            'required': True,
-            'description': 'Profile ID'
-        }
-    ],
-    'responses': {
-        '200': {
-            'description': 'Profile deleted successfully'
-        },
-        '404': {
-            'description': 'Profile not found'
-        }
-    }
-})
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['DELETE'])
 def delete_recurring_profile(profile_id):
-    """Delete a recurring profile"""
     try:
-        # Fetch existing profile to get partition key
-        query = f"SELECT * FROM c WHERE c.id = '{profile_id}'"
-        items = list(recurring_profiles_container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        
-        if not items:
-            return jsonify({"error": "Recurring profile not found"}), 404
-        
-        profile = items[0]
-        
-        # Delete the profile
-        recurring_profiles_container.delete_item(
-            item=profile_id,
-            partition_key=profile['customer_id']
-        )
-        
-        return jsonify({"message": "Recurring profile deleted successfully"}), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to delete recurring profile: {str(e)}"}), 500
+        profile = _query_single_profile(profile_id, request.tenant_id)
+        if not profile:
+            return jsonify({'error': 'Recurring profile not found'}), 404
 
-@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/pause', methods=['POST'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'profile_id',
-            'in': 'path',
-            'type': 'string',
-            'required': True,
-            'description': 'Profile ID'
-        }
-    ],
-    'responses': {
-        '200': {
-            'description': 'Profile paused successfully'
-        }
-    }
-})
+        recurring_profiles_container.delete_item(item=profile_id, partition_key=profile.get('customer_id'))
+        return jsonify({'message': 'Recurring profile deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to delete recurring profile: {str(e)}'}), 500
+
+
+@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/pause', methods=['POST', 'PATCH'])
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/pause', methods=['POST', 'PATCH'])
 def pause_recurring_profile(profile_id):
-    """Pause a recurring profile"""
-    try:
-        query = f"SELECT * FROM c WHERE c.id = '{profile_id}'"
-        items = list(recurring_profiles_container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        
-        if not items:
-            return jsonify({"error": "Recurring profile not found"}), 404
-        
-        profile = items[0]
-        profile['status'] = 'Paused'
-        profile['updated_at'] = datetime.utcnow().isoformat()
-        
-        updated_item = recurring_profiles_container.replace_item(
-            item=profile['id'],
-            body=profile
-        )
-        
-        return jsonify(updated_item), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to pause profile: {str(e)}"}), 500
+    return _set_profile_status(profile_id, 'Paused')
 
-@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/resume', methods=['POST'])
-@swag_from({
-    'tags': ['Recurring Profiles'],
-    'parameters': [
-        {
-            'name': 'profile_id',
-            'in': 'path',
-            'type': 'string',
-            'required': True,
-            'description': 'Profile ID'
-        }
-    ],
-    'responses': {
-        '200': {
-            'description': 'Profile resumed successfully'
-        }
-    }
-})
+
+@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/resume', methods=['POST', 'PATCH'])
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/resume', methods=['POST', 'PATCH'])
 def resume_recurring_profile(profile_id):
-    """Resume a paused recurring profile"""
-    try:
-        query = f"SELECT * FROM c WHERE c.id = '{profile_id}'"
-        items = list(recurring_profiles_container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        
-        if not items:
-            return jsonify({"error": "Recurring profile not found"}), 404
-        
-        profile = items[0]
-        profile['status'] = 'Active'
-        profile['updated_at'] = datetime.utcnow().isoformat()
-        
-        updated_item = recurring_profiles_container.replace_item(
-            item=profile['id'],
-            body=profile
-        )
-        
-        return jsonify(updated_item), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to resume profile: {str(e)}"}), 500
+    return _set_profile_status(profile_id, 'Active')
+
+
+@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/cancel', methods=['PATCH'])
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/cancel', methods=['PATCH'])
+def cancel_recurring_profile(profile_id):
+    return _set_profile_status(profile_id, 'Cancelled')

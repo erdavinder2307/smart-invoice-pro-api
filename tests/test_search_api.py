@@ -9,7 +9,9 @@ class TestSearchHistoryApi:
             mock_container.query_items.return_value = [
                 {
                     "id": "h1",
+                    "page": "customers",
                     "query": "Acme",
+                    "filters": {"status": "Active"},
                     "type": "entity",
                     "entity_id": "cust-1",
                     "entity_type": "customer",
@@ -19,11 +21,12 @@ class TestSearchHistoryApi:
                 }
             ]
 
-            response = client.get("/api/search/history?limit=5", headers=headers_a)
+            response = client.get("/api/search/history?page=customers&limit=5", headers=headers_a)
 
             assert response.status_code == 200
             data = response.get_json()
             assert len(data) == 1
+            assert data[0]["page"] == "customers"
             assert data[0]["query"] == "Acme"
             assert data[0]["path"] == "/customers/cust-1"
 
@@ -32,7 +35,9 @@ class TestSearchHistoryApi:
             response = client.post(
                 "/api/search/history",
                 json={
+                    "page": "invoices",
                     "query": "INV-101",
+                    "filters": {"status": "Pending"},
                     "type": "entity",
                     "entity_id": "inv-1",
                     "entity_type": "invoice",
@@ -42,12 +47,24 @@ class TestSearchHistoryApi:
 
             assert response.status_code == 201
             body = response.get_json()
+            assert body["page"] == "invoices"
             assert body["query"] == "INV-101"
             assert body["path"] == "/invoices/edit/inv-1"
 
             create_payload = mock_container.create_item.call_args.kwargs["body"]
             assert create_payload["tenant_id"] == TENANT_A
             assert create_payload["user_id"] == USER_A
+            assert create_payload["filters"] == {"status": "Pending"}
+
+    def test_post_history_ignores_too_short_query(self, client, headers_a):
+        response = client.post(
+            "/api/search/history",
+            json={"page": "customers", "query": "a"},
+            headers=headers_a,
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["ignored"] is True
 
     def test_delete_history_item(self, client, headers_a):
         with patch("smart_invoice_pro.api.search_api.search_history_container") as mock_container:
@@ -65,7 +82,7 @@ class TestSearchHistoryApi:
                 {"id": "h2", "user_id": USER_A},
             ]
 
-            response = client.delete("/api/search/history", headers=headers_a)
+            response = client.delete("/api/search/history?page=customers", headers=headers_a)
 
             assert response.status_code == 200
             assert mock_container.delete_item.call_count == 2

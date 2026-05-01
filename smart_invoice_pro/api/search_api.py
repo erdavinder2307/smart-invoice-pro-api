@@ -16,6 +16,10 @@ from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_i
 
 search_blueprint = Blueprint("search", __name__)
 
+MIN_QUERY_LENGTH = 2
+DEFAULT_HISTORY_LIMIT = 5
+MAX_HISTORY_LIMIT = 10
+
 
 FEATURE_SEARCH_TARGETS = [
     {"title": "Invoices", "subtitle": "Create, edit and track invoices", "path": "/invoices", "entity_type": "feature"},
@@ -31,7 +35,7 @@ FEATURE_SEARCH_TARGETS = [
 ]
 
 
-def _parse_limit(default=5, max_limit=10):
+def _parse_limit(default=DEFAULT_HISTORY_LIMIT, max_limit=MAX_HISTORY_LIMIT):
     raw_limit = request.args.get("limit", default)
     try:
         limit = int(raw_limit)
@@ -58,7 +62,9 @@ def _history_to_result_item(item):
 
     return {
         "id": item.get("id"),
+        "page": item.get("page"),
         "query": query_text,
+        "filters": item.get("filters") or {},
         "type": item_type,
         "entity_id": entity_id,
         "entity_type": entity_type,
@@ -67,32 +73,61 @@ def _history_to_result_item(item):
     }
 
 
-def _save_history(query_text, item_type="free_text", entity_id=None, entity_type=None, path=None):
-    # Remove any existing entry for the same query+user to prevent duplicates (move-to-top)
+def _normalize_history_query(query_text):
+    normalized = (query_text or "").strip()
+    if len(normalized) < MIN_QUERY_LENGTH:
+        return None
+    return normalized
+
+
+def _save_history(
+    query_text,
+    page,
+    filters=None,
+    item_type="free_text",
+    entity_id=None,
+    entity_type=None,
+    path=None,
+):
+    existing = []
     try:
         existing = list(search_history_container.query_items(
             query=(
                 "SELECT * FROM c WHERE c.user_id = @uid AND c.tenant_id = @tid "
-                "AND c.query = @q"
+                "AND c.page = @page AND c.query = @q"
             ),
             parameters=[
                 {"name": "@uid", "value": request.user_id},
                 {"name": "@tid", "value": request.tenant_id},
+                {"name": "@page", "value": page},
                 {"name": "@q", "value": query_text},
             ],
             enable_cross_partition_query=True,
         ))
-        for dup in existing:
-            search_history_container.delete_item(item=dup["id"], partition_key=dup["user_id"])
     except Exception:
-        pass  # non-fatal: proceed with insert regardless
+        existing = []
 
     now = datetime.utcnow().isoformat()
+    if existing:
+        item = existing[0]
+        item["query"] = query_text
+        item["page"] = page
+        item["filters"] = filters if isinstance(filters, dict) else {}
+        item["type"] = item_type
+        item["entity_id"] = entity_id
+        item["entity_type"] = entity_type
+        item["path"] = path
+        item["created_at"] = now
+        search_history_container.replace_item(item=item["id"], body=item)
+        return sanitize_item(item)
+
     item = {
         "id": str(uuid.uuid4()),
         "user_id": request.user_id,
         "tenant_id": request.tenant_id,
+        "page": page,
         "query": query_text,
+        "filters": filters if isinstance(filters, dict) else {},
         "type": item_type,
         "entity_id": entity_id,
         "entity_type": entity_type,
@@ -264,17 +299,21 @@ def _search_products(term, limit):
 
 @search_blueprint.route("/search/history", methods=["GET"])
 def list_search_history():
-    limit = _parse_limit(default=5, max_limit=20)
+    limit = _parse_limit(default=DEFAULT_HISTORY_LIMIT, max_limit=MAX_HISTORY_LIMIT)
+    page = (request.args.get("page") or "").strip().lower()
     query = f"""
-        SELECT TOP {limit} c.id, c.query, c.type, c.entity_id, c.entity_type, c.path, c.created_at
+        SELECT TOP {limit} c.id, c.page, c.query, c.filters, c.type, c.entity_id, c.entity_type, c.path, c.created_at
         FROM c
         WHERE c.user_id = @user_id AND c.tenant_id = @tenant_id
-        ORDER BY c.created_at DESC
     """
     params = [
         {"name": "@user_id", "value": request.user_id},
         {"name": "@tenant_id", "value": request.tenant_id},
     ]
+    if page:
+        query += " AND c.page = @page"
+        params.append({"name": "@page", "value": page})
+    query += " ORDER BY c.created_at DESC"
     items = list(
         search_history_container.query_items(
             query=query,
@@ -289,17 +328,21 @@ def list_search_history():
 @search_blueprint.route("/search/history", methods=["POST"])
 def create_search_history_item():
     data = request.get_json() or {}
-    query_text = (data.get("query") or "").strip()
+    query_text = _normalize_history_query(data.get("query"))
+    page = (data.get("page") or "global").strip().lower()
     if not query_text:
-        return jsonify({"error": "query is required"}), 400
+        return jsonify({"ignored": True, "reason": "Query too short"}), 200
 
     item_type = data.get("type") or "free_text"
     entity_id = data.get("entity_id")
     entity_type = data.get("entity_type")
     path = data.get("path")
+    filters = data.get("filters") or {}
 
     item = _save_history(
         query_text=query_text,
+        page=page,
+        filters=filters,
         item_type=item_type,
         entity_id=entity_id,
         entity_type=entity_type,
@@ -337,6 +380,7 @@ def delete_search_history_item(history_id):
 
 @search_blueprint.route("/search/history", methods=["DELETE"])
 def clear_search_history():
+    page = (request.args.get("page") or "").strip().lower()
     query = """
         SELECT c.id, c.user_id
         FROM c
@@ -346,6 +390,9 @@ def clear_search_history():
         {"name": "@user_id", "value": request.user_id},
         {"name": "@tenant_id", "value": request.tenant_id},
     ]
+    if page:
+        query += " AND c.page = @page"
+        params.append({"name": "@page", "value": page})
     items = list(
         search_history_container.query_items(
             query=query,

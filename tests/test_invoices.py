@@ -11,11 +11,25 @@ from tests.conftest import TENANT_A, TENANT_B, USER_A
 
 class TestCreateInvoice:
 
+    @staticmethod
+    def _with_valid_item(payload):
+        next_payload = copy.deepcopy(payload)
+        next_payload["items"] = [
+            {
+                "name": "Implementation Service",
+                "quantity": 2,
+                "rate": 500,
+                "discount": 0,
+                "tax": 0,
+            }
+        ]
+        return next_payload
+
     @patch("smart_invoice_pro.api.invoices.get_container")
     @patch("smart_invoice_pro.api.invoices.invoices_container")
     def test_create_invoice_success(self, mock_inv, mock_get_ctr, client, headers_a, sample_invoice):
         mock_get_ctr.return_value = MagicMock()  # stock_container
-        resp = client.post("/api/invoices", json=sample_invoice, headers=headers_a)
+        resp = client.post("/api/invoices", json=self._with_valid_item(sample_invoice), headers=headers_a)
         assert resp.status_code == 201
         data = resp.get_json()
         assert "id" in data
@@ -27,7 +41,7 @@ class TestCreateInvoice:
     @patch("smart_invoice_pro.api.invoices.invoices_container")
     def test_create_invoice_stores_tenant_id(self, mock_inv, mock_gc, client, headers_a, sample_invoice):
         mock_gc.return_value = MagicMock()
-        client.post("/api/invoices", json=sample_invoice, headers=headers_a)
+        client.post("/api/invoices", json=self._with_valid_item(sample_invoice), headers=headers_a)
         created = mock_inv.create_item.call_args[1]["body"]
         assert created["tenant_id"] == TENANT_A
 
@@ -35,9 +49,9 @@ class TestCreateInvoice:
     @patch("smart_invoice_pro.api.invoices.invoices_container")
     def test_create_invoice_default_balance_due(self, mock_inv, mock_gc, client, headers_a, sample_invoice):
         mock_gc.return_value = MagicMock()
-        resp = client.post("/api/invoices", json=sample_invoice, headers=headers_a)
+        resp = client.post("/api/invoices", json=self._with_valid_item(sample_invoice), headers=headers_a)
         data = resp.get_json()
-        assert data["balance_due"] == sample_invoice["total_amount"]
+        assert data["balance_due"] == data["total_amount"]
 
     @patch("smart_invoice_pro.api.invoices.get_container")
     @patch("smart_invoice_pro.api.invoices.invoices_container")
@@ -59,10 +73,39 @@ class TestCreateInvoice:
     @patch("smart_invoice_pro.api.invoices.invoices_container")
     def test_create_invoice_generates_portal_token(self, mock_inv, mock_gc, client, headers_a, sample_invoice):
         mock_gc.return_value = MagicMock()
-        resp = client.post("/api/invoices", json=sample_invoice, headers=headers_a)
+        resp = client.post("/api/invoices", json=self._with_valid_item(sample_invoice), headers=headers_a)
         data = resp.get_json()
         assert "portal_token" in data
         assert len(data["portal_token"]) > 20
+
+    @patch("smart_invoice_pro.api.invoices.get_container")
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_create_invoice_rejects_due_date_before_issue_date(self, mock_inv, mock_gc, client, headers_a, sample_invoice):
+        mock_gc.return_value = MagicMock()
+        payload = self._with_valid_item(sample_invoice)
+        payload["issue_date"] = "2026-04-20"
+        payload["due_date"] = "2026-04-10"
+
+        resp = client.post("/api/invoices", json=payload, headers=headers_a)
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert body["error"] == "Validation failed"
+        assert body["details"]["due_date"] == "Due date must be on or after invoice date."
+        mock_inv.create_item.assert_not_called()
+
+    @patch("smart_invoice_pro.api.invoices.get_container")
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_create_invoice_rejects_invalid_item_quantity(self, mock_inv, mock_gc, client, headers_a, sample_invoice):
+        mock_gc.return_value = MagicMock()
+        payload = self._with_valid_item(sample_invoice)
+        payload["items"][0]["quantity"] = 0
+
+        resp = client.post("/api/invoices", json=payload, headers=headers_a)
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert body["error"] == "Validation failed"
+        assert body["details"]["items[0].quantity"] == "Quantity must be greater than 0."
+        mock_inv.create_item.assert_not_called()
 
 
 class TestListInvoices:
@@ -115,7 +158,8 @@ class TestUpdateInvoice:
             "/api/invoices/inv-aaa-001",
             json={"status": "Issued", "invoice_number": "INV-001", "customer_id": "cust-001",
                   "issue_date": "2025-06-01", "due_date": "2025-06-15",
-                  "subtotal": 1000, "total_amount": 1180},
+                  "subtotal": 1000, "total_amount": 1180,
+                  "items": [{"name": "Implementation Service", "quantity": 2, "rate": 500, "discount": 0, "tax": 0}]},
             headers=headers_a,
         )
         assert resp.status_code == 200

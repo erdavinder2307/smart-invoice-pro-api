@@ -101,6 +101,11 @@ def generate_invoice_number(tenant_id: str) -> str:
     except ImportError:
         CosmosAccessConditionFailedError = Exception  # fallback; shouldn't happen
 
+    try:
+        from azure.core import MatchConditions
+    except ImportError:
+        MatchConditions = None
+
     max_retries = 8
 
     for attempt in range(max_retries):
@@ -122,11 +127,16 @@ def generate_invoice_number(tenant_id: str) -> str:
 
         try:
             if etag:
-                settings_container.replace_item(
-                    item=updated['id'],
-                    body=updated,
-                    if_match_etag=etag,
-                )
+                kwargs = {
+                    'item': updated['id'],
+                    'body': updated,
+                    'etag': etag,
+                }
+                # Newer Cosmos SDKs require `etag` + `match_condition`.
+                # Keep this conditional for compatibility with older environments.
+                if MatchConditions is not None:
+                    kwargs['match_condition'] = MatchConditions.IfNotModified
+                settings_container.replace_item(**kwargs)
             else:
                 # First time — create; if concurrent, one will get a 409 and retry
                 settings_container.create_item(body=updated)

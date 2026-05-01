@@ -86,6 +86,29 @@ class TestListQuotes:
             assert resp.status_code == 200
             assert resp.get_json() == []
 
+    def test_list_with_meta_response(self, client, headers_a):
+        with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_ctr:
+            def _query_side_effect(*args, **kwargs):
+                query = kwargs.get("query", "")
+                params = kwargs.get("parameters", [])
+                if "SELECT * FROM c" in query and "OFFSET" in query:
+                    return [STORED_QUOTE_A]
+                if "SELECT VALUE COUNT(1) FROM c" in query and "@summary_status" not in query:
+                    return [1]
+                if "@summary_status" in query:
+                    status_value = next((p["value"] for p in params if p["name"] == "@summary_status"), "")
+                    return [1] if status_value == "Draft" else [0]
+                return []
+
+            mock_ctr.query_items.side_effect = _query_side_effect
+            resp = client.get("/api/quotes?include_meta=1&page=1&page_size=10", headers=headers_a)
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert isinstance(data, dict)
+            assert isinstance(data.get("items"), list)
+            assert data.get("total") == 1
+            assert data.get("summary", {}).get("Draft") == 1
+
 
 class TestGetQuote:
     """GET /api/quotes/<id> tests."""
@@ -171,3 +194,51 @@ class TestNextQuoteNumber:
             assert resp.status_code == 200
             data = resp.get_json()
             assert "quote_number" in data or "next_number" in data
+
+
+class TestBulkQuotes:
+    """POST /api/quotes/bulk tests."""
+
+    def test_bulk_mark_accepted(self, client, headers_a):
+        with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_QUOTE_A]
+            mock_ctr.replace_item.return_value = {**STORED_QUOTE_A, "status": "Accepted"}
+            resp = client.post(
+                "/api/quotes/bulk",
+                json={"action": "mark_accepted", "ids": ["qt-aaa-001"]},
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["success_count"] == 1
+
+    def test_bulk_delete(self, client, headers_a):
+        with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_QUOTE_A]
+            resp = client.post(
+                "/api/quotes/bulk",
+                json={"action": "delete", "ids": ["qt-aaa-001"]},
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            mock_ctr.delete_item.assert_called_once()
+
+    def test_bulk_convert_to_invoice(self, client, headers_a):
+        with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_quotes, patch(
+            "smart_invoice_pro.api.quotes_api.invoices_container"
+        ) as mock_invoices:
+            mock_quotes.query_items.return_value = [STORED_QUOTE_A]
+            mock_invoices.create_item.return_value = {"id": "inv-123", "invoice_number": "INV-123"}
+
+            resp = client.post(
+                "/api/quotes/bulk",
+                json={"action": "convert_to_invoice", "ids": ["qt-aaa-001"]},
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["success_count"] == 1
+
+    def test_bulk_invalid_payload(self, client, headers_a):
+        resp = client.post("/api/quotes/bulk", json={"action": "delete", "ids": []}, headers=headers_a)
+        assert resp.status_code == 400
