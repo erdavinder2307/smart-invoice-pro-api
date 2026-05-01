@@ -3,7 +3,7 @@ from smart_invoice_pro.utils.cosmos_client import quotes_container, invoices_con
 import uuid
 import base64
 from flasgger import swag_from
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 
@@ -180,8 +180,23 @@ def get_quotes():
     try:
         status_filter = request.args.get('status')
         customer_id_filter = request.args.get('customer_id')
+        search_query = (request.args.get('q') or '').strip()
+        date_range = (request.args.get('date_range') or '').strip().lower()
+        date_from = (request.args.get('date_from') or '').strip()
+        date_to = (request.args.get('date_to') or '').strip()
+        min_amount = request.args.get('min_amount')
+        max_amount = request.args.get('max_amount')
+        include_meta = str(request.args.get('include_meta', '')).lower() in ('1', 'true', 'yes')
 
-        _ALLOWED_SORT_FIELDS = {'created_at', 'quote_number', 'issue_date', 'expiry_date', 'total_amount'}
+        _ALLOWED_SORT_FIELDS = {
+            'created_at',
+            'quote_number',
+            'issue_date',
+            'expiry_date',
+            'total_amount',
+            'customer_name',
+            'status',
+        }
         sort_by = request.args.get('sort_by', 'created_at')
         sort_order = request.args.get('sort_order', 'desc').upper()
         if sort_by not in _ALLOWED_SORT_FIELDS:
@@ -189,17 +204,99 @@ def get_quotes():
         if sort_order not in ('ASC', 'DESC'):
             sort_order = 'DESC'
 
-        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except ValueError:
+            page = 1
+        try:
+            page_size = int(request.args.get('page_size', 10))
+        except ValueError:
+            page_size = 10
+        page_size = max(1, min(page_size, 100))
+        offset = (page - 1) * page_size
+
+        where = ["c.tenant_id = @tenant_id"]
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
 
         if status_filter:
-            query += " AND c.status = @status"
+            where.append("c.status = @status")
             parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
-            query += " AND c.customer_id = @customer_id"
+            where.append("c.customer_id = @customer_id")
             parameters.append({"name": "@customer_id", "value": customer_id_filter})
 
-        query += f" ORDER BY c.{sort_by} {sort_order}"
+        if search_query:
+            where.append("(CONTAINS(LOWER(c.quote_number), @q) OR CONTAINS(LOWER(c.reference_number), @q) OR CONTAINS(LOWER(c.customer_name), @q))")
+            parameters.append({"name": "@q", "value": search_query.lower()})
+
+        if date_range:
+            today = datetime.utcnow().date()
+            start_date = None
+            end_date = None
+
+            if date_range == 'this_week':
+                start_date = today - timedelta(days=today.weekday())
+                end_date = start_date + timedelta(days=6)
+            elif date_range == 'this_month':
+                start_date = today.replace(day=1)
+                if start_date.month == 12:
+                    next_month = start_date.replace(year=start_date.year + 1, month=1, day=1)
+                else:
+                    next_month = start_date.replace(month=start_date.month + 1, day=1)
+                end_date = next_month - timedelta(days=1)
+            elif date_range == 'this_quarter':
+                quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+                start_date = today.replace(month=quarter_start_month, day=1)
+                if quarter_start_month == 10:
+                    next_quarter = start_date.replace(year=start_date.year + 1, month=1, day=1)
+                else:
+                    next_quarter = start_date.replace(month=quarter_start_month + 3, day=1)
+                end_date = next_quarter - timedelta(days=1)
+            elif date_range == 'this_year':
+                start_date = today.replace(month=1, day=1)
+                end_date = today.replace(month=12, day=31)
+            elif date_range == 'custom':
+                if date_from:
+                    start_date = datetime.fromisoformat(date_from).date()
+                if date_to:
+                    end_date = datetime.fromisoformat(date_to).date()
+
+            if start_date:
+                where.append("c.issue_date >= @date_from")
+                parameters.append({"name": "@date_from", "value": start_date.isoformat()})
+            if end_date:
+                where.append("c.issue_date <= @date_to")
+                parameters.append({"name": "@date_to", "value": end_date.isoformat()})
+
+        if min_amount not in (None, ''):
+            where.append("c.total_amount >= @min_amount")
+            parameters.append({"name": "@min_amount", "value": float(min_amount)})
+
+        if max_amount not in (None, ''):
+            where.append("c.total_amount <= @max_amount")
+            parameters.append({"name": "@max_amount", "value": float(max_amount)})
+
+        where_sql = " AND ".join(where)
+        base_query = f"SELECT * FROM c WHERE {where_sql}"
+        legacy_mode = not include_meta and not any([
+            request.args.get('page'),
+            request.args.get('page_size'),
+            search_query,
+            date_range,
+            min_amount,
+            max_amount,
+        ])
+
+        if legacy_mode:
+            query = f"{base_query} ORDER BY c.{sort_by} {sort_order}"
+            items = list(quotes_container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True
+            ))
+            return jsonify(items), 200
+
+        query = f"{base_query} ORDER BY c.{sort_by} {sort_order} OFFSET {offset} LIMIT {page_size}"
 
         items = list(quotes_container.query_items(
             query=query,
@@ -207,9 +304,136 @@ def get_quotes():
             enable_cross_partition_query=True
         ))
 
-        return jsonify(items), 200
+        count_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql}"
+        total_items = list(quotes_container.query_items(
+            query=count_query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        total = int(total_items[0]) if total_items else 0
+
+        # Cosmos SDK/runtime combinations may reject GROUP BY with non-value aggregates.
+        # Use per-status COUNT VALUE queries for compatibility.
+        summary = {}
+        for status_name in QuoteStatus._value2member_map_.keys():
+            status_parameters = [*parameters, {"name": "@summary_status", "value": status_name}]
+            status_count_query = (
+                f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql} AND c.status = @summary_status"
+            )
+            status_items = list(quotes_container.query_items(
+                query=status_count_query,
+                parameters=status_parameters,
+                enable_cross_partition_query=True
+            ))
+            summary[status_name] = int(status_items[0]) if status_items else 0
+
+        return jsonify({
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "summary": summary,
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch quotes: {str(e)}"}), 500
+
+
+@quotes_blueprint.route('/quotes/bulk', methods=['POST'])
+def bulk_quote_actions():
+    """Perform bulk actions on quotes."""
+    data = request.get_json() or {}
+    action = data.get('action')
+    ids = data.get('ids') or []
+
+    if action not in ('delete', 'mark_accepted', 'convert_to_invoice'):
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty list'}), 400
+
+    processed = []
+    skipped = []
+    now = datetime.utcnow().isoformat()
+
+    for quote_id in ids:
+        try:
+            rows = list(quotes_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": quote_id},
+                    {"name": "@tenant_id", "value": request.tenant_id},
+                ],
+                enable_cross_partition_query=True
+            ))
+            if not rows:
+                skipped.append({"id": quote_id, "reason": "not_found"})
+                continue
+
+            quote = rows[0]
+            if action == 'delete':
+                quotes_container.delete_item(item=quote['id'], partition_key=quote['customer_id'])
+                processed.append({"id": quote_id, "action": action})
+                continue
+
+            if action == 'mark_accepted':
+                quote['status'] = 'Accepted'
+                quote['updated_at'] = now
+                quotes_container.replace_item(item=quote['id'], body=quote)
+                processed.append({"id": quote_id, "action": action})
+                continue
+
+            if action == 'convert_to_invoice':
+                if quote.get('status') == 'Converted':
+                    skipped.append({"id": quote_id, "reason": "already_converted"})
+                    continue
+
+                invoice_number = f"INV-{quote.get('quote_number', quote['id']).replace('QT-', '')}-{str(uuid.uuid4())[:6].upper()}"
+                invoice = {
+                    'id': str(uuid.uuid4()),
+                    'invoice_number': invoice_number,
+                    'customer_id': quote['customer_id'],
+                    'customer_name': quote.get('customer_name', ''),
+                    'customer_email': quote.get('customer_email', ''),
+                    'customer_phone': quote.get('customer_phone', ''),
+                    'issue_date': datetime.utcnow().date().isoformat(),
+                    'due_date': quote.get('expiry_date', datetime.utcnow().date().isoformat()),
+                    'payment_terms': quote.get('payment_terms', ''),
+                    'subtotal': quote.get('subtotal', 0.0),
+                    'cgst_amount': quote.get('cgst_amount', 0.0),
+                    'sgst_amount': quote.get('sgst_amount', 0.0),
+                    'igst_amount': quote.get('igst_amount', 0.0),
+                    'total_tax': quote.get('total_tax', 0.0),
+                    'total_amount': quote.get('total_amount', 0.0),
+                    'amount_paid': 0.0,
+                    'balance_due': quote.get('total_amount', 0.0),
+                    'status': 'Draft',
+                    'payment_mode': '',
+                    'notes': quote.get('notes', ''),
+                    'terms_conditions': quote.get('terms_conditions', ''),
+                    'is_gst_applicable': quote.get('is_gst_applicable', False),
+                    'invoice_type': 'Tax Invoice',
+                    'subject': quote.get('subject', ''),
+                    'salesperson': quote.get('salesperson', ''),
+                    'items': quote.get('items', []),
+                    'converted_from_quote_id': quote_id,
+                    'tenant_id': request.tenant_id,
+                    'created_at': now,
+                    'updated_at': now
+                }
+                created_invoice = invoices_container.create_item(body=invoice)
+                quote['status'] = 'Converted'
+                quote['converted_to_invoice_id'] = created_invoice['id']
+                quote['updated_at'] = now
+                quotes_container.replace_item(item=quote['id'], body=quote)
+                processed.append({"id": quote_id, "action": action, "invoice_id": created_invoice['id']})
+        except Exception as inner_err:
+            skipped.append({"id": quote_id, "reason": str(inner_err)})
+
+    return jsonify({
+        'processed': processed,
+        'skipped': skipped,
+        'success_count': len(processed),
+        'failure_count': len(skipped),
+    }), 200
 
 @quotes_blueprint.route('/quotes/<quote_id>', methods=['GET'])
 @swag_from({

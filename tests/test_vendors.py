@@ -73,6 +73,26 @@ class TestListVendors:
             resp = client.get("/api/vendors", headers=headers_a)
             assert resp.status_code == 200
 
+    def test_list_with_meta(self, client, headers_a):
+        with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_vendors, \
+             patch("smart_invoice_pro.api.vendors_api.bills_container") as mock_bills:
+            mock_vendors.query_items.return_value = [STORED_VENDOR]
+            mock_bills.query_items.return_value = [
+                {
+                    "vendor_id": "v-001",
+                    "total_amount": 5000,
+                    "balance_due": 1200,
+                    "bill_date": "2026-03-10",
+                    "created_at": "2026-03-10T00:00:00",
+                }
+            ]
+            resp = client.get("/api/vendors?include_meta=1&page=1&page_size=10", headers=headers_a)
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert isinstance(data.get("data"), list)
+            assert data.get("total") == 1
+            assert data.get("summary", {}).get("vendors_with_payables") == 1
+
 
 class TestGetVendor:
     """GET /api/vendors/<id> tests."""
@@ -127,3 +147,40 @@ class TestDeleteVendor:
             mock_ctr.query_items.return_value = []
             resp = client.delete("/api/vendors/nope", headers=headers_a)
             assert resp.status_code == 404
+
+
+class TestBulkVendors:
+    """POST /api/vendors/bulk tests."""
+
+    def test_bulk_mark_inactive(self, client, headers_a):
+        with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
+            active = {**STORED_VENDOR, "status": "Active"}
+            mock_ctr.query_items.return_value = [active]
+            resp = client.post(
+                "/api/vendors/bulk",
+                json={"action": "mark_inactive", "ids": ["v-001"]},
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            body = resp.get_json()
+            assert body["updated"] == 1
+
+    def test_bulk_delete(self, client, headers_a):
+        with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_VENDOR]
+            resp = client.post(
+                "/api/vendors/bulk",
+                json={"action": "delete", "ids": ["v-001"]},
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            body = resp.get_json()
+            assert body["deleted"] == 1
+
+    def test_bulk_invalid_action(self, client, headers_a):
+        resp = client.post(
+            "/api/vendors/bulk",
+            json={"action": "archive", "ids": ["v-001"]},
+            headers=headers_a,
+        )
+        assert resp.status_code == 400

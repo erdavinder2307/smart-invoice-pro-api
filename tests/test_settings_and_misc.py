@@ -182,6 +182,25 @@ class TestCreateRecurringProfile:
             resp = client.post("/api/recurring-profiles", json=SAMPLE_PROFILE, headers=headers_a)
             assert resp.status_code == 201
 
+    def test_create_persists_recurrence_rule(self, client, headers_a):
+        with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
+            mock_ctr.create_item.return_value = {**SAMPLE_PROFILE, "id": "new-id"}
+            payload = {
+                **SAMPLE_PROFILE,
+                "frequency": "Weekly",
+                "recurrence_interval": 2,
+                "recurrence_week_days": [1, 3, 5],
+                "ends_type": "after_occurrences",
+                "occurrence_limit": 6,
+            }
+            resp = client.post("/api/recurring-profiles", json=payload, headers=headers_a)
+            assert resp.status_code == 201
+            saved = mock_ctr.create_item.call_args[1]["body"]
+            assert saved["recurrence_rule"]["frequency"] == "Weekly"
+            assert saved["recurrence_rule"]["interval"] == 2
+            assert saved["recurrence_rule"]["weekly_days"] == [1, 3, 5]
+            assert saved["occurrence_limit"] == 6
+
     def test_create_missing_required(self, client, headers_a):
         resp = client.post("/api/recurring-profiles", json={}, headers=headers_a)
         assert resp.status_code == 400
@@ -196,6 +215,29 @@ class TestCreateRecurringProfile:
         resp = client.post("/api/recurring-profiles", json=payload, headers=headers_a)
         assert resp.status_code == 400
 
+    def test_create_weekly_requires_weekdays(self, client, headers_a):
+        payload = {**SAMPLE_PROFILE, "frequency": "Weekly", "recurrence_week_days": []}
+        resp = client.post("/api/recurring-profiles", json=payload, headers=headers_a)
+        assert resp.status_code == 400
+
+    def test_create_after_occurrences_requires_positive_count(self, client, headers_a):
+        payload = {
+            **SAMPLE_PROFILE,
+            "ends_type": "after_occurrences",
+            "occurrence_limit": 0,
+        }
+        resp = client.post("/api/recurring-profiles", json=payload, headers=headers_a)
+        assert resp.status_code == 400
+
+    def test_create_on_date_requires_end_date(self, client, headers_a):
+        payload = {
+            **SAMPLE_PROFILE,
+            "ends_type": "on_date",
+            "end_date": "",
+        }
+        resp = client.post("/api/recurring-profiles", json=payload, headers=headers_a)
+        assert resp.status_code == 400
+
     def test_create_end_before_start(self, client, headers_a):
         payload = {**SAMPLE_PROFILE, "end_date": "2026-02-01"}
         resp = client.post("/api/recurring-profiles", json=payload, headers=headers_a)
@@ -207,15 +249,23 @@ class TestListRecurringProfiles:
 
     def test_list_returns_data(self, client, headers_a):
         with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
-            mock_ctr.query_items.return_value = [STORED_PROFILE]
+            mock_ctr.query_items.side_effect = [[1], [STORED_PROFILE]]
             resp = client.get("/api/recurring-profiles", headers=headers_a)
             assert resp.status_code == 200
+            body = resp.get_json()
+            assert "data" in body
+            assert "total" in body
+            assert body["total"] == 1
+            assert len(body["data"]) == 1
 
     def test_list_empty(self, client, headers_a):
         with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
-            mock_ctr.query_items.return_value = []
+            mock_ctr.query_items.side_effect = [[0], []]
             resp = client.get("/api/recurring-profiles", headers=headers_a)
             assert resp.status_code == 200
+            body = resp.get_json()
+            assert body["total"] == 0
+            assert body["data"] == []
 
 
 class TestGetRecurringProfile:
@@ -265,6 +315,48 @@ class TestDeleteRecurringProfile:
             mock_ctr.query_items.return_value = []
             resp = client.delete("/api/recurring-profiles/nope", headers=headers_a)
             assert resp.status_code == 404
+
+
+class TestRecurringProfileActions:
+    """PATCH /api/recurring-profiles and /bulk tests."""
+
+    def test_patch_pause(self, client, headers_a):
+        with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_PROFILE]
+            mock_ctr.replace_item.return_value = {**STORED_PROFILE, "status": "Paused"}
+            resp = client.patch("/api/recurring-profiles/rp-001", json={"action": "pause"}, headers=headers_a)
+            assert resp.status_code == 200
+            assert resp.get_json()["status"] == "Paused"
+
+    def test_patch_resume(self, client, headers_a):
+        with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
+            paused = {**STORED_PROFILE, "status": "Paused"}
+            mock_ctr.query_items.return_value = [paused]
+            mock_ctr.replace_item.return_value = {**paused, "status": "Active"}
+            resp = client.patch("/api/recurring-profiles/rp-001", json={"action": "resume"}, headers=headers_a)
+            assert resp.status_code == 200
+            assert resp.get_json()["status"] == "Active"
+
+    def test_patch_cancel(self, client, headers_a):
+        with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_PROFILE]
+            mock_ctr.replace_item.return_value = {**STORED_PROFILE, "status": "Cancelled"}
+            resp = client.patch("/api/recurring-profiles/rp-001", json={"action": "cancel"}, headers=headers_a)
+            assert resp.status_code == 200
+            assert resp.get_json()["status"] == "Cancelled"
+
+    def test_bulk_pause(self, client, headers_a):
+        with patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_PROFILE]
+            resp = client.post(
+                "/api/recurring-profiles/bulk",
+                json={"action": "pause", "ids": ["rp-001"]},
+                headers=headers_a,
+            )
+            assert resp.status_code == 200
+            body = resp.get_json()
+            assert body["action"] == "pause"
+            assert body["updated"] == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

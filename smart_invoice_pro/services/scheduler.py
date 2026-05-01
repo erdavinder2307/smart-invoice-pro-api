@@ -148,7 +148,11 @@ def process_recurring_profiles():
                 
                 # Update the profile
                 profile['last_run_date'] = today
-                profile['next_run_date'] = calculate_next_run_date(today, profile['frequency'])
+                profile['next_run_date'] = calculate_next_run_date(
+                    today,
+                    profile.get('frequency'),
+                    profile.get('recurrence_rule') or profile,
+                )
                 profile['occurrences_created'] = profile.get('occurrences_created', 0) + 1
                 profile['updated_at'] = datetime.utcnow().isoformat()
                 

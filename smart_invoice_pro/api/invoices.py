@@ -35,6 +35,117 @@ class InvoiceStatus(Enum):
     Overdue = 'Overdue'
     Cancelled = 'Cancelled'
 
+
+def _to_number(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), '%Y-%m-%d').date()
+    except ValueError:
+        return None
+
+
+def _is_meaningful_item(item):
+    if not isinstance(item, dict):
+        return False
+    return bool(str(item.get('name', '')).strip()) \
+        or bool(str(item.get('product_name', '')).strip()) \
+        or bool(str(item.get('item_name', '')).strip()) \
+        or bool(str(item.get('description', '')).strip()) \
+        or _to_number(item.get('quantity', 0)) > 0 \
+        or _to_number(item.get('rate', 0)) > 0
+
+
+def _compute_item_totals(items, is_gst_applicable=True):
+    normalized = []
+    subtotal = 0.0
+    item_tax = 0.0
+
+    for item in items:
+        qty = max(0.0, _to_number(item.get('quantity', 0)))
+        rate = max(0.0, _to_number(item.get('rate', 0)))
+        discount = max(0.0, _to_number(item.get('discount', 0)))
+        tax_rate = max(0.0, _to_number(item.get('tax', 0)))
+
+        line_base = max(0.0, qty * rate - discount)
+        line_tax = (line_base * tax_rate / 100.0) if is_gst_applicable else 0.0
+        line_amount = line_base + line_tax
+
+        subtotal += line_base
+        item_tax += line_tax
+
+        normalized.append({
+            **item,
+            'quantity': qty,
+            'rate': rate,
+            'discount': discount,
+            'tax': tax_rate,
+            'amount': line_amount,
+        })
+
+    return normalized, subtotal, item_tax
+
+
+def validate_invoice_payload(data):
+    errors = {}
+    if not isinstance(data, dict):
+        return {'payload': 'Invalid JSON payload.'}
+
+    customer_id = data.get('customer_id')
+    if customer_id in (None, '', []):
+        errors['customer_id'] = 'Customer is required.'
+
+    issue_date = _parse_iso_date(data.get('issue_date'))
+    due_date = _parse_iso_date(data.get('due_date'))
+    if issue_date is None:
+        errors['issue_date'] = 'Invoice date must be a valid date (YYYY-MM-DD).'
+    if due_date is None:
+        errors['due_date'] = 'Due date must be a valid date (YYYY-MM-DD).'
+    if issue_date and due_date and due_date < issue_date:
+        errors['due_date'] = 'Due date must be on or after invoice date.'
+
+    status = data.get('status')
+    if status not in InvoiceStatus._value2member_map_:
+        errors['status'] = f'Invalid status: {status}'
+
+    items = data.get('items', [])
+    if not isinstance(items, list):
+        errors['items'] = 'Items must be an array.'
+        items = []
+
+    meaningful_items = [item for item in items if _is_meaningful_item(item)]
+    if len(meaningful_items) < 1:
+        errors['items'] = 'At least one item is required.'
+
+    for idx, item in enumerate(items):
+        if not _is_meaningful_item(item):
+            continue
+        name = str(item.get('name') or item.get('product_name') or item.get('item_name') or '').strip()
+        quantity = _to_number(item.get('quantity', -1))
+        rate = _to_number(item.get('rate', -1))
+        discount = _to_number(item.get('discount', 0))
+        tax = _to_number(item.get('tax', 0))
+
+        if not name:
+            errors[f'items[{idx}].name'] = 'Item name is required.'
+        if quantity <= 0:
+            errors[f'items[{idx}].quantity'] = 'Quantity must be greater than 0.'
+        if rate < 0:
+            errors[f'items[{idx}].rate'] = 'Rate cannot be negative.'
+        if discount < 0:
+            errors[f'items[{idx}].discount'] = 'Discount cannot be negative.'
+        if tax < 0:
+            errors[f'items[{idx}].tax'] = 'Tax cannot be negative.'
+
+    return errors
+
 def validate_invoice_patch(data):
     allowed_fields = {
         'invoice_number': str,
@@ -140,7 +251,12 @@ def validate_invoice_patch(data):
     }
 })
 def create_invoice():
-    data = request.get_json()
+    data = request.get_json() or {}
+
+    validation_errors = validate_invoice_payload(data)
+    if validation_errors:
+        return jsonify({'error': 'Validation failed', 'details': validation_errors}), 400
+
     now = datetime.utcnow().isoformat()
 
     # ── Invoice preferences: auto-generate number, apply defaults ────────────
@@ -165,7 +281,7 @@ def create_invoice():
     terms_conds   = data.get('terms_conditions') if data.get('terms_conditions') is not None else default_terms
 
     # Auto-calculate due_date from issue_date + default_due_days if not provided
-    issue_date = data['issue_date']
+    issue_date = data.get('issue_date')
     due_date   = data.get('due_date') or ''
     if not due_date and issue_date:
         try:
@@ -180,6 +296,11 @@ def create_invoice():
     raw_items = data.get('items', [])
     place_of_supply = (data.get('place_of_supply') or '').strip()
 
+    normalized_items, computed_subtotal, computed_item_tax = _compute_item_totals(
+        raw_items,
+        is_gst_applicable=is_gst_applicable,
+    )
+
     if is_gst_applicable:
         try:
             seller_state = _get_seller_state(request.tenant_id)
@@ -189,7 +310,7 @@ def create_invoice():
             )
             effective_pos = place_of_supply or customer_pos or customer_state
             gst_result = calculate_gst(
-                items=raw_items,
+                items=normalized_items,
                 seller_state=seller_state,
                 customer_state=customer_state,
                 gst_treatment=gst_treatment,
@@ -204,19 +325,25 @@ def create_invoice():
             place_of_supply = effective_pos
         except Exception:
             # Fallback to client-supplied values on error
-            cgst_amount  = data.get('cgst_amount', 0.0)
-            sgst_amount  = data.get('sgst_amount', 0.0)
-            igst_amount  = data.get('igst_amount', 0.0)
-            total_tax    = data.get('total_tax', 0.0)
-            stored_items = raw_items
+            cgst_amount  = _to_number(data.get('cgst_amount', 0.0))
+            sgst_amount  = _to_number(data.get('sgst_amount', 0.0))
+            igst_amount  = _to_number(data.get('igst_amount', 0.0))
+            total_tax    = computed_item_tax + cgst_amount + sgst_amount + igst_amount
+            stored_items = normalized_items
             gst_treatment = data.get('gst_treatment', 'regular')
     else:
         cgst_amount  = 0.0
         sgst_amount  = 0.0
         igst_amount  = 0.0
         total_tax    = 0.0
-        stored_items = raw_items
+        stored_items = normalized_items
         gst_treatment = data.get('gst_treatment', 'regular')
+
+    invoice_discount = max(0.0, _to_number(data.get('invoice_discount', 0.0)))
+    round_off = _to_number(data.get('round_off', 0.0))
+    computed_total = computed_subtotal + total_tax - invoice_discount + round_off
+    amount_paid = max(0.0, _to_number(data.get('amount_paid', 0.0)))
+    balance_due = computed_total - amount_paid
 
     item = {
         'id': str(uuid.uuid4()),
@@ -228,15 +355,17 @@ def create_invoice():
         'issue_date': issue_date,
         'due_date': due_date,
         'payment_terms': payment_terms,
-        'subtotal': data['subtotal'],
+        'subtotal': computed_subtotal,
         'cgst_amount': cgst_amount,
         'sgst_amount': sgst_amount,
         'igst_amount': igst_amount,
         'total_tax': total_tax,
-        'total_amount': data['total_amount'],
-        'amount_paid': data.get('amount_paid', 0.0),
-        'balance_due': data.get('balance_due', data['total_amount']),
-        'status': data['status'],
+        'total_amount': computed_total,
+        'amount_paid': amount_paid,
+        'invoice_discount': invoice_discount,
+        'round_off': round_off,
+        'balance_due': balance_due,
+        'status': data.get('status'),
         'payment_mode': data.get('payment_mode', ''),
         'notes': notes,
         'terms_conditions': terms_conds,
@@ -290,78 +419,219 @@ def create_invoice():
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
     return jsonify(sanitize_item(item)), 201
 
+@api_blueprint.route('/invoices/bulk', methods=['POST'])
+def bulk_invoice_actions():
+    """Bulk actions on invoices: delete, mark_paid, send_email."""
+    try:
+        data = request.get_json(force=True) or {}
+        action = data.get('action', '')
+        ids = data.get('ids', [])
+        if not action or not ids:
+            return jsonify({"error": "action and ids are required"}), 400
+        allowed_actions = {'delete', 'mark_paid', 'send_email'}
+        if action not in allowed_actions:
+            return jsonify({"error": f"Unknown action: {action}"}), 400
+
+        tenant_id = request.tenant_id
+        processed = []
+        skipped = []
+        now = datetime.utcnow().isoformat()
+
+        for invoice_id in ids:
+            try:
+                items = list(invoices_container.query_items(
+                    query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                    parameters=[
+                        {"name": "@id", "value": invoice_id},
+                        {"name": "@tenant_id", "value": tenant_id},
+                    ],
+                    enable_cross_partition_query=True,
+                ))
+                if not items:
+                    skipped.append({"id": invoice_id, "reason": "not_found"})
+                    continue
+                doc = items[0]
+
+                if action == 'delete':
+                    invoices_container.delete_item(item=doc['id'], partition_key=tenant_id)
+                    processed.append({"id": invoice_id, "action": "delete"})
+
+                elif action == 'mark_paid':
+                    if doc.get('status') == 'Paid':
+                        skipped.append({"id": invoice_id, "reason": "already_paid"})
+                        continue
+                    doc['status'] = 'Paid'
+                    doc['amount_paid'] = doc.get('total_amount', 0)
+                    doc['balance_due'] = 0.0
+                    doc['updated_at'] = now
+                    invoices_container.replace_item(item=doc['id'], body=doc)
+                    processed.append({"id": invoice_id, "action": "mark_paid"})
+
+                elif action == 'send_email':
+                    # Fire-and-forget placeholder; real email handled by dedicated endpoint
+                    processed.append({"id": invoice_id, "action": "send_email"})
+
+            except Exception as item_err:
+                skipped.append({"id": invoice_id, "reason": str(item_err)})
+
+        return jsonify({
+            "processed": processed,
+            "skipped": skipped,
+            "success_count": len(processed),
+            "failure_count": len(skipped),
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Bulk action failed: {str(e)}"}), 500
+
+
 @api_blueprint.route('/invoices', methods=['GET'])
-@swag_from({
-    'tags': ['Invoices'],
-    'responses': {
-        '200': {
-            'description': 'List of all invoices',
-            'examples': {
-                'application/json': [
-                    {
-                        'id': 'uuid',
-                        'invoice_number': 'INV-001',
-                        'customer_id': 123,
-                        'issue_date': '2025-06-05',
-                        'due_date': '2025-06-20',
-                        'payment_terms': 'Net 15',
-                        'subtotal': 1000.0,
-                        'cgst_amount': 90.0,
-                        'sgst_amount': 90.0,
-                        'igst_amount': 0.0,
-                        'total_tax': 180.0,
-                        'total_amount': 1180.0,
-                        'amount_paid': 0.0,
-                        'balance_due': 1180.0,
-                        'status': 'Draft',
-                        'payment_mode': 'Bank Transfer',
-                        'notes': 'Thank you!',
-                        'terms_conditions': 'Payment due in 15 days.',
-                        'is_gst_applicable': True,
-                        'invoice_type': 'Standard',
-                        'created_at': '2025-06-05T12:00:00Z',
-                        'updated_at': '2025-06-05T12:00:00Z'
-                    }
-                ]
-            }
-        }
-    }
-})
 def list_invoices():
-    tenant_id = request.tenant_id
-    status_filter = request.args.get('status')
-    created_from = request.args.get('created_from')
-    created_to = request.args.get('created_to')
+    """List invoices with search, filtering, sorting, pagination and summary meta."""
+    try:
+        tenant_id = request.tenant_id
+        status_filter = request.args.get('status')
+        search_query = (request.args.get('q') or '').strip()
+        date_range = (request.args.get('date_range') or '').strip().lower()
+        date_from = (request.args.get('date_from') or '').strip()
+        date_to = (request.args.get('date_to') or '').strip()
+        min_amount = request.args.get('min_amount')
+        max_amount = request.args.get('max_amount')
+        include_meta = str(request.args.get('include_meta', '')).lower() in ('1', 'true', 'yes')
 
-    _ALLOWED_SORT_FIELDS = {'created_at', 'issue_date', 'due_date', 'invoice_number', 'total_amount'}
-    sort_by = request.args.get('sort_by', 'created_at')
-    sort_order = request.args.get('sort_order', 'desc').upper()
-    if sort_by not in _ALLOWED_SORT_FIELDS:
-        sort_by = 'created_at'
-    if sort_order not in ('ASC', 'DESC'):
-        sort_order = 'DESC'
+        _ALLOWED_SORT_FIELDS = {'created_at', 'issue_date', 'due_date', 'invoice_number', 'total_amount', 'balance_due'}
+        sort_by = request.args.get('sort_by', 'created_at')
+        sort_order = request.args.get('sort_order', 'desc').upper()
+        if sort_by not in _ALLOWED_SORT_FIELDS:
+            sort_by = 'created_at'
+        if sort_order not in ('ASC', 'DESC'):
+            sort_order = 'DESC'
 
-    query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
-    parameters = [{"name": "@tenant_id", "value": tenant_id}]
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except ValueError:
+            page = 1
+        try:
+            page_size = int(request.args.get('page_size', 10))
+        except ValueError:
+            page_size = 10
+        page_size = max(1, min(page_size, 100))
+        offset = (page - 1) * page_size
 
-    if status_filter:
-        query += " AND c.status = @status"
-        parameters.append({"name": "@status", "value": status_filter})
-    if created_from:
-        query += " AND c.created_at >= @created_from"
-        parameters.append({"name": "@created_from", "value": created_from})
-    if created_to:
-        query += " AND c.created_at <= @created_to"
-        parameters.append({"name": "@created_to", "value": created_to})
+        where = ["c.tenant_id = @tenant_id"]
+        parameters = [{"name": "@tenant_id", "value": tenant_id}]
 
-    query += f" ORDER BY c.{sort_by} {sort_order}"
+        if status_filter:
+            where.append("c.status = @status")
+            parameters.append({"name": "@status", "value": status_filter})
 
-    items = list(invoices_container.query_items(
-        query=query,
-        parameters=parameters,
-        enable_cross_partition_query=True
-    ))
-    return jsonify(sanitize_items(items))
+        if search_query:
+            where.append(
+                "(CONTAINS(LOWER(c.invoice_number), @q) OR CONTAINS(LOWER(c.customer_name), @q))"
+            )
+            parameters.append({"name": "@q", "value": search_query.lower()})
+
+        if date_range:
+            today = datetime.utcnow().date()
+            start_date = None
+            end_date = None
+
+            if date_range == 'this_week':
+                start_date = today - timedelta(days=today.weekday())
+                end_date = start_date + timedelta(days=6)
+            elif date_range == 'this_month':
+                start_date = today.replace(day=1)
+                if start_date.month == 12:
+                    next_month = start_date.replace(year=start_date.year + 1, month=1, day=1)
+                else:
+                    next_month = start_date.replace(month=start_date.month + 1, day=1)
+                end_date = next_month - timedelta(days=1)
+            elif date_range == 'this_quarter':
+                quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+                start_date = today.replace(month=quarter_start_month, day=1)
+                if quarter_start_month == 10:
+                    next_quarter = start_date.replace(year=start_date.year + 1, month=1, day=1)
+                else:
+                    next_quarter = start_date.replace(month=quarter_start_month + 3, day=1)
+                end_date = next_quarter - timedelta(days=1)
+            elif date_range == 'this_year':
+                start_date = today.replace(month=1, day=1)
+                end_date = today.replace(month=12, day=31)
+            elif date_range == 'custom':
+                if date_from:
+                    start_date = datetime.fromisoformat(date_from).date()
+                if date_to:
+                    end_date = datetime.fromisoformat(date_to).date()
+
+            if start_date:
+                where.append("c.issue_date >= @date_from")
+                parameters.append({"name": "@date_from", "value": start_date.isoformat()})
+            if end_date:
+                where.append("c.issue_date <= @date_to")
+                parameters.append({"name": "@date_to", "value": end_date.isoformat()})
+
+        if min_amount not in (None, ''):
+            where.append("c.total_amount >= @min_amount")
+            parameters.append({"name": "@min_amount", "value": float(min_amount)})
+        if max_amount not in (None, ''):
+            where.append("c.total_amount <= @max_amount")
+            parameters.append({"name": "@max_amount", "value": float(max_amount)})
+
+        where_sql = " AND ".join(where)
+        base_query = f"SELECT * FROM c WHERE {where_sql}"
+
+        legacy_mode = not include_meta and not any([
+            request.args.get('page'),
+            request.args.get('page_size'),
+            search_query,
+            date_range,
+            min_amount,
+            max_amount,
+        ])
+
+        if legacy_mode:
+            query = f"{base_query} ORDER BY c.{sort_by} {sort_order}"
+            items = list(invoices_container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
+            ))
+            return jsonify(sanitize_items(items))
+
+        query = f"{base_query} ORDER BY c.{sort_by} {sort_order} OFFSET {offset} LIMIT {page_size}"
+        items = list(invoices_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        ))
+
+        count_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql}"
+        total_items = list(invoices_container.query_items(
+            query=count_query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        ))
+        total = int(total_items[0]) if total_items else 0
+
+        summary = {}
+        for status_name in InvoiceStatus._value2member_map_.keys():
+            s_params = [*parameters, {"name": "@summary_status", "value": status_name}]
+            s_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql} AND c.status = @summary_status"
+            s_result = list(invoices_container.query_items(
+                query=s_query,
+                parameters=s_params,
+                enable_cross_partition_query=True,
+            ))
+            summary[status_name] = int(s_result[0]) if s_result else 0
+
+        return jsonify({
+            "items": sanitize_items(items),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "summary": summary,
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch invoices: {str(e)}"}), 500
 
 # @api_blueprint.route('/invoices/<customer_id>', methods=['GET'])
 # @swag_from({
@@ -532,7 +802,7 @@ def get_invoice(invoice_id):
     }
 })
 def update_invoice(invoice_id):
-    data = request.get_json()
+    data = request.get_json() or {}
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(invoices_container.query_items(
         query=query,
@@ -544,6 +814,32 @@ def update_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+
+    merged_payload = {
+        **item,
+        **data,
+        'items': data.get('items', item.get('items', [])),
+    }
+    validation_errors = validate_invoice_payload(merged_payload)
+    if validation_errors:
+        return jsonify({'error': 'Validation failed', 'details': validation_errors}), 400
+
+    is_gst_applicable = bool(merged_payload.get('is_gst_applicable', False))
+    normalized_items, computed_subtotal, computed_item_tax = _compute_item_totals(
+        merged_payload.get('items', []),
+        is_gst_applicable=is_gst_applicable,
+    )
+    cgst_amount = _to_number(merged_payload.get('cgst_amount', 0.0))
+    sgst_amount = _to_number(merged_payload.get('sgst_amount', 0.0))
+    igst_amount = _to_number(merged_payload.get('igst_amount', 0.0))
+    manual_tax = cgst_amount + sgst_amount + igst_amount
+    computed_total_tax = computed_item_tax + (manual_tax if is_gst_applicable else 0.0)
+    invoice_discount = max(0.0, _to_number(merged_payload.get('invoice_discount', 0.0)))
+    round_off = _to_number(merged_payload.get('round_off', 0.0))
+    computed_total = computed_subtotal + computed_total_tax - invoice_discount + round_off
+    amount_paid = max(0.0, _to_number(merged_payload.get('amount_paid', 0.0)))
+    balance_due = computed_total - amount_paid
+
     before_snapshot = copy.deepcopy(item)
     # Update all fields from the request (PUT = full replacement)
     for field in [
@@ -555,6 +851,15 @@ def update_invoice(invoice_id):
     ]:
         if field in data:
             item[field] = data[field]
+
+    item['items'] = normalized_items
+    item['subtotal'] = computed_subtotal
+    item['total_tax'] = computed_total_tax
+    item['total_amount'] = computed_total
+    item['invoice_discount'] = invoice_discount
+    item['round_off'] = round_off
+    item['amount_paid'] = amount_paid
+    item['balance_due'] = balance_due
     item['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.replace_item(item=item['id'], body=item)
     log_audit("invoice", "update", invoice_id, before_snapshot, item,
@@ -598,7 +903,7 @@ def delete_invoice(invoice_id):
         return jsonify({'error': 'Forbidden'}), 403
     log_audit("invoice", "delete", invoice_id, item, None,
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
-    invoices_container.delete_item(item=item['id'], partition_key=item['customer_id'])
+    invoices_container.delete_item(item=item['id'], partition_key=request.tenant_id)
     return jsonify({'message': 'Invoice deleted'})
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PATCH'])
