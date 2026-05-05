@@ -3,7 +3,7 @@ from smart_invoice_pro.utils.cosmos_client import purchase_orders_container, bil
 import uuid
 import base64
 from flasgger import swag_from
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 
@@ -11,12 +11,51 @@ purchase_orders_blueprint = Blueprint('purchase_orders', __name__)
 
 class POStatus(Enum):
     Draft = 'Draft'
+    Issued = 'Issued'
     Sent = 'Sent'
     Confirmed = 'Confirmed'
     Received = 'Received'
     Billed = 'Billed'
     Closed = 'Closed'
     Cancelled = 'Cancelled'
+
+
+def _normalize_po_status(raw_status):
+    status = str(raw_status or '').strip()
+    if not status:
+        return 'Draft'
+    if status in ('Sent', 'Confirmed', 'Issued'):
+        return 'Issued'
+    return status
+
+
+def _to_float(value, fallback=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _compute_po_financials(po):
+    total_amount = _to_float(po.get('total_amount', 0))
+    amount_paid = po.get('amount_paid', po.get('received_amount', None))
+    amount_paid = _to_float(amount_paid, 0.0)
+
+    if amount_paid == 0.0 and _normalize_po_status(po.get('status')) in ('Received', 'Billed', 'Closed'):
+        amount_paid = total_amount
+
+    balance_due = po.get('balance_due', po.get('pending_amount', None))
+    if balance_due is None:
+        balance_due = max(total_amount - amount_paid, 0.0)
+    else:
+        balance_due = _to_float(balance_due, 0.0)
+
+    return {
+        **po,
+        'status_display': _normalize_po_status(po.get('status')),
+        'amount_paid': amount_paid,
+        'balance_due': balance_due,
+    }
 
 def validate_po_data(data, is_update=False):
     """Validate purchase order data"""
@@ -29,7 +68,7 @@ def validate_po_data(data, is_update=False):
                 errors[field] = f'{field} is required'
     
     # Validate status
-    if 'status' in data and data['status'] not in POStatus._value2member_map_:
+    if 'status' in data and _normalize_po_status(data['status']) not in POStatus._value2member_map_:
         errors['status'] = f'Invalid status: {data["status"]}'
     
     # Validate dates
@@ -114,11 +153,12 @@ def create_purchase_order():
         'subtotal': data.get('subtotal', 0.0),
         'tax_amount': data.get('tax_amount', 0.0),
         'total_amount': data['total_amount'],
-        'status': data['status'],
+        'status': _normalize_po_status(data['status']),
         'notes': data.get('notes', ''),
         'terms_conditions': data.get('terms_conditions', ''),
         'items': data.get('items', []),
         'converted_to_bill_id': data.get('converted_to_bill_id', None),
+        'tenant_id': request.tenant_id,
         'created_at': now,
         'updated_at': now
     }
@@ -159,12 +199,26 @@ def create_purchase_order():
     }
 })
 def get_purchase_orders():
-    """Get all purchase orders with optional filters"""
+    """Get all purchase orders with optional filters and optional metadata."""
     try:
-        status_filter = request.args.get('status')
-        vendor_id_filter = request.args.get('vendor_id')
+        status_filter = (request.args.get('status') or '').strip()
+        vendor_id_filter = (request.args.get('vendor_id') or '').strip()
+        search_query = (request.args.get('search') or request.args.get('q') or '').strip()
+        date_range = (request.args.get('date_range') or '').strip().lower()
+        date_from = (request.args.get('date_from') or '').strip()
+        date_to = (request.args.get('date_to') or '').strip()
+        include_meta = str(request.args.get('include_meta', '')).lower() in ('1', 'true', 'yes')
 
-        _ALLOWED_SORT_FIELDS = {'created_at', 'po_number', 'order_date', 'delivery_date', 'total_amount'}
+        _ALLOWED_SORT_FIELDS = {
+            'created_at': 'created_at',
+            'po_number': 'po_number',
+            'vendor_name': 'vendor_name',
+            'order_date': 'order_date',
+            'status': 'status',
+            'total_amount': 'total_amount',
+            'amount_paid': 'amount_paid',
+            'balance_due': 'balance_due',
+        }
         sort_by = request.args.get('sort_by', 'created_at')
         sort_order = request.args.get('sort_order', 'desc').upper()
         if sort_by not in _ALLOWED_SORT_FIELDS:
@@ -172,17 +226,106 @@ def get_purchase_orders():
         if sort_order not in ('ASC', 'DESC'):
             sort_order = 'DESC'
 
-        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except ValueError:
+            page = 1
+
+        limit_raw = request.args.get('limit', request.args.get('page_size', 10))
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 100))
+        offset = (page - 1) * limit
+
+        where = ["c.tenant_id = @tenant_id"]
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
 
-        if status_filter:
-            query += " AND c.status = @status"
-            parameters.append({"name": "@status", "value": status_filter})
+        if status_filter and status_filter.lower() != 'all':
+            normalized_status = _normalize_po_status(status_filter)
+            if normalized_status == 'Issued':
+                where.append("(c.status = @status_issued OR c.status = @status_sent OR c.status = @status_confirmed)")
+                parameters.extend([
+                    {"name": "@status_issued", "value": "Issued"},
+                    {"name": "@status_sent", "value": "Sent"},
+                    {"name": "@status_confirmed", "value": "Confirmed"},
+                ])
+            else:
+                where.append("c.status = @status")
+                parameters.append({"name": "@status", "value": normalized_status})
+
         if vendor_id_filter:
-            query += " AND c.vendor_id = @vendor_id"
+            where.append("c.vendor_id = @vendor_id")
             parameters.append({"name": "@vendor_id", "value": vendor_id_filter})
 
-        query += f" ORDER BY c.{sort_by} {sort_order}"
+        if search_query:
+            where.append("(CONTAINS(LOWER(c.po_number), @q) OR CONTAINS(LOWER(c.subject), @q) OR CONTAINS(LOWER(c.vendor_name), @q) OR CONTAINS(LOWER(c.status), @q))")
+            parameters.append({"name": "@q", "value": search_query.lower()})
+
+        if date_range:
+            today = datetime.utcnow().date()
+            start_date = None
+            end_date = None
+
+            if date_range == 'this_week':
+                start_date = today - timedelta(days=today.weekday())
+                end_date = start_date + timedelta(days=6)
+            elif date_range == 'this_month':
+                start_date = today.replace(day=1)
+                if start_date.month == 12:
+                    next_month = start_date.replace(year=start_date.year + 1, month=1, day=1)
+                else:
+                    next_month = start_date.replace(month=start_date.month + 1, day=1)
+                end_date = next_month - timedelta(days=1)
+            elif date_range == 'this_quarter':
+                quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+                start_date = today.replace(month=quarter_start_month, day=1)
+                if quarter_start_month == 10:
+                    next_quarter = start_date.replace(year=start_date.year + 1, month=1, day=1)
+                else:
+                    next_quarter = start_date.replace(month=quarter_start_month + 3, day=1)
+                end_date = next_quarter - timedelta(days=1)
+            elif date_range == 'this_year':
+                start_date = today.replace(month=1, day=1)
+                end_date = today.replace(month=12, day=31)
+            elif date_range == 'custom':
+                if date_from:
+                    start_date = datetime.fromisoformat(date_from).date()
+                if date_to:
+                    end_date = datetime.fromisoformat(date_to).date()
+
+            if start_date:
+                where.append("c.order_date >= @date_from")
+                parameters.append({"name": "@date_from", "value": start_date.isoformat()})
+            if end_date:
+                where.append("c.order_date <= @date_to")
+                parameters.append({"name": "@date_to", "value": end_date.isoformat()})
+
+        where_sql = " AND ".join(where)
+        base_query = f"SELECT * FROM c WHERE {where_sql}"
+        sort_field = _ALLOWED_SORT_FIELDS[sort_by]
+
+        legacy_mode = not include_meta and not any([
+            request.args.get('page'),
+            request.args.get('page_size'),
+            request.args.get('limit'),
+            search_query,
+            date_range,
+            date_from,
+            date_to,
+        ])
+
+        if legacy_mode:
+            query = f"{base_query} ORDER BY c.{sort_field} {sort_order}"
+            items = list(purchase_orders_container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True
+            ))
+            return jsonify([_compute_po_financials(item) for item in items]), 200
+
+        query = f"{base_query} ORDER BY c.{sort_field} {sort_order} OFFSET {offset} LIMIT {limit}"
 
         items = list(purchase_orders_container.query_items(
             query=query,
@@ -190,9 +333,101 @@ def get_purchase_orders():
             enable_cross_partition_query=True
         ))
 
-        return jsonify(items), 200
+        count_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql}"
+        total_items = list(purchase_orders_container.query_items(
+            query=count_query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        total = int(total_items[0]) if total_items else 0
+
+        def _count_for_status(status_name):
+            status_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql} AND c.status = @summary_status"
+            status_rows = list(purchase_orders_container.query_items(
+                query=status_query,
+                parameters=[*parameters, {"name": "@summary_status", "value": status_name}],
+                enable_cross_partition_query=True
+            ))
+            return int(status_rows[0]) if status_rows else 0
+
+        summary = {
+            'total': total,
+            'draft': _count_for_status('Draft'),
+            'issued': _count_for_status('Issued') + _count_for_status('Sent') + _count_for_status('Confirmed'),
+            'received': _count_for_status('Received'),
+            'cancelled': _count_for_status('Cancelled'),
+        }
+
+        return jsonify({
+            'data': [_compute_po_financials(item) for item in items],
+            'total': total,
+            'page': page,
+            'limit': limit,
+            'summary': summary,
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve purchase orders: {str(e)}"}), 500
+
+
+@purchase_orders_blueprint.route('/purchase-orders/bulk', methods=['POST'])
+def bulk_purchase_order_actions():
+    """Perform bulk actions on purchase orders."""
+    data = request.get_json() or {}
+    action = data.get('action')
+    ids = data.get('ids') or []
+
+    if action not in ('delete', 'mark_received', 'cancel', 'mark_issued'):
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty list'}), 400
+
+    processed = []
+    skipped = []
+    now = datetime.utcnow().isoformat()
+
+    for po_id in ids:
+        try:
+            rows = list(purchase_orders_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": po_id},
+                    {"name": "@tenant_id", "value": request.tenant_id},
+                ],
+                enable_cross_partition_query=True
+            ))
+
+            if not rows:
+                skipped.append({'id': po_id, 'reason': 'not_found'})
+                continue
+
+            po = rows[0]
+            if action == 'delete':
+                if _normalize_po_status(po.get('status')) == 'Billed':
+                    skipped.append({'id': po_id, 'reason': 'billed'})
+                    continue
+                purchase_orders_container.delete_item(item=po['id'], partition_key=po['vendor_id'])
+                processed.append({'id': po_id, 'action': action})
+                continue
+
+            if action == 'mark_received':
+                po['status'] = 'Received'
+            elif action == 'cancel':
+                po['status'] = 'Cancelled'
+            elif action == 'mark_issued':
+                po['status'] = 'Issued'
+
+            po['updated_at'] = now
+            purchase_orders_container.replace_item(item=po['id'], body=po)
+            processed.append({'id': po_id, 'action': action})
+        except Exception as inner_err:
+            skipped.append({'id': po_id, 'reason': str(inner_err)})
+
+    return jsonify({
+        'processed': processed,
+        'skipped': skipped,
+        'success_count': len(processed),
+        'failure_count': len(skipped),
+    }), 200
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>', methods=['GET'])
 @swag_from({
@@ -218,16 +453,20 @@ def get_purchase_orders():
 def get_purchase_order(po_id):
     """Get a purchase order by ID"""
     try:
-        query = f"SELECT * FROM c WHERE c.id = '{po_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(purchase_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": po_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
         if not items:
             return jsonify({"error": "Purchase Order not found"}), 404
         
-        return jsonify(items[0]), 200
+        return jsonify(_compute_po_financials(items[0])), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve purchase order: {str(e)}"}), 500
 
@@ -289,9 +528,13 @@ def update_purchase_order(po_id):
     
     try:
         # Fetch existing purchase order
-        query = f"SELECT * FROM c WHERE c.id = '{po_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(purchase_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": po_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -309,7 +552,10 @@ def update_purchase_order(po_id):
         
         for field in updatable_fields:
             if field in data:
-                po[field] = data[field]
+                if field == 'status':
+                    po[field] = _normalize_po_status(data[field])
+                else:
+                    po[field] = data[field]
         
         po['updated_at'] = datetime.utcnow().isoformat()
         
@@ -318,7 +564,7 @@ def update_purchase_order(po_id):
             body=po
         )
         
-        return jsonify(updated_item), 200
+        return jsonify(_compute_po_financials(updated_item)), 200
     except Exception as e:
         return jsonify({"error": f"Failed to update purchase order: {str(e)}"}), 500
 
@@ -347,9 +593,13 @@ def delete_purchase_order(po_id):
     """Delete a purchase order"""
     try:
         # Fetch the purchase order to get partition key
-        query = f"SELECT * FROM c WHERE c.id = '{po_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(purchase_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": po_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -417,17 +667,18 @@ def delete_purchase_order(po_id):
 })
 def convert_po_to_bill(po_id):
     """Convert a purchase order to a bill"""
-    data = request.get_json()
-    bill_number = data.get('bill_number')
-    
-    if not bill_number:
-        return jsonify({"error": "bill_number is required"}), 400
+    data = request.get_json() or {}
+    bill_number = (data.get('bill_number') or '').strip()
     
     try:
         # Fetch the purchase order
-        query = f"SELECT * FROM c WHERE c.id = '{po_id}'"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(purchase_orders_container.query_items(
             query=query,
+            parameters=[
+                {"name": "@id", "value": po_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
             enable_cross_partition_query=True
         ))
         
@@ -440,6 +691,9 @@ def convert_po_to_bill(po_id):
         if po.get('status') == 'Billed' or po.get('converted_to_bill_id'):
             return jsonify({"error": "Purchase Order has already been billed"}), 400
         
+        if not bill_number:
+            bill_number = f"BILL-{datetime.utcnow().strftime('%Y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+
         # Create bill from purchase order
         now = datetime.utcnow().isoformat()
         bill = {
@@ -461,6 +715,7 @@ def convert_po_to_bill(po_id):
             'items': po.get('items', []),
             'expenses': [],
             'converted_from_po_id': po_id,
+            'tenant_id': request.tenant_id,
             'created_at': now,
             'updated_at': now
         }
@@ -503,9 +758,10 @@ def convert_po_to_bill(po_id):
 def get_next_po_number():
     """Get the next available purchase order number"""
     try:
-        query = "SELECT * FROM c ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
+        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id ORDER BY c.created_at DESC OFFSET 0 LIMIT 1"
         items = list(purchase_orders_container.query_items(
             query=query,
+            parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
             enable_cross_partition_query=True
         ))
         

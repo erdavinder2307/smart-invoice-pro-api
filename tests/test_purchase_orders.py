@@ -68,6 +68,32 @@ class TestListPurchaseOrders:
             resp = client.get("/api/purchase-orders", headers=headers_a)
             assert resp.status_code == 200
 
+    def test_list_include_meta_returns_paginated_contract(self, client, headers_a):
+        with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
+            mock_ctr.query_items.side_effect = [
+                [{**STORED_PO, "tenant_id": TENANT_A}],
+                [1],
+                [1],
+                [0],
+                [0],
+                [0],
+                [0],
+                [0],
+            ]
+
+            resp = client.get(
+                "/api/purchase-orders?include_meta=1&page=1&limit=10&status=Draft&sort_by=order_date&sort_order=desc",
+                headers=headers_a,
+            )
+
+            assert resp.status_code == 200
+            payload = resp.get_json()
+            assert isinstance(payload.get("data"), list)
+            assert payload.get("total") == 1
+            assert payload.get("page") == 1
+            assert payload.get("limit") == 10
+            assert payload.get("summary", {}).get("draft") == 1
+
 
 class TestGetPurchaseOrder:
     """GET /api/purchase-orders/<id> tests."""
@@ -128,6 +154,48 @@ class TestDeletePurchaseOrder:
             mock_ctr.query_items.return_value = [billed]
             resp = client.delete("/api/purchase-orders/po-001", headers=headers_a)
             assert resp.status_code == 400
+
+
+class TestBulkPurchaseOrderActions:
+    """POST /api/purchase-orders/bulk tests."""
+
+    def test_bulk_delete_success(self, client, headers_a):
+        with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [{**STORED_PO, "tenant_id": TENANT_A}]
+
+            resp = client.post(
+                "/api/purchase-orders/bulk",
+                json={"action": "delete", "ids": ["po-001"]},
+                headers=headers_a,
+            )
+
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["success_count"] == 1
+            assert data["failure_count"] == 0
+
+    def test_bulk_mark_received_success(self, client, headers_a):
+        with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [{**STORED_PO, "tenant_id": TENANT_A}]
+            mock_ctr.replace_item.return_value = {**STORED_PO, "status": "Received"}
+
+            resp = client.post(
+                "/api/purchase-orders/bulk",
+                json={"action": "mark_received", "ids": ["po-001"]},
+                headers=headers_a,
+            )
+
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["success_count"] == 1
+
+    def test_bulk_invalid_action(self, client, headers_a):
+        resp = client.post(
+            "/api/purchase-orders/bulk",
+            json={"action": "bad-action", "ids": ["po-001"]},
+            headers=headers_a,
+        )
+        assert resp.status_code == 400
 
 
 class TestPONextNumber:
