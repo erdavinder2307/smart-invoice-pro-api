@@ -132,7 +132,7 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.vendors_api.vendors_container",
     # Bills
     "smart_invoice_pro.api.bills_api.bills_container",
-    "smart_invoice_pro.api.bills_api.get_container",
+    "smart_invoice_pro.api.bills_api.stock_container",
     # Expenses
     "smart_invoice_pro.api.expenses_api.expenses_container",
     # Bank accounts

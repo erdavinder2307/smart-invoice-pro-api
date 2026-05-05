@@ -37,8 +37,7 @@ class TestCreateBill:
     """POST /api/bills tests."""
 
     def test_create_success(self, client, headers_a):
-        with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.bills_api.get_container") as mock_gc:
+        with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
             mock_ctr.create_item.return_value = {**SAMPLE_BILL, "id": "new-id"}
             resp = client.post("/api/bills", json=SAMPLE_BILL, headers=headers_a)
             assert resp.status_code == 201
@@ -61,9 +60,8 @@ class TestCreateBill:
 
     def test_create_with_stock_items(self, client, headers_a):
         """Bill items with product_id create IN stock transactions."""
-        mock_stock_ctr = MagicMock()
         with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.bills_api.get_container", return_value=mock_stock_ctr):
+             patch("smart_invoice_pro.api.bills_api.stock_container") as mock_stock_ctr:
             payload = {**SAMPLE_BILL, "items": [{"product_id": "p1", "quantity": 10}]}
             mock_ctr.create_item.return_value = {**payload, "id": "new-id"}
             resp = client.post("/api/bills", json=payload, headers=headers_a)
@@ -76,8 +74,7 @@ class TestCreateBill:
 
     def test_create_defaults_balance_due(self, client, headers_a):
         """Balance due defaults to total_amount when not provided."""
-        with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.bills_api.get_container"):
+        with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
             mock_ctr.create_item.return_value = {}
             client.post("/api/bills", json=SAMPLE_BILL, headers=headers_a)
             call_args = mock_ctr.create_item.call_args
@@ -100,6 +97,47 @@ class TestListBills:
             mock_ctr.query_items.return_value = []
             resp = client.get("/api/bills", headers=headers_a)
             assert resp.status_code == 200
+
+    def test_list_include_meta_contract(self, client, headers_a):
+        with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
+            mock_ctr.query_items.side_effect = [
+                [{**STORED_BILL_A, "tenant_id": TENANT_A}],
+                [1],
+                [0],
+                [1],
+                [0],
+                [0],
+            ]
+
+            resp = client.get(
+                "/api/bills?include_meta=1&page=1&page_size=10&status=open&q=supplier&sort_by=bill_date&sort_order=asc",
+                headers=headers_a,
+            )
+
+            assert resp.status_code == 200
+            payload = resp.get_json()
+            assert isinstance(payload.get("data"), list)
+            assert payload.get("total") == 1
+            assert payload.get("page") == 1
+            assert payload.get("page_size") == 10
+            assert payload.get("summary", {}).get("open") == 1
+
+    def test_list_filter_query_uses_expected_params(self, client, headers_a):
+        with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
+            mock_ctr.query_items.return_value = []
+            client.get(
+                "/api/bills?include_meta=1&status=paid&vendor_id=vendor-001&q=bill&date_range=this_month&min_amount=100&max_amount=5000",
+                headers=headers_a,
+            )
+
+            first_call = mock_ctr.query_items.call_args_list[0]
+            params = first_call.kwargs.get("parameters", [])
+            names = {entry["name"] for entry in params}
+            assert "@tenant_id" in names
+            assert "@vendor_id" in names
+            assert "@q" in names
+            assert "@min_amount" in names
+            assert "@max_amount" in names
 
 
 class TestGetBill:
