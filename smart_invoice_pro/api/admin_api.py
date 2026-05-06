@@ -468,3 +468,4 @@ def system_stats():
         "active_users": active_users,
         "total_tenants": total_tenants,
     }), 200
+
