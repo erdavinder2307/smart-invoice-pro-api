@@ -61,7 +61,7 @@ class TestCreateProduct:
         mock_prod.query_items.return_value = []
         resp = client.post(
             "/api/products",
-            json={"name": "Expensive", "price": 100_000_000, "unit": "Nos"},
+            json={"name": "Expensive", "price": 1_000_000_000, "unit": "Nos"},
             headers=headers_a,
         )
         assert resp.status_code == 400

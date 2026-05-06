@@ -21,7 +21,7 @@ stock_summary_router = APIRouter()
 # ─────────────────────────────────────────────
 MAX_NAME_LEN = 255
 MAX_DESC_LEN = 1000
-MAX_PRICE = 99_999_999
+MAX_PRICE = 999_999_999
 
 
 def _validate_product_fields(data, is_update=False):
