@@ -166,8 +166,10 @@ class TestDeleteProduct:
         mock_prod.query_items.return_value = [stored_product_a]
         mock_used.return_value = 3
         resp = client.delete("/api/products/prod-aaa-001", headers=headers_a)
-        assert resp.status_code == 400
-        assert "used in 3 invoice(s)" in resp.get_json()["error"]
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["message"] == "Product archived"
+        assert isinstance(body.get("dependencySummary"), dict)
 
     @patch("smart_invoice_pro.api.product_api._item_used_in_invoices")
     @patch("smart_invoice_pro.api.product_api.products_container")

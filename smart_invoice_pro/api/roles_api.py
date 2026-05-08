@@ -46,6 +46,10 @@ def _get_role(user_id):
         return None
     return user.get('role', 'Sales')
 
+
+def _is_archived(item):
+    return str(item.get('lifecycle_status') or item.get('status') or '').upper() == 'ARCHIVED'
+
 def require_role(*allowed_roles):
     """Decorator: only allow requests from users with one of the specified roles.
     Works with both JWT-authenticated requests and legacy X-User-Id header.
@@ -210,6 +214,8 @@ def submit_invoice_for_approval(invoice_id):
     inv = _get_invoice(invoice_id)
     if not inv:
         return jsonify({'error': 'Invoice not found'}), 404
+    if _is_archived(inv):
+        return jsonify({'error': 'Archived invoices cannot enter approval workflow'}), 409
     if inv.get('status') not in ('Draft',):
         return jsonify({'error': f'Only Draft invoices can be submitted. Current status: {inv["status"]}'}), 400
 
@@ -229,6 +235,8 @@ def approve_invoice(invoice_id):
     inv = _get_invoice(invoice_id)
     if not inv:
         return jsonify({'error': 'Invoice not found'}), 404
+    if _is_archived(inv):
+        return jsonify({'error': 'Archived invoices cannot be approved'}), 409
     if inv.get('status') != 'Pending Approval':
         return jsonify({'error': f'Invoice is not pending approval. Status: {inv["status"]}'}), 400
 
@@ -249,6 +257,8 @@ def reject_invoice(invoice_id):
     inv = _get_invoice(invoice_id)
     if not inv:
         return jsonify({'error': 'Invoice not found'}), 404
+    if _is_archived(inv):
+        return jsonify({'error': 'Archived invoices cannot be rejected'}), 409
     if inv.get('status') != 'Pending Approval':
         return jsonify({'error': f'Invoice is not pending approval. Status: {inv["status"]}'}), 400
 
@@ -277,6 +287,8 @@ def submit_po_for_approval(po_id):
     po = _get_po(po_id)
     if not po:
         return jsonify({'error': 'Purchase Order not found'}), 404
+    if _is_archived(po):
+        return jsonify({'error': 'Archived purchase orders cannot enter approval workflow'}), 409
     if po.get('status') not in ('Draft',):
         return jsonify({'error': f'Only Draft POs can be submitted. Current status: {po["status"]}'}), 400
 
@@ -296,6 +308,8 @@ def approve_po(po_id):
     po = _get_po(po_id)
     if not po:
         return jsonify({'error': 'Purchase Order not found'}), 404
+    if _is_archived(po):
+        return jsonify({'error': 'Archived purchase orders cannot be approved'}), 409
     if po.get('status') != 'Pending Approval':
         return jsonify({'error': f'PO is not pending approval. Status: {po["status"]}'}), 400
 
@@ -316,6 +330,8 @@ def reject_po(po_id):
     po = _get_po(po_id)
     if not po:
         return jsonify({'error': 'Purchase Order not found'}), 404
+    if _is_archived(po):
+        return jsonify({'error': 'Archived purchase orders cannot be rejected'}), 409
     if po.get('status') != 'Pending Approval':
         return jsonify({'error': f'PO is not pending approval. Status: {po["status"]}'}), 400
 

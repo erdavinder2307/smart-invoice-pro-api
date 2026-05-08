@@ -21,6 +21,7 @@ STORED_EXPENSE = {
     "currency": "INR",
     "notes": "",
     "receipt_url": None,
+    "lifecycle_status": "ACTIVE",
     "created_at": "2026-03-15T00:00:00",
     "updated_at": "2026-03-15T00:00:00",
 }
@@ -121,14 +122,28 @@ class TestDeleteExpense:
     def test_delete_success(self, client, headers_a):
         with patch("smart_invoice_pro.api.expenses_api.expenses_container") as mock_ctr:
             mock_ctr.query_items.return_value = [STORED_EXPENSE]
+            mock_ctr.replace_item.return_value = {**STORED_EXPENSE, "lifecycle_status": "ARCHIVED"}
             resp = client.delete("/api/expenses/exp-001", headers=headers_a)
             assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["message"] == "Expense archived successfully"
+            mock_ctr.replace_item.assert_called_once()
 
     def test_delete_not_found(self, client, headers_a):
         with patch("smart_invoice_pro.api.expenses_api.expenses_container") as mock_ctr:
             mock_ctr.query_items.return_value = []
             resp = client.delete("/api/expenses/nope", headers=headers_a)
             assert resp.status_code == 404
+
+
+class TestExpenseDependencies:
+    """GET /api/expenses/<id>/dependencies tests."""
+
+    def test_dependencies_returns_no_deps(self, client, headers_a):
+        resp = client.get("/api/expenses/exp-001/dependencies", headers=headers_a)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["hasDependencies"] is False
 
 
 class TestExpenseStats:

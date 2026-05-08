@@ -242,7 +242,9 @@ class TestDeleteInvoice:
         mock_inv.query_items.return_value = [stored_invoice_a]
         resp = client.delete("/api/invoices/inv-aaa-001", headers=headers_a)
         assert resp.status_code == 200
-        mock_inv.delete_item.assert_called_once()
+        body = resp.get_json()
+        assert body["message"] == "Invoice archived successfully"
+        mock_inv.replace_item.assert_called_once()
 
     @patch("smart_invoice_pro.api.invoices.invoices_container")
     def test_delete_invoice_not_found(self, mock_inv, client, headers_a):
@@ -255,7 +257,7 @@ class TestDeleteInvoice:
         mock_inv.query_items.return_value = [stored_invoice_a]
         resp = client.delete("/api/invoices/inv-aaa-001", headers=headers_b)
         assert resp.status_code == 403
-        mock_inv.delete_item.assert_not_called()
+        mock_inv.replace_item.assert_not_called()
 
 
 class TestNextInvoiceNumber:

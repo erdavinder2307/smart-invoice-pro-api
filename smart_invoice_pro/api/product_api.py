@@ -8,7 +8,16 @@ import uuid
 from flasgger import swag_from
 from datetime import datetime
 from fastapi import APIRouter
-from smart_invoice_pro.utils.audit_logger import log_audit_event
+from smart_invoice_pro.utils.audit_logger import log_audit_event, log_bulk_archive_summary
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.bulk_archive_contracts import (
+    add_archive_failure,
+    add_archive_success,
+    finalize_bulk_archive_result,
+    init_bulk_archive_result,
+)
+from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
 
 # Create or get the products container (partition key: /product_id)
 products_container = get_container("products", "/product_id")
@@ -111,6 +120,10 @@ def _item_used_in_invoices(product_id):
         return 0
 
 
+def _is_archived(product):
+    return product.get("status") == "ARCHIVED" or bool(product.get("is_deleted", False))
+
+
 # ─────────────────────────────────────────────
 #  CREATE
 # ─────────────────────────────────────────────
@@ -202,6 +215,9 @@ def create_product():
         'reorder_qty': data.get('reorder_qty', 0),
         'preferred_vendor_id': data.get('preferred_vendor_id', ''),
         'tenant_id': request.tenant_id,
+        'status': 'ACTIVE',
+        'archived_at': None,
+        'archived_by': None,
         'is_deleted': False,
         'deleted_at': None,
         'created_at': now,
@@ -242,14 +258,22 @@ def list_products():
     if sort_order not in ('ASC', 'DESC'):
         sort_order = 'ASC'
 
+    lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
+
     query = f"SELECT * FROM c WHERE c.tenant_id = @tenant_id ORDER BY c.{sort_by} {sort_order}"
     items = list(products_container.query_items(
         query=query,
         parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
         enable_cross_partition_query=True
     ))
-    # Exclude soft-deleted items
-    items = [p for p in items if not p.get('is_deleted', False)]
+
+    if lifecycle == 'archived':
+        items = [p for p in items if _is_archived(p)]
+    elif lifecycle == 'all':
+        items = list(items)
+    else:
+        # Default to active records only.
+        items = [p for p in items if not _is_archived(p)]
 
     stock_transactions = list(get_container("stock", "/product_id").query_items(
         query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
@@ -308,7 +332,7 @@ def get_product(product_id):
     product = items[0]
     if product.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
-    if product.get('is_deleted', False):
+    if _is_archived(product):
         return jsonify({'error': 'Product not found'}), 404
     return jsonify(sanitize_item(product))
 
@@ -386,7 +410,7 @@ def update_product(product_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
-    if item.get('is_deleted', False):
+    if _is_archived(item):
         return jsonify({'error': 'Product not found'}), 404
 
     before_snapshot = dict(item)
@@ -424,7 +448,29 @@ def update_product(product_id):
 
 
 # ─────────────────────────────────────────────
-#  SOFT DELETE
+#  DEPENDENCY CHECK
+# ─────────────────────────────────────────────
+@product_blueprint.route('/products/<product_id>/dependencies', methods=['GET'])
+def get_product_dependencies(product_id):
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(products_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": product_id}],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Product not found'}), 404
+
+    item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    dependency = check_entity_dependencies('product', product_id, request.tenant_id)
+    return jsonify(dependency), 200
+
+
+# ─────────────────────────────────────────────
+#  ARCHIVE
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/<product_id>', methods=['DELETE'])
 @swag_from({
@@ -463,37 +509,128 @@ def delete_product(product_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
-    if item.get('is_deleted', False):
+    if _is_archived(item):
         return jsonify({'error': 'Product not found'}), 404
 
-    before_snapshot = dict(item)
+    dependency = check_entity_dependencies('product', product_id, request.tenant_id)
+    archived_item = archive_entity(
+        products_container,
+        item,
+        'product',
+        request.tenant_id,
+        user_id=getattr(request, 'user_id', None),
+        reason='User requested archive from delete action',
+    )
 
-    # Check if item is referenced in any invoice
-    invoice_count = _item_used_in_invoices(product_id)
-    if invoice_count > 0:
-        return jsonify({
-            'error': f'This item is used in {invoice_count} invoice(s). Remove it from invoices before deleting, or archive it instead.',
-            'invoice_count': invoice_count,
-            'warning': True
-        }), 400
-
-    # Soft delete: mark as deleted instead of removing from DB
-    now = datetime.utcnow().isoformat()
-    item['is_deleted'] = True
-    item['deleted_at'] = now
-    item['updated_at'] = now
-    products_container.replace_item(item=item['id'], body=item)
-    log_audit_event({
-        "action": "DELETE",
-        "entity": "product",
-        "entity_id": product_id,
-        "before": before_snapshot,
-        "after": item,
-        "metadata": {"event": "delete_product", "soft_delete": True},
-        "tenant_id": request.tenant_id,
-        "user_id": getattr(request, "user_id", None),
+    return jsonify({
+        'message': 'Product archived',
+        'status': archived_item.get('status'),
+        'dependencySummary': dependency.get('dependencySummary', {}),
     })
-    return jsonify({'message': 'Product deleted'})
+
+
+    return jsonify({
+        'message': 'Product archived',
+        'status': archived_item.get('status'),
+        'dependencySummary': dependency.get('dependencySummary', {}),
+    })
+
+
+@product_blueprint.route('/products/<product_id>/restore', methods=['POST'])
+def restore_product(product_id):
+    """Restore an archived product back to ACTIVE status."""
+    items = list(products_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": product_id}],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Product not found'}), 404
+    item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if not _is_archived(item):
+        return jsonify({'error': 'Product is not archived'}), 422
+    restored = restore_entity(
+        products_container, item, 'product', request.tenant_id,
+        user_id=getattr(request, 'user_id', None), reason='User requested restore',
+    )
+    return jsonify({'message': 'Product restored', 'status': restored.get('status')}), 200
+
+
+# ─────────────────────────────────────────────
+#  BULK ARCHIVE
+# ─────────────────────────────────────────────
+@product_blueprint.route('/products/bulk-archive', methods=['POST'])
+@product_blueprint.route('/products/bulk', methods=['POST'])
+def bulk_archive_products():
+    """Lifecycle-aware bulk archive for products."""
+    payload = request.get_json() or {}
+    ids = payload.get('ids') or []
+    action = str(payload.get('action') or 'archive').strip().lower()
+
+    if action not in {'archive', 'delete'}:
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty array'}), 400
+
+    result = init_bulk_archive_result('product', ids)
+    tenant_id = request.tenant_id
+    user_id = getattr(request, 'user_id', None)
+
+    for product_id in ids:
+        try:
+            rows = list(products_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": product_id},
+                    {"name": "@tenant_id", "value": tenant_id},
+                ],
+                enable_cross_partition_query=True,
+            ))
+
+            if not rows:
+                add_archive_failure(result, product_id, 'NOT_FOUND', 'Product not found')
+                continue
+
+            product = rows[0]
+            deps = check_entity_dependencies('product', product_id, tenant_id)
+
+            if _is_archived(product):
+                add_archive_failure(
+                    result, product_id, 'ALREADY_ARCHIVED', 'Product already archived',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            archive_entity(
+                products_container,
+                product,
+                'product',
+                tenant_id,
+                user_id,
+                reason='bulk_archive',
+            )
+            add_archive_success(
+                result, product_id,
+                dependency_summary=deps.get('dependencySummary', {}),
+                metadata={'message': 'Product archived successfully'},
+            )
+        except Exception as exc:
+            add_archive_failure(result, product_id, 'INTERNAL_ERROR', str(exc))
+
+    finalize_bulk_archive_result(result)
+    log_bulk_archive_summary(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='product',
+        requested_count=result['requestedCount'],
+        success_count=result['successCount'],
+        failed_count=result['failedCount'],
+        dependency_summary=result.get('dependencySummary', {}),
+    )
+    record_bulk_archive_completed(tenant_id, user_id, 'product', result)
+    return jsonify(result), 200
 
 
 # ─────────────────────────────────────────────
@@ -514,7 +651,7 @@ def products_stock_summary():
         parameters=[{"name": "@tenant_id", "value": request.tenant_id}],
         enable_cross_partition_query=True
     ))
-    products = [p for p in products if not p.get('is_deleted', False)]
+    products = [p for p in products if not _is_archived(p)]
     stock_transactions = list(get_container("stock", "/product_id").query_items(
         query="SELECT * FROM c WHERE c.tenant_id = @tenant_id",
         parameters=[{"name": "@tenant_id", "value": request.tenant_id}],

@@ -106,9 +106,10 @@ def test_delete_product_used_in_invoice(mock_container, mock_invoices, client):
     mock_invoices.return_value = 2 # Used in 2 invoices
     
     response = client.delete('/api/products/test-id', headers=_auth_headers())
-    assert response.status_code == 400
+    assert response.status_code == 200
     data = json.loads(response.data)
-    assert 'used in 2 invoice(s)' in data['error']
+    assert data['message'] == 'Product archived'
+    assert isinstance(data.get('dependencySummary'), dict)
     
 @patch('smart_invoice_pro.api.product_api.get_container')
 @patch('smart_invoice_pro.api.product_api.products_container')

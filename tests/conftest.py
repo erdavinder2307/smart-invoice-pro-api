@@ -112,6 +112,8 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.utils.notifications.notifications_container",
     # Audit logger
     "smart_invoice_pro.utils.audit_logger.audit_logs_container",
+    # Domain events
+    "smart_invoice_pro.utils.domain_events.domain_events_container",
     # Settings pages
     "smart_invoice_pro.api.reminders_api.settings_container",
     "smart_invoice_pro.api.organization_profile_api.settings_container",

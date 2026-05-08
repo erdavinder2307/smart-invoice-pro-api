@@ -1,5 +1,7 @@
 from flask import Blueprint, request, jsonify, make_response
 from smart_invoice_pro.utils.cosmos_client import purchase_orders_container, bills_container
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 import uuid
 import base64
 from flasgger import swag_from
@@ -8,6 +10,10 @@ from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 
 purchase_orders_blueprint = Blueprint('purchase_orders', __name__)
+
+
+def _is_archived(item):
+    return str(item.get('lifecycle_status') or item.get('status') or '').upper() == 'ARCHIVED'
 
 class POStatus(Enum):
     Draft = 'Draft'
@@ -159,6 +165,7 @@ def create_purchase_order():
         'items': data.get('items', []),
         'converted_to_bill_id': data.get('converted_to_bill_id', None),
         'tenant_id': request.tenant_id,
+        'lifecycle_status': 'ACTIVE',
         'created_at': now,
         'updated_at': now
     }
@@ -242,7 +249,15 @@ def get_purchase_orders():
         where = ["c.tenant_id = @tenant_id"]
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
 
-        if status_filter and status_filter.lower() != 'all':
+        lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
+        if lifecycle == 'archived':
+            where.append("UPPER(c.lifecycle_status) = @archived_status")
+            parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+        elif lifecycle != 'all':
+            where.append("(NOT IS_DEFINED(c.lifecycle_status) OR UPPER(c.lifecycle_status) != @archived_status)")
+            parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+
+        if status_filter and status_filter.lower() != 'all' and lifecycle != 'archived':
             normalized_status = _normalize_po_status(status_filter)
             if normalized_status == 'Issued':
                 where.append("(c.status = @status_issued OR c.status = @status_sent OR c.status = @status_confirmed)")
@@ -370,6 +385,7 @@ def get_purchase_orders():
 
 
 @purchase_orders_blueprint.route('/purchase-orders/bulk', methods=['POST'])
+@purchase_orders_blueprint.route('/purchase-orders/bulk-archive', methods=['POST'])
 def bulk_purchase_order_actions():
     """Perform bulk actions on purchase orders."""
     data = request.get_json() or {}
@@ -405,8 +421,14 @@ def bulk_purchase_order_actions():
                 if _normalize_po_status(po.get('status')) == 'Billed':
                     skipped.append({'id': po_id, 'reason': 'billed'})
                     continue
-                purchase_orders_container.delete_item(item=po['id'], partition_key=po['vendor_id'])
-                processed.append({'id': po_id, 'action': action})
+                if _is_archived(po):
+                    skipped.append({'id': po_id, 'reason': 'already_archived'})
+                    continue
+                archive_entity(
+                    purchase_orders_container, po, 'purchase_order',
+                    request.tenant_id, getattr(request, 'user_id', None), 'Bulk archive'
+                )
+                processed.append({'id': po_id, 'action': 'archive'})
                 continue
 
             if action == 'mark_received':
@@ -542,6 +564,8 @@ def update_purchase_order(po_id):
             return jsonify({"error": "Purchase Order not found"}), 404
         
         po = items[0]
+        if _is_archived(po):
+            return jsonify({"error": "Purchase Order not found"}), 404
         
         # Update fields
         updatable_fields = [
@@ -590,9 +614,9 @@ def update_purchase_order(po_id):
     }
 })
 def delete_purchase_order(po_id):
-    """Delete a purchase order"""
+    """Archive a purchase order (soft delete)."""
     try:
-        # Fetch the purchase order to get partition key
+        # Fetch the purchase order
         query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(purchase_orders_container.query_items(
             query=query,
@@ -602,24 +626,63 @@ def delete_purchase_order(po_id):
             ],
             enable_cross_partition_query=True
         ))
-        
+
         if not items:
             return jsonify({"error": "Purchase Order not found"}), 404
-        
+
         po = items[0]
-        
+
+        if _is_archived(po):
+            return jsonify({"error": "Purchase Order already archived"}), 409
+
         # Check if already converted to bill
         if po.get('status') == 'Billed':
-            return jsonify({"error": "Cannot delete a purchase order that has been billed"}), 400
-        
-        purchase_orders_container.delete_item(
-            item=po['id'],
-            partition_key=po['vendor_id']
+            return jsonify({"error": "Cannot archive a purchase order that has been billed"}), 400
+
+        reason = request.args.get('reason') or 'Archived by user'
+        archive_entity(
+            purchase_orders_container, po, 'purchase_order',
+            request.tenant_id, getattr(request, 'user_id', None), reason
         )
-        
-        return jsonify({"message": "Purchase Order deleted successfully"}), 200
+
+        return jsonify({"message": "Purchase Order archived successfully"}), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to delete purchase order: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to archive purchase order: {str(e)}"}), 500
+
+
+        return jsonify({"message": "Purchase Order archived successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to archive purchase order: {str(e)}"}), 500
+
+
+@purchase_orders_blueprint.route('/purchase-orders/<po_id>/restore', methods=['POST'])
+def restore_purchase_order(po_id):
+    """Restore an archived purchase order back to ACTIVE status."""
+    items = list(purchase_orders_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+        parameters=[
+            {"name": "@id", "value": po_id},
+            {"name": "@tenant_id", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Purchase Order not found'}), 404
+    item = items[0]
+    if not _is_archived(item):
+        return jsonify({'error': 'Purchase Order is not archived'}), 422
+    restored = restore_entity(
+        purchase_orders_container, item, 'purchase_order', request.tenant_id,
+        user_id=getattr(request, 'user_id', None), reason='User requested restore',
+    )
+    return jsonify({'message': 'Purchase Order restored', 'status': restored.get('status')}), 200
+
+
+@purchase_orders_blueprint.route('/purchase-orders/<po_id>/dependencies', methods=['GET'])
+def get_purchase_order_dependencies(po_id):
+    """Check if a purchase order has dependent records before archiving."""
+    result = check_entity_dependencies('purchase_order', po_id, request.tenant_id)
+    return jsonify(result), 200
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>/convert-bill', methods=['POST'])
 @swag_from({
@@ -686,6 +749,8 @@ def convert_po_to_bill(po_id):
             return jsonify({"error": "Purchase Order not found"}), 404
         
         po = items[0]
+        if _is_archived(po):
+            return jsonify({"error": "Archived purchase orders cannot be converted"}), 409
         
         # Check if already billed
         if po.get('status') == 'Billed' or po.get('converted_to_bill_id'):
@@ -843,6 +908,8 @@ def send_po_email(po_id):
     if not items:
         return jsonify({'error': 'Purchase order not found'}), 404
     po = items[0]
+    if _is_archived(po):
+        return jsonify({'error': 'Archived purchase orders cannot be emailed'}), 409
 
     recipient_email = data.get('recipient_email') or po.get('vendor_email', '').strip()
     if not recipient_email:

@@ -9,6 +9,8 @@ import uuid
 from flasgger import swag_from
 from datetime import datetime
 from smart_invoice_pro.utils.audit_logger import log_audit_event
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 
 vendors_blueprint = Blueprint('vendors', __name__)
 
@@ -134,6 +136,10 @@ def _sort_vendor_items(items, sort_by, sort_order):
 
     return sorted(items, key=lambda v: str(v.get(sort_by, '')).lower(), reverse=reverse)
 
+
+def _is_archived(vendor):
+    return str(vendor.get('status', '')).upper() == 'ARCHIVED'
+
 @vendors_blueprint.route('/vendors', methods=['POST'])
 @swag_from({
     'tags': ['Vendors'],
@@ -202,7 +208,9 @@ def create_vendor():
         'address': data.get('address', '').strip(),
         'gst_number': data.get('gst_number', '').strip().upper(),
         'payment_terms': data.get('payment_terms', 'Net 30'),
-        'status': data.get('status', 'Active'),
+        'status': 'ACTIVE',
+        'archived_at': None,
+        'archived_by': None,
         'notes': data.get('notes', '').strip(),
         'tenant_id': request.tenant_id,
         'created_at': now,
@@ -254,6 +262,7 @@ def get_vendors():
         tenant_id = request.tenant_id
         search_term = (request.args.get('q') or request.args.get('search') or '').strip().lower()
         status_filter = (request.args.get('status') or '').strip()
+        lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
         outstanding_filter = (request.args.get('outstanding') or '').strip().lower()
         payment_terms_filter = (request.args.get('payment_terms') or '').strip()
         include_meta = str(request.args.get('include_meta', '')).lower() in ('1', 'true', 'yes')
@@ -311,6 +320,13 @@ def get_vendors():
             enable_cross_partition_query=True
         ))
 
+        if lifecycle == 'archived':
+            rows = [row for row in rows if _is_archived(row)]
+        elif lifecycle == 'all':
+            rows = list(rows)
+        else:
+            rows = [row for row in rows if not _is_archived(row)]
+
         metrics = _aggregate_vendor_metrics(tenant_id)
         enriched = []
         for row in rows:
@@ -357,12 +373,13 @@ def get_vendors():
 
 
 @vendors_blueprint.route('/vendors/bulk', methods=['POST'])
+@vendors_blueprint.route('/vendors/bulk-archive', methods=['POST'])
 def bulk_vendor_actions():
     payload = request.get_json() or {}
     action = str(payload.get('action', '')).strip().lower()
     ids = payload.get('ids') or []
 
-    if action not in {'delete', 'mark_inactive'}:
+    if action not in {'delete', 'mark_inactive', 'archive'}:
         return jsonify({'error': 'Invalid bulk action'}), 400
     if not isinstance(ids, list) or not ids:
         return jsonify({'error': 'ids must be a non-empty array'}), 400
@@ -378,8 +395,15 @@ def bulk_vendor_actions():
                 errors.append({'id': vendor_id, 'error': 'not found'})
                 continue
 
-            if action == 'delete':
-                vendors_container.delete_item(item=vendor['id'], partition_key=vendor['vendor_id'])
+            if action in {'delete', 'archive'}:
+                archive_entity(
+                    vendors_container,
+                    vendor,
+                    'vendor',
+                    request.tenant_id,
+                    user_id=getattr(request, 'user_id', None),
+                    reason='Bulk archive',
+                )
                 deleted += 1
                 continue
 
@@ -434,7 +458,10 @@ def get_vendor(vendor_id):
         
         if not items:
             return jsonify({"error": "Vendor not found"}), 404
-        
+
+        if _is_archived(items[0]):
+            return jsonify({"error": "Vendor not found"}), 404
+
         return jsonify(items[0]), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve vendor: {str(e)}"}), 500
@@ -506,6 +533,8 @@ def update_vendor(vendor_id):
             return make_error_response(NOT_FOUND_ERROR, "Vendor not found", status=404)
 
         vendor = items[0]
+        if _is_archived(vendor):
+            return make_error_response(NOT_FOUND_ERROR, "Vendor not found", status=404)
         before_snapshot = dict(vendor)
 
         updatable_fields = [
@@ -577,24 +606,65 @@ def delete_vendor(vendor_id):
             return jsonify({"error": "Vendor not found"}), 404
         
         vendor = items[0]
-        before_snapshot = dict(vendor)
-        
-        vendors_container.delete_item(
-            item=vendor['id'],
-            partition_key=vendor['vendor_id']
+        if _is_archived(vendor):
+            return jsonify({"error": "Vendor not found"}), 404
+
+        dependency = check_entity_dependencies('vendor', vendor_id, request.tenant_id)
+        archived_vendor = archive_entity(
+            vendors_container,
+            vendor,
+            'vendor',
+            request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            reason='User requested archive from delete action',
         )
 
-        log_audit_event({
-            "action": "DELETE",
-            "entity": "vendor",
-            "entity_id": vendor_id,
-            "before": before_snapshot,
-            "after": None,
-            "metadata": {"event": "delete_vendor"},
-            "tenant_id": request.tenant_id,
-            "user_id": getattr(request, "user_id", None),
-        })
-        
-        return jsonify({"message": "Vendor deleted successfully"}), 200
+        return jsonify({
+            "message": "Vendor archived successfully",
+            "status": archived_vendor.get("status"),
+            "dependencySummary": dependency.get("dependencySummary", {}),
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete vendor: {str(e)}"}), 500
+
+
+        return jsonify({
+            "message": "Vendor archived successfully",
+            "status": archived_vendor.get("status"),
+            "dependencySummary": dependency.get("dependencySummary", {}),
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete vendor: {str(e)}"}), 500
+
+
+@vendors_blueprint.route('/vendors/<vendor_id>/restore', methods=['POST'])
+def restore_vendor(vendor_id):
+    """Restore an archived vendor back to ACTIVE status."""
+    items = list(vendors_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+        parameters=[
+            {"name": "@id", "value": vendor_id},
+            {"name": "@tenant_id", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Vendor not found'}), 404
+    item = items[0]
+    if not _is_archived(item):
+        return jsonify({'error': 'Vendor is not archived'}), 422
+    restored = restore_entity(
+        vendors_container, item, 'vendor', request.tenant_id,
+        user_id=getattr(request, 'user_id', None), reason='User requested restore',
+    )
+    return jsonify({'message': 'Vendor restored', 'status': restored.get('status')}), 200
+
+
+@vendors_blueprint.route('/vendors/<vendor_id>/dependencies', methods=['GET'])
+def get_vendor_dependencies(vendor_id):
+    vendor = _query_vendor(vendor_id, request.tenant_id)
+    if not vendor:
+        return jsonify({'error': 'Vendor not found'}), 404
+
+    dependency = check_entity_dependencies('vendor', vendor_id, request.tenant_id)
+    return jsonify(dependency), 200

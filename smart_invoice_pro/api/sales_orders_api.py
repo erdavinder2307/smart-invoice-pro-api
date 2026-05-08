@@ -7,6 +7,16 @@ from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity, LIFECYCLE_ARCHIVED
+from smart_invoice_pro.utils.bulk_archive_contracts import (
+    add_archive_failure,
+    add_archive_success,
+    finalize_bulk_archive_result,
+    init_bulk_archive_result,
+)
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 
 sales_orders_blueprint = Blueprint('sales_orders', __name__)
 
@@ -16,6 +26,11 @@ class SalesOrderStatus(Enum):
     Closed = 'Closed'
     Invoiced = 'Invoiced'
     Cancelled = 'Cancelled'
+
+
+def _is_archived(item):
+    return str(item.get('status', '')).upper() == LIFECYCLE_ARCHIVED
+
 
 def validate_sales_order_data(data, is_update=False):
     """Validate sales order data"""
@@ -131,6 +146,7 @@ def create_sales_order():
         'total_tax': data.get('total_tax', 0.0),
         'total_amount': data['total_amount'],
         'status': data['status'],
+        'lifecycle_status': 'ACTIVE',
         'notes': data.get('notes', ''),
         'terms_conditions': data.get('terms_conditions', ''),
         'is_gst_applicable': data.get('is_gst_applicable', False),
@@ -184,6 +200,7 @@ def get_sales_orders():
     """Get all sales orders with optional filters"""
     try:
         status_filter = request.args.get('status')
+        lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
         customer_id_filter = request.args.get('customer_id', type=int)
 
         _ALLOWED_SORT_FIELDS = {'created_at', 'so_number', 'order_date', 'delivery_date', 'total_amount'}
@@ -197,6 +214,13 @@ def get_sales_orders():
         query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         conditions = []
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
+        if lifecycle == 'archived':
+            conditions.append("UPPER(c.status) = @archived_status")
+            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
+        elif lifecycle != 'all':
+            conditions.append("(NOT IS_DEFINED(c.status) OR UPPER(c.status) != @archived_status)")
+            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
 
         if status_filter:
             conditions.append("c.status = @status")
@@ -257,10 +281,36 @@ def get_sales_order(so_id):
         
         if not items:
             return jsonify({"error": "Sales Order not found"}), 404
-        
+        if _is_archived(items[0]):
+            return jsonify({"error": "Sales Order not found"}), 404
+
         return jsonify(items[0]), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve sales order: {str(e)}"}), 500
+
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>/dependencies', methods=['GET'])
+@token_required
+def get_sales_order_dependencies(so_id):
+    try:
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
+        items = list(sales_orders_container.query_items(
+            query=query,
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id}
+            ],
+            enable_cross_partition_query=True
+        ))
+
+        if not items:
+            return jsonify({"error": "Sales Order not found"}), 404
+
+        dependencies = check_entity_dependencies('sales_order', so_id, request.tenant_id)
+        return jsonify(dependencies), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch dependencies: {str(e)}"}), 500
+
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['PUT'])
 @swag_from({
@@ -339,7 +389,9 @@ def update_sales_order(so_id):
             return jsonify({"error": "Sales Order not found"}), 404
         
         so = items[0]
-        
+        if _is_archived(so):
+            return jsonify({"error": "Sales Order not found"}), 404
+
         # Update fields
         updatable_fields = [
             'so_number', 'customer_id', 'customer_name', 'customer_email', 'customer_phone',
@@ -386,7 +438,7 @@ def update_sales_order(so_id):
 })
 @token_required
 def delete_sales_order(so_id):
-    """Delete a sales order"""
+    """Archive a sales order"""
     try:
         # Fetch the sales order to get partition key
         query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
@@ -404,18 +456,146 @@ def delete_sales_order(so_id):
         
         so = items[0]
         
-        # Check if already converted to invoice
+        if _is_archived(so):
+            return jsonify({"message": "Sales Order already archived"}), 200
+
+        # Preserve the old guard: already-invoiced sales orders are immutable.
         if so.get('status') == 'Invoiced':
-            return jsonify({"error": "Cannot delete a sales order that has been invoiced"}), 400
-        
-        sales_orders_container.delete_item(
-            item=so['id'],
-            partition_key=so['customer_id']
+            return jsonify({"error": "Cannot archive a sales order that has been invoiced"}), 400
+
+        dependency_data = check_entity_dependencies('sales_order', so_id, request.tenant_id)
+        archive_entity(
+            container=sales_orders_container,
+            item=so,
+            entity_type='sales_order',
+            tenant_id=request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            reason='archive_on_delete',
         )
-        
-        return jsonify({"message": "Sales Order deleted successfully"}), 200
+
+        return jsonify({
+            "message": "Sales Order archived successfully",
+            "dependencies": dependency_data,
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete sales order: {str(e)}"}), 500
+
+
+        return jsonify({"error": f"Failed to delete sales order: {str(e)}"}), 500
+
+
+@sales_orders_blueprint.route('/sales-orders/<so_id>/restore', methods=['POST'])
+@token_required
+def restore_sales_order(so_id):
+    """Restore an archived sales order back to ACTIVE status."""
+    try:
+        items = list(sales_orders_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+            parameters=[
+                {"name": "@id", "value": so_id},
+                {"name": "@tenant_id", "value": request.tenant_id},
+            ],
+            enable_cross_partition_query=True,
+        ))
+        if not items:
+            return jsonify({'error': 'Sales Order not found'}), 404
+        so = items[0]
+        if not _is_archived(so):
+            return jsonify({'error': 'Sales Order is not archived'}), 422
+        restored = restore_entity(
+            sales_orders_container, so, 'sales_order', request.tenant_id,
+            user_id=getattr(request, 'user_id', None), reason='User requested restore',
+        )
+        return jsonify({'message': 'Sales Order restored', 'status': restored.get('status')}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to restore sales order: {str(e)}'}), 500
+
+
+@sales_orders_blueprint.route('/sales-orders/bulk-archive', methods=['POST'])
+@sales_orders_blueprint.route('/sales-orders/bulk', methods=['POST'])
+@token_required
+def bulk_archive_sales_orders():
+    """Lifecycle-aware bulk archive for sales orders."""
+    payload = request.get_json() or {}
+    ids = payload.get('ids') or []
+    action = str(payload.get('action') or 'archive').strip().lower()
+
+    if action not in {'archive', 'delete'}:
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty array'}), 400
+
+    result = init_bulk_archive_result('sales_order', ids)
+    tenant_id = request.tenant_id
+    user_id = getattr(request, 'user_id', None)
+
+    for so_id in ids:
+        try:
+            rows = list(sales_orders_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": so_id},
+                    {"name": "@tenant_id", "value": tenant_id},
+                ],
+                enable_cross_partition_query=True,
+            ))
+
+            if not rows:
+                add_archive_failure(result, so_id, 'NOT_FOUND', 'Sales Order not found')
+                continue
+
+            so = rows[0]
+            deps = check_entity_dependencies('sales_order', so_id, tenant_id)
+
+            if _is_archived(so):
+                add_archive_failure(
+                    result,
+                    so_id,
+                    'ALREADY_ARCHIVED',
+                    'Sales Order already archived',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            if str(so.get('status') or '').strip().lower() == 'invoiced':
+                add_archive_failure(
+                    result,
+                    so_id,
+                    'LOCKED_BY_WORKFLOW',
+                    'Cannot archive a sales order that has been invoiced',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            archive_entity(
+                sales_orders_container,
+                so,
+                'sales_order',
+                tenant_id,
+                user_id,
+                reason='bulk_archive',
+            )
+            add_archive_success(
+                result,
+                so_id,
+                dependency_summary=deps.get('dependencySummary', {}),
+                metadata={'message': 'Sales Order archived successfully'},
+            )
+        except Exception as exc:
+            add_archive_failure(result, so_id, 'INTERNAL_ERROR', str(exc))
+
+    finalize_bulk_archive_result(result)
+    log_bulk_archive_summary(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='sales_order',
+        requested_count=result['requestedCount'],
+        success_count=result['successCount'],
+        failed_count=result['failedCount'],
+        dependency_summary=result.get('dependencySummary', {}),
+    )
+    record_bulk_archive_completed(tenant_id, user_id, 'sales_order', result)
+    return jsonify(result), 200
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/convert-invoice', methods=['POST'])
 @swag_from({
@@ -486,6 +666,8 @@ def convert_so_to_invoice(so_id):
             return jsonify({"error": "Sales Order not found"}), 404
         
         so = items[0]
+        if _is_archived(so):
+            return jsonify({"error": "Archived sales orders cannot be converted"}), 409
         
         # Check if already invoiced
         if so.get('status') == 'Invoiced' or so.get('converted_to_invoice_id'):
@@ -616,6 +798,8 @@ def convert_so_to_po(so_id):
             return jsonify({"error": "Sales Order not found"}), 404
         
         so = items[0]
+        if _is_archived(so):
+            return jsonify({"error": "Archived sales orders cannot be converted"}), 409
         
         # Check if already converted to PO
         if so.get('converted_to_po_id'):
@@ -748,6 +932,8 @@ def send_so_email(so_id):
     if not items:
         return jsonify({'error': 'Sales order not found'}), 404
     so = items[0]
+    if _is_archived(so):
+        return jsonify({'error': 'Archived sales orders cannot be emailed'}), 409
 
     recipient_email = data.get('recipient_email') or so.get('customer_email', '').strip()
     if not recipient_email:
