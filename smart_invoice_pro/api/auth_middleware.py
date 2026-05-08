@@ -28,13 +28,16 @@ def _extract_bearer_token():
     return token or None
 
 
-def _set_request_context(user_id, tenant_id):
+def _set_request_context(user_id, tenant_id, session_id=None):
     g.user_id = user_id
     g.tenant_id = tenant_id
 
     # Keep compatibility with the requested contract.
     setattr(request, "user_id", user_id)
     setattr(request, "tenant_id", tenant_id)
+    # Used by me_api.get_sessions() to mark the current session
+    if session_id:
+        setattr(request, "token_id", session_id)
 
 
 def authenticate_request_context():
@@ -51,6 +54,7 @@ def authenticate_request_context():
 
     user_id = payload.get("user_id") or payload.get("id")
     tenant_id = payload.get("tenant_id")
+    session_id = payload.get("session_id")
 
     # Backward compatibility for old tokens that had only id.
     if not tenant_id and payload.get("id"):
@@ -59,7 +63,7 @@ def authenticate_request_context():
     if not user_id or not tenant_id:
         return None, _unauthorized("Unauthorized")
 
-    _set_request_context(user_id, tenant_id)
+    _set_request_context(user_id, tenant_id, session_id)
     return payload, None
 
 
