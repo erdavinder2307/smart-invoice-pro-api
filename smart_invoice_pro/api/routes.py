@@ -9,6 +9,63 @@ import jwt
 import datetime
 from smart_invoice_pro.utils.audit_logger import log_audit_event
 
+try:
+    import user_agents as _ua_lib
+    _UA_AVAILABLE = True
+except ImportError:
+    _UA_AVAILABLE = False
+
+
+def _parse_device_info(ua_string: str) -> dict:
+    """Parse User-Agent string into structured device metadata."""
+    if not ua_string:
+        return {
+            "browser": "", "browser_version": "",
+            "os": "", "device_type": "Desktop", "device_name": "",
+        }
+    if not _UA_AVAILABLE:
+        return {
+            "browser": "", "browser_version": "",
+            "os": "", "device_type": "Desktop", "device_name": "",
+        }
+    try:
+        ua = _ua_lib.parse(ua_string)
+        browser = ua.browser.family or ""
+        browser_version = (ua.browser.version_string or "").split(".")[0]  # major only
+        os_family = ua.os.family or ""
+        if ua.is_mobile:
+            device_type = "Mobile"
+        elif ua.is_tablet:
+            device_type = "Tablet"
+        else:
+            device_type = "Desktop"
+        # Clean up "Other" placeholders
+        if browser == "Other":
+            browser = ""
+        if os_family == "Other":
+            os_family = ""
+        device_name = " on ".join(filter(None, [browser, os_family])) or ""
+        return {
+            "browser": browser,
+            "browser_version": browser_version,
+            "os": os_family,
+            "device_type": device_type,
+            "device_name": device_name,
+        }
+    except Exception:
+        return {
+            "browser": "", "browser_version": "",
+            "os": "", "device_type": "Desktop", "device_name": "",
+        }
+
+
+def _get_client_ip() -> str:
+    """Extract real client IP, honouring X-Forwarded-For for reverse proxies."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or ""
+
 api_blueprint = Blueprint('api_core', __name__)
 auth_blueprint = Blueprint('auth', __name__)
 
@@ -162,6 +219,34 @@ def login_user():
         jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
         tenant_id = items[0].get('tenant_id') or items[0].get('id')
         user_id = items[0]['id']
+
+        # Generate and store refresh token (30-day expiry) with device metadata
+        refresh_token_value = secrets.token_urlsafe(48)
+        refresh_token_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+        now_iso = datetime.datetime.utcnow().isoformat()
+        token_record_id = str(uuid.uuid4())
+        raw_ua = request.headers.get("User-Agent", "")
+        device_info = _parse_device_info(raw_ua)
+        client_ip = _get_client_ip()
+        refresh_token_record = {
+            "id": token_record_id,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "token": refresh_token_value,
+            "expires_at": refresh_token_expires.isoformat(),
+            "created_at": now_iso,
+            "last_active_at": now_iso,
+            # Device metadata
+            "raw_user_agent": raw_ua,
+            "browser": device_info["browser"],
+            "browser_version": device_info["browser_version"],
+            "os": device_info["os"],
+            "device_type": device_info["device_type"],
+            "device_name": device_info["device_name"],
+            "ip_address": client_ip,
+        }
+        refresh_tokens_container.create_item(body=refresh_token_record)
+
         access_token = jwt.encode(
             {
                 "id": user_id,
@@ -169,24 +254,12 @@ def login_user():
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
                 "is_super_admin": bool(items[0].get('is_super_admin', False)),
+                "session_id": token_record_id,
                 "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
             },
             jwt_secret,
             algorithm="HS256"
         )
-
-        # Generate and store refresh token (30-day expiry)
-        refresh_token_value = secrets.token_urlsafe(48)
-        refresh_token_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
-        refresh_token_record = {
-            "id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "tenant_id": tenant_id,
-            "token": refresh_token_value,
-            "expires_at": refresh_token_expires.isoformat(),
-            "created_at": datetime.datetime.utcnow().isoformat()
-        }
-        refresh_tokens_container.create_item(body=refresh_token_record)
 
         log_audit_event({
             "action": "LOGIN",
@@ -206,12 +279,23 @@ def login_user():
             "user_email": items[0].get("email") or items[0].get("username"),
         })
 
+        # Look up user profile to get display name
+        profile_name = ''
+        try:
+            profile_query = f"SELECT c.name FROM c WHERE c.type = 'user_profile' AND c.user_id = '{user_id}'"
+            profiles = list(users_container.query_items(query=profile_query, enable_cross_partition_query=True))
+            if profiles and profiles[0].get('name'):
+                profile_name = profiles[0]['name']
+        except Exception:
+            pass
+
         return jsonify({
             "message": "Login successful!",
             "user": {
                 "id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
+                "name": profile_name or items[0].get('name', ''),
                 "role": items[0].get('role', 'Sales'),
                 "is_super_admin": bool(items[0].get('is_super_admin', False))
             },
@@ -270,21 +354,11 @@ def refresh_token():
         return jsonify({"error": "User not found"}), 401
 
     user = user_items[0]
-    new_access_token = jwt.encode(
-        {
-            "id": record['user_id'],
-            "user_id": record['user_id'],
-            "tenant_id": record['tenant_id'],
-            "username": user.get('username', ''),
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
-        },
-        jwt_secret,
-        algorithm="HS256"
-    )
-
-    # Rotate refresh token (optional but more secure)
+    # Rotate refresh token — preserve device metadata, update last_active_at
     new_refresh_value = secrets.token_urlsafe(48)
     new_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    new_token_record_id = str(uuid.uuid4())
+    now_iso = datetime.datetime.utcnow().isoformat()
     # Delete old record
     try:
         refresh_tokens_container.delete_item(
@@ -292,15 +366,37 @@ def refresh_token():
         )
     except Exception:
         pass
-    # Create rotated record
+    # Create rotated record, carrying over device metadata
     refresh_tokens_container.create_item(body={
-        "id": str(uuid.uuid4()),
+        "id": new_token_record_id,
         "user_id": record['user_id'],
         "tenant_id": record['tenant_id'],
         "token": new_refresh_value,
         "expires_at": new_expires.isoformat(),
-        "created_at": datetime.datetime.utcnow().isoformat()
+        "created_at": record.get('created_at', now_iso),
+        "last_active_at": now_iso,
+        # Carry over device metadata from original login
+        "raw_user_agent": record.get('raw_user_agent', ''),
+        "browser": record.get('browser', ''),
+        "browser_version": record.get('browser_version', ''),
+        "os": record.get('os', ''),
+        "device_type": record.get('device_type', 'Desktop'),
+        "device_name": record.get('device_name', ''),
+        "ip_address": record.get('ip_address', ''),
     })
+
+    new_access_token = jwt.encode(
+        {
+            "id": record['user_id'],
+            "user_id": record['user_id'],
+            "tenant_id": record['tenant_id'],
+            "username": user.get('username', ''),
+            "session_id": new_token_record_id,
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+        },
+        jwt_secret,
+        algorithm="HS256"
+    )
 
     return jsonify({
         "access_token": new_access_token,
