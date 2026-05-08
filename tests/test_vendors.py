@@ -56,6 +56,7 @@ class TestCreateVendor:
             call_args = mock_ctr.create_item.call_args
             body = call_args[1]["body"] if "body" in call_args[1] else call_args[0][0]
             assert body["payment_terms"] == "Net 30"
+            assert body["status"] == "ACTIVE"
 
 
 class TestListVendors:
@@ -180,7 +181,7 @@ class TestBulkVendors:
     def test_bulk_invalid_action(self, client, headers_a):
         resp = client.post(
             "/api/vendors/bulk",
-            json={"action": "archive", "ids": ["v-001"]},
+            json={"action": "bad_action", "ids": ["v-001"]},
             headers=headers_a,
         )
         assert resp.status_code == 400

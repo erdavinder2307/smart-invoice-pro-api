@@ -170,6 +170,8 @@ class TestDeleteQuote:
             mock_ctr.query_items.return_value = [STORED_QUOTE_A]
             resp = client.delete("/api/quotes/qt-aaa-001", headers=headers_a)
             assert resp.status_code == 200
+            assert resp.get_json().get("message") == "Quote archived successfully"
+            mock_ctr.replace_item.assert_called_once()
 
     def test_delete_not_found(self, client, headers_a):
         with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_ctr:
@@ -221,7 +223,7 @@ class TestBulkQuotes:
                 headers=headers_a,
             )
             assert resp.status_code == 200
-            mock_ctr.delete_item.assert_called_once()
+            mock_ctr.replace_item.assert_called_once()
 
     def test_bulk_convert_to_invoice(self, client, headers_a):
         with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_quotes, patch(

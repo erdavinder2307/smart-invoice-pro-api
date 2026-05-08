@@ -1,11 +1,25 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import bills_container, stock_container
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.bulk_archive_contracts import (
+    add_archive_failure,
+    add_archive_success,
+    finalize_bulk_archive_result,
+    init_bulk_archive_result,
+)
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 import uuid
 from flasgger import swag_from
 from datetime import date, datetime, timedelta
 from enum import Enum
 
 bills_blueprint = Blueprint('bills', __name__)
+
+
+def _is_archived(item):
+    return str(item.get('lifecycle_status') or item.get('status') or '').upper() == 'ARCHIVED'
 
 class PaymentStatus(Enum):
     Draft = 'Draft'
@@ -241,6 +255,7 @@ def create_bill():
         'reference': data.get('reference', ''),
         'tenant_id': request.tenant_id,
         'payment_history': [],  # Track payment records
+        'lifecycle_status': 'ACTIVE',
         'created_at': now,
         'updated_at': now
     }
@@ -343,11 +358,20 @@ def get_bills():
         page_size = max(1, min(page_size, 100))
         offset = (page - 1) * page_size
 
+        lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
+
         where = ["c.tenant_id = @tenant_id"]
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
 
+        if lifecycle == 'archived':
+            where.append("UPPER(c.lifecycle_status) = @archived_status")
+            parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+        elif lifecycle != 'all':
+            where.append("(NOT IS_DEFINED(c.lifecycle_status) OR UPPER(c.lifecycle_status) != @archived_status)")
+            parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+
         status_key = status_filter.lower()
-        if status_key and status_key != 'all':
+        if status_key and status_key != 'all' and lifecycle != 'archived':
             if status_key == 'open':
                 where.append("(c.payment_status = @open_status OR c.payment_status = @unpaid_status OR c.payment_status = @partial_status)")
                 parameters.extend([
@@ -516,10 +540,20 @@ def get_bill(bill_id):
         
         if not items:
             return jsonify({"error": "Bill not found"}), 404
+
+        if _is_archived(items[0]):
+            return jsonify({"error": "Bill not found"}), 404
         
         return jsonify(_sanitize_bill(_derive_bill_bucket(items[0]))), 200
     except Exception as e:
         return jsonify({"error": f"Failed to retrieve bill: {str(e)}"}), 500
+
+
+@bills_blueprint.route('/bills/<bill_id>/dependencies', methods=['GET'])
+def get_bill_dependencies(bill_id):
+    """Check if a bill has dependent records before archiving."""
+    result = check_entity_dependencies('bill', bill_id, request.tenant_id)
+    return jsonify(result), 200
 
 @bills_blueprint.route('/bills/<bill_id>', methods=['PUT'])
 @swag_from({
@@ -596,6 +630,9 @@ def update_bill(bill_id):
             return jsonify({"error": "Bill not found"}), 404
         
         bill = items[0]
+
+        if _is_archived(bill):
+            return jsonify({"error": "Bill not found"}), 404
         
         # Update fields
         updatable_fields = [
@@ -641,9 +678,9 @@ def update_bill(bill_id):
     }
 })
 def delete_bill(bill_id):
-    """Delete a bill"""
+    """Archive a bill (soft delete)."""
     try:
-        # Fetch the bill to get partition key
+        # Fetch the bill
         query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
         items = list(bills_container.query_items(
             query=query,
@@ -653,24 +690,142 @@ def delete_bill(bill_id):
             ],
             enable_cross_partition_query=True
         ))
-        
+
         if not items:
             return jsonify({"error": "Bill not found"}), 404
-        
+
         bill = items[0]
-        
+
+        if _is_archived(bill):
+            return jsonify({"error": "Bill already archived"}), 409
+
         # Check if bill has been paid
         if bill.get('payment_status') == 'Paid':
-            return jsonify({"error": "Cannot delete a bill that has been paid"}), 400
-        
-        bills_container.delete_item(
-            item=bill['id'],
-            partition_key=bill['vendor_id']
+            return jsonify({"error": "Cannot archive a bill that has been paid"}), 400
+
+        reason = request.args.get('reason') or 'Archived by user'
+        archive_entity(
+            bills_container, bill, 'bill',
+            request.tenant_id, getattr(request, 'user_id', None), reason
         )
-        
-        return jsonify({"message": "Bill deleted successfully"}), 200
+
+        return jsonify({"message": "Bill archived successfully"}), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to delete bill: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to archive bill: {str(e)}"}), 500
+
+
+        return jsonify({"message": "Bill archived successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to archive bill: {str(e)}"}), 500
+
+
+@bills_blueprint.route('/bills/<bill_id>/restore', methods=['POST'])
+def restore_bill(bill_id):
+    """Restore an archived bill back to ACTIVE status."""
+    items = list(bills_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+        parameters=[
+            {"name": "@id", "value": bill_id},
+            {"name": "@tenant_id", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Bill not found'}), 404
+    item = items[0]
+    if not _is_archived(item):
+        return jsonify({'error': 'Bill is not archived'}), 422
+    restored = restore_entity(
+        bills_container, item, 'bill', request.tenant_id,
+        user_id=getattr(request, 'user_id', None), reason='User requested restore',
+    )
+    return jsonify({'message': 'Bill restored', 'status': restored.get('status')}), 200
+
+
+@bills_blueprint.route('/bills/bulk-archive', methods=['POST'])
+@bills_blueprint.route('/bills/bulk', methods=['POST'])
+def bulk_archive_bills():
+    """Lifecycle-aware bulk archive for bills."""
+    payload = request.get_json() or {}
+    ids = payload.get('ids') or []
+    action = str(payload.get('action') or 'archive').strip().lower()
+
+    if action not in {'archive', 'delete'}:
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty array'}), 400
+
+    result = init_bulk_archive_result('bill', ids)
+    tenant_id = request.tenant_id
+    user_id = getattr(request, 'user_id', None)
+
+    for bill_id in ids:
+        try:
+            rows = list(bills_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": bill_id},
+                    {"name": "@tenant_id", "value": tenant_id},
+                ],
+                enable_cross_partition_query=True,
+            ))
+
+            if not rows:
+                add_archive_failure(result, bill_id, 'NOT_FOUND', 'Bill not found')
+                continue
+
+            bill = rows[0]
+            deps = check_entity_dependencies('bill', bill_id, tenant_id)
+
+            if _is_archived(bill):
+                add_archive_failure(
+                    result,
+                    bill_id,
+                    'ALREADY_ARCHIVED',
+                    'Bill already archived',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            if str(bill.get('payment_status') or '').strip().lower() == 'paid':
+                add_archive_failure(
+                    result,
+                    bill_id,
+                    'LOCKED_BY_WORKFLOW',
+                    'Cannot archive a bill that has been paid',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            archive_entity(
+                bills_container,
+                bill,
+                'bill',
+                tenant_id,
+                user_id,
+                reason='bulk_archive',
+            )
+            add_archive_success(
+                result,
+                bill_id,
+                dependency_summary=deps.get('dependencySummary', {}),
+                metadata={'message': 'Bill archived successfully'},
+            )
+        except Exception as exc:
+            add_archive_failure(result, bill_id, 'INTERNAL_ERROR', str(exc))
+
+    finalize_bulk_archive_result(result)
+    log_bulk_archive_summary(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='bill',
+        requested_count=result['requestedCount'],
+        success_count=result['successCount'],
+        failed_count=result['failedCount'],
+        dependency_summary=result.get('dependencySummary', {}),
+    )
+    record_bulk_archive_completed(tenant_id, user_id, 'bill', result)
+    return jsonify(result), 200
 
 @bills_blueprint.route('/bills/<bill_id>/record-payment', methods=['POST'])
 @swag_from({
@@ -741,6 +896,8 @@ def record_payment(bill_id):
             return jsonify({"error": "Bill not found"}), 404
         
         bill = items[0]
+        if _is_archived(bill):
+            return jsonify({"error": "Archived bills cannot receive payments"}), 409
         
         # Validate payment amount
         if amount > bill['balance_due']:

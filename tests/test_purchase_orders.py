@@ -23,6 +23,7 @@ STORED_PO = {
     "order_date": "2026-03-01",
     "total_amount": 5000.0,
     "status": "Draft",
+    "lifecycle_status": "ACTIVE",
     "items": [],
     "created_at": "2026-03-01T00:00:00",
     "updated_at": "2026-03-01T00:00:00",
@@ -138,8 +139,12 @@ class TestDeletePurchaseOrder:
     def test_delete_success(self, client, headers_a):
         with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
             mock_ctr.query_items.return_value = [STORED_PO]
+            mock_ctr.replace_item.return_value = {**STORED_PO, "lifecycle_status": "ARCHIVED"}
             resp = client.delete("/api/purchase-orders/po-001", headers=headers_a)
             assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["message"] == "Purchase Order archived successfully"
+            mock_ctr.replace_item.assert_called_once()
 
     def test_delete_not_found(self, client, headers_a):
         with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
@@ -148,12 +153,22 @@ class TestDeletePurchaseOrder:
             assert resp.status_code == 404
 
     def test_delete_billed_po_blocked(self, client, headers_a):
-        """Cannot delete a billed PO."""
+        """Cannot archive a billed PO."""
         billed = {**STORED_PO, "status": "Billed"}
         with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
             mock_ctr.query_items.return_value = [billed]
             resp = client.delete("/api/purchase-orders/po-001", headers=headers_a)
             assert resp.status_code == 400
+
+
+class TestPurchaseOrderDependencies:
+    """GET /api/purchase-orders/<id>/dependencies tests."""
+
+    def test_dependencies_returns_no_deps(self, client, headers_a):
+        resp = client.get("/api/purchase-orders/po-001/dependencies", headers=headers_a)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["hasDependencies"] is False
 
 
 class TestBulkPurchaseOrderActions:
@@ -162,6 +177,7 @@ class TestBulkPurchaseOrderActions:
     def test_bulk_delete_success(self, client, headers_a):
         with patch("smart_invoice_pro.api.purchase_orders_api.purchase_orders_container") as mock_ctr:
             mock_ctr.query_items.return_value = [{**STORED_PO, "tenant_id": TENANT_A}]
+            mock_ctr.replace_item.return_value = {**STORED_PO, "lifecycle_status": "ARCHIVED"}
 
             resp = client.post(
                 "/api/purchase-orders/bulk",

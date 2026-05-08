@@ -7,6 +7,16 @@ import base64
 from werkzeug.utils import secure_filename
 
 from smart_invoice_pro.utils.cosmos_client import expenses_container
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.bulk_archive_contracts import (
+    add_archive_failure,
+    add_archive_success,
+    finalize_bulk_archive_result,
+    init_bulk_archive_result,
+)
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 from smart_invoice_pro.utils.validation_utils import (
     make_error_response, collect_errors,
     validate_required, validate_positive_number, validate_date,
@@ -14,6 +24,10 @@ from smart_invoice_pro.utils.validation_utils import (
 )
 
 expenses_blueprint = Blueprint('expenses', __name__)
+
+
+def _is_archived(item):
+    return str(item.get('lifecycle_status') or '').upper() == 'ARCHIVED'
 
 # Allowed file extensions for receipts
 ALLOWED_EXTENSIONS  = {'png', 'jpg', 'jpeg', 'pdf', 'gif'}
@@ -126,17 +140,18 @@ def create_expense():
             expense_id = str(uuid.uuid4())
 
         expense = {
-            'id':          expense_id,
-            'vendor_name': data['vendor_name'].strip(),
-            'date':        data['date'].strip(),
-            'category':    data['category'].strip(),
-            'amount':      float(data['amount']),
-            'currency':    data.get('currency', 'INR'),
-            'notes':       data.get('notes', '').strip(),
-            'receipt_url': receipt_url,
-            'tenant_id':   request.tenant_id,
-            'created_at':  datetime.utcnow().isoformat(),
-            'updated_at':  datetime.utcnow().isoformat(),
+            'id':              expense_id,
+            'vendor_name':     data['vendor_name'].strip(),
+            'date':            data['date'].strip(),
+            'category':        data['category'].strip(),
+            'amount':          float(data['amount']),
+            'currency':        data.get('currency', 'INR'),
+            'notes':           data.get('notes', '').strip(),
+            'receipt_url':     receipt_url,
+            'tenant_id':       request.tenant_id,
+            'lifecycle_status': 'ACTIVE',
+            'created_at':      datetime.utcnow().isoformat(),
+            'updated_at':      datetime.utcnow().isoformat(),
         }
 
         expenses_container.create_item(body=expense)
@@ -193,8 +208,16 @@ def get_expenses():
             sort_order = 'DESC'
 
         # Build query with tenant isolation
+        lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
         query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
         parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
+        if lifecycle == 'archived':
+            query += " AND UPPER(c.lifecycle_status) = @archived_status"
+            parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+        elif lifecycle != 'all':
+            query += " AND (NOT IS_DEFINED(c.lifecycle_status) OR UPPER(c.lifecycle_status) != @archived_status)"
+            parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
 
         if category:
             query += " AND c.category = @category"
@@ -320,6 +343,8 @@ def update_expense(expense_id):
             return make_error_response(NOT_FOUND_ERROR, "Expense not found", status=404)
 
         expense = items[0]
+        if _is_archived(expense):
+            return make_error_response(NOT_FOUND_ERROR, "Expense not found", status=404)
 
         # Update only provided fields
         for field in ('vendor_name', 'date', 'category', 'currency', 'notes'):
@@ -379,35 +404,146 @@ def update_expense(expense_id):
 def delete_expense(expense_id):
     try:
         # Fetch expense to get receipt URL
-        query = "SELECT * FROM c WHERE c.id = @id"
-        parameters = [{"name": "@id", "value": expense_id}]
-        
+        query = "SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id"
+        parameters = [
+            {"name": "@id", "value": expense_id},
+            {"name": "@tenant_id", "value": request.tenant_id},
+        ]
+
         items = list(expenses_container.query_items(
             query=query,
             parameters=parameters,
             enable_cross_partition_query=True
         ))
-        
+
         if not items:
             return jsonify({"error": "Expense not found"}), 404
-        
+
         expense = items[0]
-        
-        # Delete receipt file if exists
-        if expense.get('receipt_url'):
-            file_path = expense['receipt_url'].lstrip('/')
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    print(f"Error deleting receipt file: {str(e)}")
-        
-        # Delete from Cosmos DB
-        expenses_container.delete_item(item=expense_id, partition_key=expense_id)
-        
-        return jsonify({"message": "Expense deleted successfully"}), 200
+
+        if _is_archived(expense):
+            return jsonify({"error": "Expense already archived"}), 409
+
+        reason = request.args.get('reason') or 'Archived by user'
+        archive_entity(
+            expenses_container, expense, 'expense',
+            request.tenant_id, getattr(request, 'user_id', None), reason
+        )
+
+        return jsonify({"message": "Expense archived successfully"}), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to delete expense: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to archive expense: {str(e)}"}), 500
+
+
+        return jsonify({"message": "Expense archived successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to archive expense: {str(e)}"}), 500
+
+
+@expenses_blueprint.route('/expenses/<expense_id>/restore', methods=['POST'])
+def restore_expense(expense_id):
+    """Restore an archived expense back to ACTIVE status."""
+    items = list(expenses_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+        parameters=[
+            {"name": "@id", "value": expense_id},
+            {"name": "@tenant_id", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Expense not found'}), 404
+    item = items[0]
+    if not _is_archived(item):
+        return jsonify({'error': 'Expense is not archived'}), 422
+    restored = restore_entity(
+        expenses_container, item, 'expense', request.tenant_id,
+        user_id=getattr(request, 'user_id', None), reason='User requested restore',
+    )
+    return jsonify({'message': 'Expense restored', 'status': restored.get('status')}), 200
+
+
+@expenses_blueprint.route('/expenses/bulk-archive', methods=['POST'])
+@expenses_blueprint.route('/expenses/bulk', methods=['POST'])
+def bulk_archive_expenses():
+    """Lifecycle-aware bulk archive for expenses."""
+    payload = request.get_json() or {}
+    ids = payload.get('ids') or []
+    action = str(payload.get('action') or 'archive').strip().lower()
+
+    if action not in {'archive', 'delete'}:
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty array'}), 400
+
+    result = init_bulk_archive_result('expense', ids)
+    tenant_id = request.tenant_id
+    user_id = getattr(request, 'user_id', None)
+
+    for expense_id in ids:
+        try:
+            rows = list(expenses_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": expense_id},
+                    {"name": "@tenant_id", "value": tenant_id},
+                ],
+                enable_cross_partition_query=True,
+            ))
+
+            if not rows:
+                add_archive_failure(result, expense_id, 'NOT_FOUND', 'Expense not found')
+                continue
+
+            expense = rows[0]
+            deps = check_entity_dependencies('expense', expense_id, tenant_id)
+
+            if _is_archived(expense):
+                add_archive_failure(
+                    result,
+                    expense_id,
+                    'ALREADY_ARCHIVED',
+                    'Expense already archived',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            archive_entity(
+                expenses_container,
+                expense,
+                'expense',
+                tenant_id,
+                user_id,
+                reason='bulk_archive',
+            )
+            add_archive_success(
+                result,
+                expense_id,
+                dependency_summary=deps.get('dependencySummary', {}),
+                metadata={'message': 'Expense archived successfully'},
+            )
+        except Exception as exc:
+            add_archive_failure(result, expense_id, 'INTERNAL_ERROR', str(exc))
+
+    finalize_bulk_archive_result(result)
+    log_bulk_archive_summary(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='expense',
+        requested_count=result['requestedCount'],
+        success_count=result['successCount'],
+        failed_count=result['failedCount'],
+        dependency_summary=result.get('dependencySummary', {}),
+    )
+    record_bulk_archive_completed(tenant_id, user_id, 'expense', result)
+    return jsonify(result), 200
+
+
+@expenses_blueprint.route('/expenses/<expense_id>/dependencies', methods=['GET'])
+def get_expense_dependencies(expense_id):
+    """Check if an expense has dependent records before archiving."""
+    result = check_entity_dependencies('expense', expense_id, request.tenant_id)
+    return jsonify(result), 200
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET EXPENSE STATISTICS

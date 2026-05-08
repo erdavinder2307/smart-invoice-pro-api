@@ -27,6 +27,7 @@ STORED_BILL_A = {
     "balance_due": 2000.0,
     "payment_status": "Unpaid",
     "payment_history": [],
+    "lifecycle_status": "ACTIVE",
     "items": [],
     "created_at": "2026-03-01T00:00:00",
     "updated_at": "2026-03-01T00:00:00",
@@ -183,8 +184,12 @@ class TestDeleteBill:
     def test_delete_success(self, client, headers_a):
         with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
             mock_ctr.query_items.return_value = [STORED_BILL_A]
+            mock_ctr.replace_item.return_value = {**STORED_BILL_A, "lifecycle_status": "ARCHIVED"}
             resp = client.delete("/api/bills/bill-aaa-001", headers=headers_a)
             assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["message"] == "Bill archived successfully"
+            mock_ctr.replace_item.assert_called_once()
 
     def test_delete_not_found(self, client, headers_a):
         with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
@@ -193,7 +198,7 @@ class TestDeleteBill:
             assert resp.status_code == 404
 
     def test_delete_paid_bill_blocked(self, client, headers_a):
-        """Cannot delete a paid bill."""
+        """Cannot archive a paid bill."""
         paid_bill = {**STORED_BILL_A, "payment_status": "Paid"}
         with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr:
             mock_ctr.query_items.return_value = [paid_bill]
@@ -221,6 +226,17 @@ class TestBillRecordPayment:
             payload = {"amount": 500, "payment_date": "2026-03-15"}
             resp = client.post("/api/bills/nope/record-payment", json=payload, headers=headers_a)
             assert resp.status_code == 404
+
+
+class TestBillDependencies:
+    """GET /api/bills/<id>/dependencies tests."""
+
+    def test_dependencies_returns_no_deps(self, client, headers_a):
+        resp = client.get("/api/bills/bill-aaa-001/dependencies", headers=headers_a)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["hasDependencies"] is False
+        assert data["dependencySummary"] == {}
 
 
 class TestBillNextNumber:

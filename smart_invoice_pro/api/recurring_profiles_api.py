@@ -5,6 +5,15 @@ import uuid
 from flask import Blueprint, jsonify, request
 
 from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.bulk_archive_contracts import (
+    add_archive_failure,
+    add_archive_success,
+    finalize_bulk_archive_result,
+    init_bulk_archive_result,
+)
+from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 
 
 recurring_profiles_blueprint = Blueprint('recurring_profiles', __name__)
@@ -43,6 +52,10 @@ _ALLOWED_SORT_FIELDS = {
 }
 
 _VALID_ENDS_TYPES = {'never', 'on_date', 'after_occurrences'}
+
+
+def _is_archived(item):
+    return str(item.get('status') or '').strip().upper() == 'ARCHIVED'
 
 
 def _to_float(value, default=0.0):
@@ -376,7 +389,10 @@ def _query_single_profile(profile_id, tenant_id):
         parameters=params,
         enable_cross_partition_query=True,
     ))
-    return items[0] if items else None
+    if not items:
+        return None
+    # Return a copy so mutations do not leak to caller-held/shared fixtures.
+    return dict(items[0])
 
 
 def _sanitize_profile(profile):
@@ -388,6 +404,8 @@ def _set_profile_status(profile_id, next_status):
     profile = _query_single_profile(profile_id, tenant_id)
     if not profile:
         return jsonify({'error': 'Recurring profile not found'}), 404
+    if _is_archived(profile):
+        return jsonify({'error': 'Archived recurring profiles cannot change status'}), 409
 
     profile['status'] = next_status
     profile['updated_at'] = datetime.utcnow().isoformat()
@@ -611,6 +629,8 @@ def update_recurring_profile(profile_id):
         profile = _query_single_profile(profile_id, request.tenant_id)
         if not profile:
             return jsonify({'error': 'Recurring profile not found'}), 404
+        if _is_archived(profile):
+            return jsonify({'error': 'Recurring profile not found'}), 404
 
         for key, value in data.items():
             if key in {'id', 'tenant_id', 'created_at'}:
@@ -666,6 +686,7 @@ def patch_recurring_profile(profile_id):
 
 
 @recurring_profiles_blueprint.route('/recurring-profiles/bulk', methods=['POST'])
+@recurring_profiles_blueprint.route('/recurring-profiles/bulk-archive', methods=['POST'])
 @recurring_profiles_blueprint.route('/recurring-invoices/bulk', methods=['POST'])
 def bulk_recurring_profile_actions():
     payload = request.get_json() or {}
@@ -680,6 +701,7 @@ def bulk_recurring_profile_actions():
     updated = 0
     deleted = 0
     errors = []
+    archive_result = init_bulk_archive_result('recurring_profile', ids)
 
     for profile_id in ids:
         try:
@@ -689,8 +711,21 @@ def bulk_recurring_profile_actions():
                 continue
 
             if action == 'delete':
-                recurring_profiles_container.delete_item(item=profile['id'], partition_key=profile.get('customer_id'))
+                if _is_archived(profile):
+                    add_archive_failure(archive_result, profile_id, 'ALREADY_ARCHIVED', 'Recurring profile already archived')
+                    errors.append({'id': profile_id, 'error': 'already_archived'})
+                    continue
+
+                archive_entity(
+                    recurring_profiles_container,
+                    profile,
+                    'recurring_profile',
+                    request.tenant_id,
+                    getattr(request, 'user_id', None),
+                    reason='bulk_archive',
+                )
                 deleted += 1
+                add_archive_success(archive_result, profile_id, metadata={'message': 'Recurring profile archived successfully'})
                 continue
 
             if action == 'pause':
@@ -705,14 +740,44 @@ def bulk_recurring_profile_actions():
             updated += 1
         except Exception as exc:
             errors.append({'id': profile_id, 'error': str(exc)})
+            if action == 'delete':
+                add_archive_failure(archive_result, profile_id, 'INTERNAL_ERROR', str(exc))
 
-    return jsonify({
+    if action == 'delete':
+        finalize_bulk_archive_result(archive_result)
+        log_bulk_archive_summary(
+            tenant_id=request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            entity_type='recurring_profile',
+            requested_count=archive_result['requestedCount'],
+            success_count=archive_result['successCount'],
+            failed_count=archive_result['failedCount'],
+            dependency_summary=archive_result.get('dependencySummary', {}),
+        )
+        record_bulk_archive_completed(
+            request.tenant_id,
+            getattr(request, 'user_id', None),
+            'recurring_profile',
+            archive_result,
+        )
+
+    response = {
         'action': action,
         'processed': len(ids),
         'updated': updated,
         'deleted': deleted,
         'errors': errors,
-    }), 200
+    }
+    if action == 'delete':
+        response.update({
+            'successCount': archive_result['successCount'],
+            'failedCount': archive_result['failedCount'],
+            'archived': archive_result['archived'],
+            'failed': archive_result['failed'],
+            'dependencySummary': archive_result['dependencySummary'],
+            'classification': archive_result['classification'],
+        })
+    return jsonify(response), 200
 
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['DELETE'])
@@ -723,10 +788,44 @@ def delete_recurring_profile(profile_id):
         if not profile:
             return jsonify({'error': 'Recurring profile not found'}), 404
 
-        recurring_profiles_container.delete_item(item=profile_id, partition_key=profile.get('customer_id'))
-        return jsonify({'message': 'Recurring profile deleted successfully'}), 200
+        if _is_archived(profile):
+            return jsonify({'message': 'Recurring profile already archived'}), 200
+
+        archive_entity(
+            recurring_profiles_container,
+            profile,
+            'recurring_profile',
+            request.tenant_id,
+            getattr(request, 'user_id', None),
+            reason='archive_on_delete',
+        )
+        return jsonify({'message': 'Recurring profile archived successfully'}), 200
     except Exception as e:
-        return jsonify({'error': f'Failed to delete recurring profile: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to archive recurring profile: {str(e)}'}), 500
+
+
+@recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/restore', methods=['POST'])
+@recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/restore', methods=['POST'])
+def restore_recurring_profile(profile_id):
+    try:
+        profile = _query_single_profile(profile_id, request.tenant_id)
+        if not profile:
+            return jsonify({'error': 'Recurring profile not found'}), 404
+
+        if not _is_archived(profile):
+            return jsonify({'error': 'Recurring profile is not archived'}), 422
+
+        restored = restore_entity(
+            recurring_profiles_container,
+            profile,
+            'recurring_profile',
+            request.tenant_id,
+            getattr(request, 'user_id', None),
+            reason='restore_from_archive',
+        )
+        return jsonify({'message': 'Recurring profile restored successfully', 'status': restored.get('status')}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to restore recurring profile: {str(e)}'}), 500
 
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/pause', methods=['POST', 'PATCH'])

@@ -131,6 +131,8 @@ class TestDeleteSalesOrder:
             mock_ctr.query_items.return_value = [STORED_SO_A]
             resp = client.delete("/api/sales-orders/so-001", headers=headers_a)
             assert resp.status_code == 200
+            assert resp.get_json()["message"] == "Sales Order archived successfully"
+            mock_ctr.replace_item.assert_called_once()
 
     def test_delete_not_found(self, client, headers_a):
         with patch("smart_invoice_pro.api.sales_orders_api.sales_orders_container") as mock_ctr:
@@ -139,7 +141,7 @@ class TestDeleteSalesOrder:
             assert resp.status_code == 404
 
     def test_delete_invoiced_so_blocked(self, client, headers_a):
-        """Cannot delete an invoiced sales order."""
+        """Cannot archive an invoiced sales order."""
         invoiced = {**STORED_SO_A, "status": "Invoiced"}
         with patch("smart_invoice_pro.api.sales_orders_api.sales_orders_container") as mock_ctr:
             mock_ctr.query_items.return_value = [invoiced]

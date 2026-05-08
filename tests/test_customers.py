@@ -239,7 +239,7 @@ class TestDeleteCustomer:
         mock_cust.query_items.return_value = [stored_customer_a]
         resp = client.delete("/api/customers/cust-aaa-001", headers=headers_a)
         assert resp.status_code == 200
-        mock_cust.delete_item.assert_called_once()
+        mock_cust.replace_item.assert_called_once()
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_delete_customer_not_found(self, mock_cust, client, headers_a):

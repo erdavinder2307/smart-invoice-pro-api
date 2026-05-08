@@ -4,6 +4,8 @@ from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_i
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity, LIFECYCLE_ARCHIVED
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 import copy
 import uuid
 import secrets
@@ -34,6 +36,10 @@ class InvoiceStatus(Enum):
     Paid = 'Paid'
     Overdue = 'Overdue'
     Cancelled = 'Cancelled'
+
+
+def _is_archived(item):
+    return str(item.get('status', '')).upper() == LIFECYCLE_ARCHIVED
 
 
 def _to_number(value, default=0.0):
@@ -366,6 +372,7 @@ def create_invoice():
         'round_off': round_off,
         'balance_due': balance_due,
         'status': data.get('status'),
+        'lifecycle_status': 'ACTIVE',
         'payment_mode': data.get('payment_mode', ''),
         'notes': notes,
         'terms_conditions': terms_conds,
@@ -420,17 +427,20 @@ def create_invoice():
     return jsonify(sanitize_item(item)), 201
 
 @api_blueprint.route('/invoices/bulk', methods=['POST'])
+@api_blueprint.route('/invoices/bulk-archive', methods=['POST'])
 def bulk_invoice_actions():
-    """Bulk actions on invoices: delete, mark_paid, send_email."""
+    """Bulk actions on invoices: archive/delete, mark_paid, send_email."""
     try:
         data = request.get_json(force=True) or {}
         action = data.get('action', '')
         ids = data.get('ids', [])
         if not action or not ids:
             return jsonify({"error": "action and ids are required"}), 400
-        allowed_actions = {'delete', 'mark_paid', 'send_email'}
+        allowed_actions = {'archive', 'delete', 'mark_paid', 'send_email'}
         if action not in allowed_actions:
             return jsonify({"error": f"Unknown action: {action}"}), 400
+
+        archive_mode = action in {'archive', 'delete'}
 
         tenant_id = request.tenant_id
         processed = []
@@ -452,11 +462,24 @@ def bulk_invoice_actions():
                     continue
                 doc = items[0]
 
-                if action == 'delete':
-                    invoices_container.delete_item(item=doc['id'], partition_key=tenant_id)
-                    processed.append({"id": invoice_id, "action": "delete"})
+                if archive_mode:
+                    if _is_archived(doc):
+                        skipped.append({"id": invoice_id, "reason": "already_archived"})
+                        continue
+                    archive_entity(
+                        container=invoices_container,
+                        item=doc,
+                        entity_type="invoice",
+                        tenant_id=tenant_id,
+                        user_id=getattr(request, 'user_id', None),
+                        reason="bulk_archive",
+                    )
+                    processed.append({"id": invoice_id, "action": "archive"})
 
                 elif action == 'mark_paid':
+                    if _is_archived(doc):
+                        skipped.append({"id": invoice_id, "reason": "archived"})
+                        continue
                     if doc.get('status') == 'Paid':
                         skipped.append({"id": invoice_id, "reason": "already_paid"})
                         continue
@@ -490,6 +513,7 @@ def list_invoices():
     try:
         tenant_id = request.tenant_id
         status_filter = request.args.get('status')
+        lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
         search_query = (request.args.get('q') or '').strip()
         date_range = (request.args.get('date_range') or '').strip().lower()
         date_from = (request.args.get('date_from') or '').strip()
@@ -519,6 +543,13 @@ def list_invoices():
 
         where = ["c.tenant_id = @tenant_id"]
         parameters = [{"name": "@tenant_id", "value": tenant_id}]
+
+        if lifecycle == 'archived':
+            where.append("UPPER(c.status) = @archived_status")
+            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
+        elif lifecycle != 'all':
+            where.append("(NOT IS_DEFINED(c.status) OR UPPER(c.status) != @archived_status)")
+            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
 
         if status_filter:
             where.append("c.status = @status")
@@ -743,7 +774,28 @@ def get_invoice(invoice_id):
         return jsonify({'error': 'Invoice not found'}), 404
     if items[0].get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(items[0]):
+        return jsonify({'error': 'Invoice not found'}), 404
     return jsonify(sanitize_item(items[0]))
+
+
+@api_blueprint.route('/invoices/<invoice_id>/dependencies', methods=['GET'])
+def get_invoice_dependencies(invoice_id):
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(invoices_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Invoice not found'}), 404
+
+    invoice = items[0]
+    if invoice.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    dependencies = check_entity_dependencies('invoice', invoice_id, request.tenant_id)
+    return jsonify(dependencies), 200
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PUT'])
 @swag_from({
@@ -814,6 +866,8 @@ def update_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(item):
+        return jsonify({'error': 'Invoice not found'}), 404
 
     merged_payload = {
         **item,
@@ -901,10 +955,51 @@ def delete_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
-    log_audit("invoice", "delete", invoice_id, item, None,
-              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
-    invoices_container.delete_item(item=item['id'], partition_key=request.tenant_id)
-    return jsonify({'message': 'Invoice deleted'})
+    if _is_archived(item):
+        return jsonify({'message': 'Invoice already archived'}), 200
+
+    dependency_data = check_entity_dependencies('invoice', invoice_id, request.tenant_id)
+    archived = archive_entity(
+        container=invoices_container,
+        item=item,
+        entity_type='invoice',
+        tenant_id=request.tenant_id,
+        user_id=getattr(request, 'user_id', None),
+        reason='archive_on_delete',
+    )
+
+    return jsonify({
+        'message': 'Invoice archived successfully',
+        'invoice': sanitize_item(archived),
+        'dependencies': dependency_data,
+    })
+
+
+@api_blueprint.route('/invoices/<invoice_id>/restore', methods=['POST'])
+def restore_invoice(invoice_id):
+    """Restore an archived invoice back to its previous active status."""
+    items = list(invoices_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Invoice not found'}), 404
+    item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if not _is_archived(item):
+        return jsonify({'error': 'Invoice is not archived'}), 422
+    restored = restore_entity(
+        invoices_container,
+        item,
+        'invoice',
+        request.tenant_id,
+        user_id=getattr(request, 'user_id', None),
+        reason='User requested restore',
+    )
+    return jsonify({'message': 'Invoice restored', 'status': restored.get('status')}), 200
+
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PATCH'])
 @swag_from({
@@ -994,6 +1089,9 @@ def patch_invoice(invoice_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(item):
+        return jsonify({'error': 'Invoice not found'}), 404
+
     before_snapshot = copy.deepcopy(item)
     for k, v in data.items():
         item[k] = v
@@ -1379,6 +1477,8 @@ def send_invoice_email(invoice_id):
             return jsonify({'error': 'Invoice not found'}), 404
 
         inv = results[0]
+        if _is_archived(inv):
+            return jsonify({'error': 'Archived invoices cannot be emailed'}), 409
 
         recipient_email = data.get('recipient_email') or inv.get('customer_email', '').strip()
         if not recipient_email:
@@ -1577,6 +1677,8 @@ def send_invoice_reminder(invoice_id):
     inv = items[0]
     if inv.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(inv):
+        return jsonify({'error': 'Archived invoices cannot receive reminders'}), 409
 
     body = request.get_json(silent=True) or {}
     recipient_email = (

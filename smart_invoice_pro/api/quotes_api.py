@@ -6,6 +6,8 @@ from flasgger import swag_from
 from datetime import datetime, timedelta
 from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 
 quotes_blueprint = Blueprint('quotes', __name__)
 
@@ -16,6 +18,10 @@ class QuoteStatus(Enum):
     Declined = 'Declined'
     Expired = 'Expired'
     Converted = 'Converted'
+
+
+def _is_archived(quote):
+    return str(quote.get('status', '')).upper() == 'ARCHIVED'
 
 def validate_quote_data(data, is_update=False):
     """Validate quote data"""
@@ -179,6 +185,7 @@ def create_quote():
 def get_quotes():
     try:
         status_filter = request.args.get('status')
+        lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
         customer_id_filter = request.args.get('customer_id')
         search_query = (request.args.get('q') or '').strip()
         date_range = (request.args.get('date_range') or '').strip().lower()
@@ -294,6 +301,12 @@ def get_quotes():
                 parameters=parameters,
                 enable_cross_partition_query=True
             ))
+            if lifecycle == 'archived':
+                items = [item for item in items if _is_archived(item)]
+            elif lifecycle == 'all':
+                items = list(items)
+            else:
+                items = [item for item in items if not _is_archived(item)]
             return jsonify(items), 200
 
         query = f"{base_query} ORDER BY c.{sort_by} {sort_order} OFFSET {offset} LIMIT {page_size}"
@@ -303,6 +316,13 @@ def get_quotes():
             parameters=parameters,
             enable_cross_partition_query=True
         ))
+
+        if lifecycle == 'archived':
+            items = [item for item in items if _is_archived(item)]
+        elif lifecycle == 'all':
+            items = list(items)
+        else:
+            items = [item for item in items if not _is_archived(item)]
 
         count_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql}"
         total_items = list(quotes_container.query_items(
@@ -339,13 +359,14 @@ def get_quotes():
 
 
 @quotes_blueprint.route('/quotes/bulk', methods=['POST'])
+@quotes_blueprint.route('/quotes/bulk-archive', methods=['POST'])
 def bulk_quote_actions():
     """Perform bulk actions on quotes."""
     data = request.get_json() or {}
     action = data.get('action')
     ids = data.get('ids') or []
 
-    if action not in ('delete', 'mark_accepted', 'convert_to_invoice'):
+    if action not in ('delete', 'archive', 'mark_accepted', 'convert_to_invoice'):
         return jsonify({'error': 'Invalid bulk action'}), 400
     if not isinstance(ids, list) or not ids:
         return jsonify({'error': 'ids must be a non-empty list'}), 400
@@ -369,8 +390,15 @@ def bulk_quote_actions():
                 continue
 
             quote = rows[0]
-            if action == 'delete':
-                quotes_container.delete_item(item=quote['id'], partition_key=quote['customer_id'])
+            if action in ('delete', 'archive'):
+                archive_entity(
+                    quotes_container,
+                    quote,
+                    'quote',
+                    request.tenant_id,
+                    user_id=getattr(request, 'user_id', None),
+                    reason='Bulk archive',
+                )
                 processed.append({"id": quote_id, "action": action})
                 continue
 
@@ -472,6 +500,8 @@ def get_quote(quote_id):
         quote = items[0]
         if quote.get('tenant_id') != request.tenant_id:
             return jsonify({"error": "Forbidden"}), 403
+        if _is_archived(quote):
+            return jsonify({"error": "Quote not found"}), 404
         
         return jsonify(quote), 200
     except Exception as e:
@@ -536,6 +566,8 @@ def update_quote(quote_id):
         existing_quote = items[0]
         if existing_quote.get('tenant_id') != request.tenant_id:
             return jsonify({"error": "Forbidden"}), 403
+        if _is_archived(existing_quote):
+            return jsonify({"error": "Quote not found"}), 404
         
         # Update fields
         for key, value in data.items():
@@ -592,16 +624,75 @@ def delete_quote(quote_id):
         quote = items[0]
         if quote.get('tenant_id') != request.tenant_id:
             return jsonify({"error": "Forbidden"}), 403
-        
-        # Delete the quote
-        quotes_container.delete_item(
-            item=quote_id,
-            partition_key=quote['customer_id']
+        if _is_archived(quote):
+            return jsonify({"error": "Quote not found"}), 404
+
+        dependency = check_entity_dependencies('quote', quote_id, request.tenant_id)
+        archived_quote = archive_entity(
+            quotes_container,
+            quote,
+            'quote',
+            request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            reason='User requested archive from delete action',
         )
-        
-        return jsonify({"message": "Quote deleted successfully"}), 200
+
+        return jsonify({
+            "message": "Quote archived successfully",
+            "status": archived_quote.get("status"),
+            "dependencySummary": dependency.get("dependencySummary", {}),
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete quote: {str(e)}"}), 500
+
+
+        return jsonify({
+            "message": "Quote archived successfully",
+            "status": archived_quote.get("status"),
+            "dependencySummary": dependency.get("dependencySummary", {}),
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete quote: {str(e)}"}), 500
+
+
+@quotes_blueprint.route('/quotes/<quote_id>/restore', methods=['POST'])
+def restore_quote(quote_id):
+    """Restore an archived quote back to ACTIVE status."""
+    items = list(quotes_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": quote_id}],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Quote not found'}), 404
+    item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if not _is_archived(item):
+        return jsonify({'error': 'Quote is not archived'}), 422
+    restored = restore_entity(
+        quotes_container, item, 'quote', request.tenant_id,
+        user_id=getattr(request, 'user_id', None), reason='User requested restore',
+    )
+    return jsonify({'message': 'Quote restored', 'status': restored.get('status')}), 200
+
+
+@quotes_blueprint.route('/quotes/<quote_id>/dependencies', methods=['GET'])
+def get_quote_dependencies(quote_id):
+    rows = list(quotes_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": quote_id}],
+        enable_cross_partition_query=True,
+    ))
+    if not rows:
+        return jsonify({'error': 'Quote not found'}), 404
+
+    quote = rows[0]
+    if quote.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    dependency = check_entity_dependencies('quote', quote_id, request.tenant_id)
+    return jsonify(dependency), 200
 
 @quotes_blueprint.route('/quotes/<quote_id>/convert', methods=['POST'])
 @swag_from({
@@ -671,6 +762,8 @@ def convert_quote(quote_id):
         quote = items[0]
         if quote.get('tenant_id') != request.tenant_id:
             return jsonify({"error": "Forbidden"}), 403
+        if _is_archived(quote):
+            return jsonify({"error": "Archived quotes cannot be converted"}), 409
         
         # Check if already converted
         if quote.get('status') == 'Converted':
@@ -897,6 +990,8 @@ def send_quote_email(quote_id):
     if not items:
         return jsonify({'error': 'Quote not found'}), 404
     quote = items[0]
+    if _is_archived(quote):
+        return jsonify({'error': 'Archived quotes cannot be emailed'}), 409
 
     recipient_email = data.get('recipient_email') or quote.get('customer_email', '').strip()
     if not recipient_email:

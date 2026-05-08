@@ -5,6 +5,16 @@ from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_i
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
+from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.bulk_archive_contracts import (
+    add_archive_failure,
+    add_archive_success,
+    finalize_bulk_archive_result,
+    init_bulk_archive_result,
+)
+from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 from smart_invoice_pro.utils.validation_utils import (
     make_error_response, collect_errors,
     validate_required, validate_email as _validate_email,
@@ -28,6 +38,10 @@ customers_blueprint = Blueprint('customers', __name__)
 
 CUSTOMER_UPLOAD_FOLDER = 'uploads/customer_documents'
 os.makedirs(CUSTOMER_UPLOAD_FOLDER, exist_ok=True)
+
+
+def _is_archived(customer):
+    return customer.get('status') == 'ARCHIVED'
 
 # ─── Validation Helpers (kept for backward compatibility with any direct calls) ─
 def validate_email(email):
@@ -242,6 +256,9 @@ def create_customer():
         'custom_fields': data.get('custom_fields', {}),
         'reporting_tags': data.get('reporting_tags', []),
         'remarks': data.get('remarks', ''),
+        'status': 'ACTIVE',
+        'archived_at': None,
+        'archived_by': None,
         'tenant_id': request.tenant_id,
         'created_at': now,
         'updated_at': now
@@ -303,6 +320,8 @@ def create_customer():
     }
 })
 def list_customers():
+    lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
+
     query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
     parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
 
@@ -330,6 +349,14 @@ def list_customers():
         parameters=parameters,
         enable_cross_partition_query=True
     ))
+
+    if lifecycle == 'archived':
+        items = [item for item in items if _is_archived(item)]
+    elif lifecycle == 'all':
+        items = list(items)
+    else:
+        items = [item for item in items if not _is_archived(item)]
+
     return jsonify(sanitize_items(items))
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['GET'])
@@ -377,6 +404,8 @@ def get_customer(customer_id):
         return jsonify({'error': 'Customer not found'}), 404
     if items[0].get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(items[0]):
+        return jsonify({'error': 'Customer not found'}), 404
     
     # Remove password from response for security
     customer = items[0]
@@ -401,6 +430,8 @@ def get_customer_overview(customer_id):
     customer = items[0]
     if customer.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(customer):
+        return jsonify({'error': 'Customer not found'}), 404
 
     # Fetch invoices for this customer
     inv_query = (
@@ -627,11 +658,141 @@ def delete_customer(customer_id):
     item = items[0]
     if item.get('tenant_id') != request.tenant_id:
         return jsonify({'error': 'Forbidden'}), 403
-    # Cosmos DB partition key for customers is /customer_id, so use the value of 'customer_id' from the item
-    log_audit("customer", "delete", customer_id, item, None,
-              user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
-    customers_container.delete_item(item=item['id'], partition_key=item['customer_id'])
-    return jsonify({'message': 'Customer deleted'})
+    if _is_archived(item):
+        return jsonify({'error': 'Customer not found'}), 404
+
+    dependency = check_entity_dependencies('customer', customer_id, request.tenant_id)
+    archived_item = archive_entity(
+        customers_container,
+        item,
+        'customer',
+        request.tenant_id,
+        user_id=getattr(request, 'user_id', None),
+        reason='User requested archive from delete action',
+    )
+
+    return jsonify({
+        'message': 'Customer archived',
+        'status': archived_item.get('status'),
+        'dependencySummary': dependency.get('dependencySummary', {}),
+    })
+
+
+@customers_blueprint.route('/customers/bulk-archive', methods=['POST'])
+@customers_blueprint.route('/customers/bulk', methods=['POST'])
+def bulk_archive_customers():
+    """Lifecycle-aware bulk archive for customers."""
+    payload = request.get_json() or {}
+    ids = payload.get('ids') or []
+    action = str(payload.get('action') or 'archive').strip().lower()
+
+    if action not in {'archive', 'delete'}:
+        return jsonify({'error': 'Invalid bulk action'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty array'}), 400
+
+    result = init_bulk_archive_result('customer', ids)
+    tenant_id = request.tenant_id
+    user_id = getattr(request, 'user_id', None)
+
+    for customer_id in ids:
+        try:
+            rows = list(customers_container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tenant_id",
+                parameters=[
+                    {"name": "@id", "value": customer_id},
+                    {"name": "@tenant_id", "value": tenant_id},
+                ],
+                enable_cross_partition_query=True,
+            ))
+
+            if not rows:
+                add_archive_failure(result, customer_id, 'NOT_FOUND', 'Customer not found')
+                continue
+
+            customer = rows[0]
+            deps = check_entity_dependencies('customer', customer_id, tenant_id)
+
+            if _is_archived(customer):
+                add_archive_failure(
+                    result, customer_id, 'ALREADY_ARCHIVED', 'Customer already archived',
+                    dependency_summary=deps.get('dependencySummary', {}),
+                )
+                continue
+
+            archive_entity(
+                customers_container,
+                customer,
+                'customer',
+                tenant_id,
+                user_id,
+                reason='bulk_archive',
+            )
+            add_archive_success(
+                result, customer_id,
+                dependency_summary=deps.get('dependencySummary', {}),
+                metadata={'message': 'Customer archived successfully'},
+            )
+        except Exception as exc:
+            add_archive_failure(result, customer_id, 'INTERNAL_ERROR', str(exc))
+
+    finalize_bulk_archive_result(result)
+    log_bulk_archive_summary(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='customer',
+        requested_count=result['requestedCount'],
+        success_count=result['successCount'],
+        failed_count=result['failedCount'],
+        dependency_summary=result.get('dependencySummary', {}),
+    )
+    record_bulk_archive_completed(tenant_id, user_id, 'customer', result)
+    return jsonify(result), 200
+
+
+@customers_blueprint.route('/customers/<customer_id>/restore', methods=['POST'])
+def restore_customer(customer_id):
+    """Restore an archived customer back to ACTIVE status."""
+    items = list(customers_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": customer_id}],
+        enable_cross_partition_query=True,
+    ))
+    if not items:
+        return jsonify({'error': 'Customer not found'}), 404
+    item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if not _is_archived(item):
+        return jsonify({'error': 'Customer is not archived'}), 422
+    restored = restore_entity(
+        customers_container,
+        item,
+        'customer',
+        request.tenant_id,
+        user_id=getattr(request, 'user_id', None),
+        reason='User requested restore',
+    )
+    return jsonify({'message': 'Customer restored', 'status': restored.get('status')}), 200
+
+
+@customers_blueprint.route('/customers/<customer_id>/dependencies', methods=['GET'])
+def get_customer_dependencies(customer_id):
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(customers_container.query_items(
+        query=query,
+        parameters=[{"name": "@id", "value": customer_id}],
+        enable_cross_partition_query=True
+    ))
+    if not items:
+        return jsonify({'error': 'Customer not found'}), 404
+
+    item = items[0]
+    if item.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    dependency = check_entity_dependencies('customer', customer_id, request.tenant_id)
+    return jsonify(dependency), 200
 
 @customers_blueprint.route('/customer/login', methods=['POST'])
 @swag_from({

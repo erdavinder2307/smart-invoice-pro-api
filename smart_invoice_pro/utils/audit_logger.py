@@ -193,3 +193,26 @@ def audit_log(action, entity):
         return _wrapped
 
     return _decorator
+
+
+def log_bulk_archive_summary(*, tenant_id, user_id, entity_type, requested_count, success_count, failed_count, dependency_summary=None):
+    """Record an audit-safe summary for lifecycle bulk archive operations."""
+    log_audit_event(
+        {
+            "action": "BULK_ARCHIVE_COMPLETED",
+            "entity": entity_type,
+            "entity_id": None,
+            "before": None,
+            "after": {
+                "requested_count": requested_count,
+                "success_count": success_count,
+                "failed_count": failed_count,
+            },
+            "metadata": {
+                "event": "bulk_archive_completed",
+                "dependency_summary": dependency_summary or {},
+            },
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+        }
+    )
