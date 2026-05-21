@@ -8,6 +8,7 @@ from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 
 quotes_blueprint = Blueprint('quotes', __name__)
 
@@ -627,20 +628,22 @@ def delete_quote(quote_id):
         if _is_archived(quote):
             return jsonify({"error": "Quote not found"}), 404
 
-        dependency = check_entity_dependencies('quote', quote_id, request.tenant_id)
-        archived_quote = archive_entity(
-            quotes_container,
-            quote,
-            'quote',
-            request.tenant_id,
+        lifecycle_result = apply_lifecycle_action(
+            container=quotes_container,
+            item=quote,
+            entity_type='quote',
+            tenant_id=request.tenant_id,
             user_id=getattr(request, 'user_id', None),
-            reason='User requested archive from delete action',
+            requested_action='delete',
+            reason='User requested delete',
         )
 
         return jsonify({
-            "message": "Quote archived successfully",
-            "status": archived_quote.get("status"),
-            "dependencySummary": dependency.get("dependencySummary", {}),
+            "message": "Quote deleted permanently" if lifecycle_result.get("performedAction") == "delete" else "Quote archived",
+            "performedAction": lifecycle_result.get("performedAction"),
+            "status": lifecycle_result.get("status"),
+            "dependencySummary": lifecycle_result.get("dependencySummary", {}),
+            "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
         }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete quote: {str(e)}"}), 500

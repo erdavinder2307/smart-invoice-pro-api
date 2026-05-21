@@ -80,31 +80,39 @@ def test_create_product_validation_error(mock_container, client):
     assert data['error']['type'] == 'validation_error'
     assert 'name' in data['error']['fields']
 
-@patch('smart_invoice_pro.api.product_api._item_used_in_invoices')
+@patch('smart_invoice_pro.utils.lifecycle_service.compute_lifecycle_analysis')
 @patch('smart_invoice_pro.api.product_api.products_container')
-def test_delete_product_soft_delete(mock_container, mock_invoices, client):
+def test_delete_product_soft_delete(mock_container, mock_analysis, client):
     # Mock existing item
     mock_item = {'id': 'test-id', 'name': 'Test Item', 'is_deleted': False, 'tenant_id': 'tenant-1'}
     mock_container.query_items.return_value = [mock_item]
-    mock_invoices.return_value = 0 # Not used in invoices
-    
+    mock_analysis.return_value = {
+        'hardDeleteAllowed': False, 'hasDependencies': False,
+        'dependencySummary': {}, 'isAccountingProtected': False,
+        'entityType': 'product', 'entityId': 'test-id',
+    }
+
     response = client.delete('/api/products/test-id', headers=_auth_headers())
     assert response.status_code == 200
-    
-    # Verify replace_item was called with is_deleted=True
+
+    # Verify archive_entity path: replace_item called with is_deleted=True
     mock_container.replace_item.assert_called_once()
     args, kwargs = mock_container.replace_item.call_args
     assert kwargs['body']['is_deleted'] is True
     assert kwargs['body']['deleted_at'] is not None
 
-@patch('smart_invoice_pro.api.product_api._item_used_in_invoices')
+@patch('smart_invoice_pro.utils.lifecycle_service.compute_lifecycle_analysis')
 @patch('smart_invoice_pro.api.product_api.products_container')
-def test_delete_product_used_in_invoice(mock_container, mock_invoices, client):
+def test_delete_product_used_in_invoice(mock_container, mock_analysis, client):
     # Mock existing item
     mock_item = {'id': 'test-id', 'name': 'Test Item', 'is_deleted': False, 'tenant_id': 'tenant-1'}
     mock_container.query_items.return_value = [mock_item]
-    mock_invoices.return_value = 2 # Used in 2 invoices
-    
+    mock_analysis.return_value = {
+        'hardDeleteAllowed': False, 'hasDependencies': True,
+        'dependencySummary': {'invoices': 2}, 'isAccountingProtected': False,
+        'entityType': 'product', 'entityId': 'test-id',
+    }
+
     response = client.delete('/api/products/test-id', headers=_auth_headers())
     assert response.status_code == 200
     data = json.loads(response.data)

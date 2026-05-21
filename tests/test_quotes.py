@@ -166,11 +166,16 @@ class TestDeleteQuote:
     """DELETE /api/quotes/<id> tests."""
 
     def test_delete_success(self, client, headers_a):
-        with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_ctr:
+        with patch("smart_invoice_pro.api.quotes_api.quotes_container") as mock_ctr, \
+             patch("smart_invoice_pro.utils.lifecycle_service.compute_lifecycle_analysis") as mock_analysis:
             mock_ctr.query_items.return_value = [STORED_QUOTE_A]
+            mock_analysis.return_value = {
+                "hardDeleteAllowed": False, "hasDependencies": False,
+                "dependencySummary": {}, "isAccountingProtected": False,
+            }
             resp = client.delete("/api/quotes/qt-aaa-001", headers=headers_a)
             assert resp.status_code == 200
-            assert resp.get_json().get("message") == "Quote archived successfully"
+            assert resp.get_json().get("message") == "Quote archived"
             mock_ctr.replace_item.assert_called_once()
 
     def test_delete_not_found(self, client, headers_a):

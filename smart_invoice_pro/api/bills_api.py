@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import bills_container, stock_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -703,13 +704,23 @@ def delete_bill(bill_id):
         if bill.get('payment_status') == 'Paid':
             return jsonify({"error": "Cannot archive a bill that has been paid"}), 400
 
-        reason = request.args.get('reason') or 'Archived by user'
-        archive_entity(
-            bills_container, bill, 'bill',
-            request.tenant_id, getattr(request, 'user_id', None), reason
+        lifecycle_result = apply_lifecycle_action(
+            container=bills_container,
+            item=bill,
+            entity_type='bill',
+            tenant_id=request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            requested_action='delete',
+            reason=request.args.get('reason') or 'User requested delete',
         )
 
-        return jsonify({"message": "Bill archived successfully"}), 200
+        return jsonify({
+            "message": "Bill archived successfully",
+            "performedAction": lifecycle_result.get("performedAction"),
+            "status": lifecycle_result.get("status"),
+            "dependencySummary": lifecycle_result.get("dependencySummary", {}),
+            "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to archive bill: {str(e)}"}), 500
 

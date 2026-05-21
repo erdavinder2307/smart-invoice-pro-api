@@ -239,7 +239,8 @@ class TestDeleteCustomer:
         mock_cust.query_items.return_value = [stored_customer_a]
         resp = client.delete("/api/customers/cust-aaa-001", headers=headers_a)
         assert resp.status_code == 200
-        mock_cust.replace_item.assert_called_once()
+        # Lifecycle-aware delete: no dependencies → hard delete (delete_item) or archive (replace_item)
+        assert mock_cust.delete_item.called or mock_cust.replace_item.called
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_delete_customer_not_found(self, mock_cust, client, headers_a):
@@ -266,3 +267,75 @@ class TestDeleteCustomer:
         mock_cust.query_items.return_value = []
         resp = client.get("/api/customers/cust-aaa-001", headers=headers_a)
         assert resp.status_code == 404
+
+
+class TestMergeCustomer:
+    """POST /customers/<source_id>/merge-into/<target_id> tests."""
+
+    _TARGET = {
+        "id": "cust-aaa-002",
+        "display_name": "Acme Corp Primary",
+        "email": "primary@example.com",
+        "tenant_id": "tenant-aaa-1111",
+        "created_at": "2025-06-01T00:00:00",
+        "updated_at": "2025-06-01T00:00:00",
+    }
+
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_merge_same_id_rejected(self, mock_cust, client, headers_a):
+        """source == target returns 400 without touching the DB."""
+        resp = client.post(
+            "/api/customers/cust-aaa-001/merge-into/cust-aaa-001",
+            headers=headers_a,
+        )
+        assert resp.status_code == 400
+        mock_cust.query_items.assert_not_called()
+
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_merge_source_not_found(self, mock_cust, client, headers_a):
+        """Non-existent source → 404."""
+        mock_cust.query_items.return_value = []
+        resp = client.post(
+            "/api/customers/nonexistent/merge-into/cust-aaa-002",
+            headers=headers_a,
+        )
+        assert resp.status_code == 404
+
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_merge_cross_tenant_source(self, mock_cust, client, headers_b, stored_customer_a):
+        """Tenant B cannot merge Tenant A's source customer → 403."""
+        mock_cust.query_items.return_value = [stored_customer_a]
+        resp = client.post(
+            "/api/customers/cust-aaa-001/merge-into/cust-aaa-002",
+            headers=headers_b,
+        )
+        assert resp.status_code == 403
+
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_merge_success(self, mock_cust, client, headers_a, stored_customer_a):
+        """Happy path — reparents (0) entities and archives source → 200."""
+        target = dict(self._TARGET)
+
+        def _query_effect(**kwargs):
+            params = kwargs.get("parameters", [])
+            id_value = next((p["value"] for p in params if p.get("name") == "@id"), None)
+            if id_value == "cust-aaa-001":
+                return [stored_customer_a]
+            if id_value == "cust-aaa-002":
+                return [target]
+            return []
+
+        mock_cust.query_items.side_effect = _query_effect
+
+        resp = client.post(
+            "/api/customers/cust-aaa-001/merge-into/cust-aaa-002",
+            headers=headers_a,
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["source_id"] == "cust-aaa-001"
+        assert data["target_id"] == "cust-aaa-002"
+        assert data["invoices_reparented"] == 0
+        assert data["quotes_reparented"] == 0
+        # Source customer must have been archived (replace_item) or hard-deleted (delete_item)
+        assert mock_cust.replace_item.called or mock_cust.delete_item.called

@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from smart_invoice_pro.utils.audit_logger import log_audit_event, log_bulk_archive_summary
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -124,6 +125,21 @@ def _is_archived(product):
     return product.get("status") == "ARCHIVED" or bool(product.get("is_deleted", False))
 
 
+def _is_truthy(value):
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'y')
+
+
+def _stock_bucket(stock, reorder_level):
+    """Return stock bucket string matching frontend getStockMeta logic."""
+    qty = float(stock or 0)
+    threshold = float(reorder_level) if reorder_level is not None else 10.0
+    if qty <= 0:
+        return "Critical"
+    if qty <= threshold:
+        return "Low Stock"
+    return "In Stock"
+
+
 # ─────────────────────────────────────────────
 #  CREATE
 # ─────────────────────────────────────────────
@@ -214,6 +230,9 @@ def create_product():
         'reorder_level': data.get('reorder_level', 0),
         'reorder_qty': data.get('reorder_qty', 0),
         'preferred_vendor_id': data.get('preferred_vendor_id', ''),
+        'sku': data.get('sku', ''),
+        'low_stock_threshold': data.get('low_stock_threshold', None),
+        'price_history': [],
         'tenant_id': request.tenant_id,
         'status': 'ACTIVE',
         'archived_at': None,
@@ -250,6 +269,7 @@ def create_product():
     }
 })
 def list_products():
+    include_meta = _is_truthy(request.args.get('include_meta'))
     _ALLOWED_SORT_FIELDS = {'name', 'price', 'purchase_rate'}
     sort_by = request.args.get('sort_by', 'name')
     sort_order = request.args.get('sort_order', 'asc').upper()
@@ -297,7 +317,28 @@ def list_products():
         product_with_stock = dict(product)
         product_with_stock['stock'] = stock_map.get(pid, 0.0)
         result.append(product_with_stock)
-    return jsonify(sanitize_items(result))
+
+    if not include_meta:
+        return jsonify(sanitize_items(result))
+
+    # Compute stock-based summary (mirrors frontend getStockMeta bucket logic)
+    buckets = {'Critical': 0, 'Low Stock': 0, 'In Stock': 0}
+    for p in result:
+        b = _stock_bucket(p.get('stock', 0), p.get('reorder_level'))
+        buckets[b] = buckets.get(b, 0) + 1
+
+    summary = {
+        'total': len(result),
+        'in_stock': buckets['In Stock'],
+        'low_stock': buckets['Low Stock'],
+        'out_of_stock': buckets['Critical'],
+        'critical': buckets['Critical'],
+    }
+    return jsonify({
+        'data': sanitize_items(result),
+        'total': len(result),
+        'summary': summary,
+    })
 
 
 # ─────────────────────────────────────────────
@@ -428,10 +469,26 @@ def update_product(product_id):
     for field in [
         'item_type', 'name', 'hsn_sac', 'tax_preference', 'description', 'purchase_description',
         'category', 'price', 'purchase_rate', 'tax_rate', 'unit', 'sales_enabled', 'purchase_enabled',
-        'sales_account', 'purchase_account', 'reorder_level', 'reorder_qty', 'preferred_vendor_id',
+        'sales_account', 'purchase_account', 'reorder_level', 'reorder_qty', 'preferred_vendor_id', 'sku',
+        'low_stock_threshold',
     ]:
         if field in data:
             item[field] = data[field]
+
+    # Track price changes in price_history
+    if item.get('price') != before_snapshot.get('price') or item.get('purchase_rate') != before_snapshot.get('purchase_rate'):
+        history_entry = {
+            'old_price': before_snapshot.get('price'),
+            'new_price': item.get('price'),
+            'old_purchase_rate': before_snapshot.get('purchase_rate'),
+            'new_purchase_rate': item.get('purchase_rate'),
+            'changed_at': datetime.utcnow().isoformat(),
+            'changed_by': getattr(request, 'user_id', None),
+        }
+        price_history = list(item.get('price_history') or [])
+        price_history.append(history_entry)
+        item['price_history'] = price_history[-100:]
+
     item['updated_at'] = datetime.utcnow().isoformat()
     products_container.replace_item(item=item['id'], body=item)
     log_audit_event({
@@ -512,20 +569,22 @@ def delete_product(product_id):
     if _is_archived(item):
         return jsonify({'error': 'Product not found'}), 404
 
-    dependency = check_entity_dependencies('product', product_id, request.tenant_id)
-    archived_item = archive_entity(
-        products_container,
-        item,
-        'product',
-        request.tenant_id,
+    lifecycle_result = apply_lifecycle_action(
+        container=products_container,
+        item=item,
+        entity_type='product',
+        tenant_id=request.tenant_id,
         user_id=getattr(request, 'user_id', None),
-        reason='User requested archive from delete action',
+        requested_action='delete',
+        reason='User requested delete',
     )
 
     return jsonify({
-        'message': 'Product archived',
-        'status': archived_item.get('status'),
-        'dependencySummary': dependency.get('dependencySummary', {}),
+        'message': 'Product deleted permanently' if lifecycle_result.get('performedAction') == 'delete' else 'Product archived',
+        'performedAction': lifecycle_result.get('performedAction'),
+        'status': lifecycle_result.get('status'),
+        'dependencySummary': lifecycle_result.get('dependencySummary', {}),
+        'hardDeleteAllowed': lifecycle_result.get('hardDeleteAllowed', False),
     })
 
 
@@ -795,6 +854,44 @@ def create_restock_po(product_id):
         return jsonify({'error': 'Forbidden'}), 403
     if product.get('is_deleted', False):
         return jsonify({'error': 'Product not found'}), 404
+
+    # --- Stock level guard ---
+    # Compute live stock from transactions
+    stock_txns = list(get_container("stock", "/product_id").query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tenant_id AND c.product_id = @pid",
+        parameters=[
+            {"name": "@tenant_id", "value": request.tenant_id},
+            {"name": "@pid",        "value": product_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    current_stock = 0.0
+    for txn in stock_txns:
+        qty = float(txn.get('quantity', 0))
+        if txn.get('type') == 'IN':
+            current_stock += qty
+        elif txn.get('type') == 'OUT':
+            current_stock -= qty
+
+    reorder_level = float(product.get('reorder_level', 0))
+    # Only allow restock when stock is at or below reorder_level.
+    # If no reorder_level is configured (0), fall back to: allow when stock <= 0.
+    if reorder_level > 0:
+        if current_stock > reorder_level:
+            return jsonify({
+                'error': 'Restock not required',
+                'detail': f'Current stock ({current_stock:.0f}) is above reorder level ({reorder_level:.0f}). Replenishment is only triggered when stock is at or below the reorder threshold.',
+                'current_stock': current_stock,
+                'reorder_level': reorder_level,
+            }), 409
+    else:
+        if current_stock > 0:
+            return jsonify({
+                'error': 'Restock not required',
+                'detail': f'Current stock ({current_stock:.0f}) is above zero. Set a reorder level on this item to enable threshold-based replenishment.',
+                'current_stock': current_stock,
+                'reorder_level': reorder_level,
+            }), 409
 
     # Determine vendor and quantity
     vendor_id = data.get('vendor_id') or product.get('preferred_vendor_id')

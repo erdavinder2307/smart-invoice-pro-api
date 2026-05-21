@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, request
 
 from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -791,15 +792,22 @@ def delete_recurring_profile(profile_id):
         if _is_archived(profile):
             return jsonify({'message': 'Recurring profile already archived'}), 200
 
-        archive_entity(
-            recurring_profiles_container,
-            profile,
-            'recurring_profile',
-            request.tenant_id,
-            getattr(request, 'user_id', None),
-            reason='archive_on_delete',
+        lifecycle_result = apply_lifecycle_action(
+            container=recurring_profiles_container,
+            item=profile,
+            entity_type='recurring_profile',
+            tenant_id=request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            requested_action='delete',
+            reason='User requested delete',
         )
-        return jsonify({'message': 'Recurring profile archived successfully'}), 200
+        return jsonify({
+            'message': 'Recurring profile deleted permanently' if lifecycle_result.get('performedAction') == 'delete' else 'Recurring profile archived successfully',
+            'performedAction': lifecycle_result.get('performedAction'),
+            'status': lifecycle_result.get('status'),
+            'dependencySummary': lifecycle_result.get('dependencySummary', {}),
+            'hardDeleteAllowed': lifecycle_result.get('hardDeleteAllowed', False),
+        }), 200
     except Exception as e:
         return jsonify({'error': f'Failed to archive recurring profile: {str(e)}'}), 500
 

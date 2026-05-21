@@ -8,6 +8,7 @@ from werkzeug.utils import secure_filename
 
 from smart_invoice_pro.utils.cosmos_client import expenses_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -28,6 +29,10 @@ expenses_blueprint = Blueprint('expenses', __name__)
 
 def _is_archived(item):
     return str(item.get('lifecycle_status') or '').upper() == 'ARCHIVED'
+
+
+def _is_truthy(value):
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'y')
 
 # Allowed file extensions for receipts
 ALLOWED_EXTENSIONS  = {'png', 'jpg', 'jpeg', 'pdf', 'gif'}
@@ -194,6 +199,7 @@ def create_expense():
 })
 def get_expenses():
     try:
+        include_meta = _is_truthy(request.args.get('include_meta'))
         # Get query parameters
         category = request.args.get('category')
         start_date = request.args.get('start_date')
@@ -240,7 +246,23 @@ def get_expenses():
             enable_cross_partition_query=True
         ))
 
-        return jsonify(items), 200
+        if not include_meta:
+            return jsonify(items), 200
+
+        paid_count = sum(
+            1 for e in items
+            if str(e.get('status') or e.get('payment_status') or '').strip().lower() == 'paid'
+        )
+        summary = {
+            'total': len(items),
+            'paid': paid_count,
+            'pending': len(items) - paid_count,
+        }
+        return jsonify({
+            'data': items,
+            'total': len(items),
+            'summary': summary,
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch expenses: {str(e)}"}), 500
 
@@ -424,13 +446,23 @@ def delete_expense(expense_id):
         if _is_archived(expense):
             return jsonify({"error": "Expense already archived"}), 409
 
-        reason = request.args.get('reason') or 'Archived by user'
-        archive_entity(
-            expenses_container, expense, 'expense',
-            request.tenant_id, getattr(request, 'user_id', None), reason
+        lifecycle_result = apply_lifecycle_action(
+            container=expenses_container,
+            item=expense,
+            entity_type='expense',
+            tenant_id=request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            requested_action='delete',
+            reason=request.args.get('reason') or 'User requested delete',
         )
 
-        return jsonify({"message": "Expense archived successfully"}), 200
+        return jsonify({
+            "message": "Expense archived successfully",
+            "performedAction": lifecycle_result.get("performedAction"),
+            "status": lifecycle_result.get("status"),
+            "dependencySummary": lifecycle_result.get("dependencySummary", {}),
+            "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to archive expense: {str(e)}"}), 500
 
