@@ -84,6 +84,7 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.routes.refresh_tokens_container",
     # Invoices
     "smart_invoice_pro.api.invoices.invoices_container",
+    "smart_invoice_pro.api.invoices.customers_container",
     "smart_invoice_pro.api.invoices.get_container",
     # Invoice preferences (used inside invoice create)
     "smart_invoice_pro.api.invoice_preferences_api.settings_container",
@@ -92,6 +93,7 @@ _CONTAINER_PATCHES = [
     # Customers
     "smart_invoice_pro.api.customers_api.customers_container",
     "smart_invoice_pro.api.customers_api.invoices_container",
+    "smart_invoice_pro.api.customers_api.quotes_container",
     # Products
     "smart_invoice_pro.api.product_api.products_container",
     "smart_invoice_pro.api.product_api.get_container",

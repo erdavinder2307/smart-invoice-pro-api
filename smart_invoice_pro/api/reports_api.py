@@ -471,7 +471,14 @@ def get_ar_aging():
         # Get customer names
         customers_query = f"SELECT * FROM c WHERE c.tenant_id = '{tenant_id}'"
         customers = list(customers_container.query_items(query=customers_query, enable_cross_partition_query=True))
-        customer_map = {c['id']: c.get('name', 'Unknown') for c in customers}
+        customer_map = {c['id']: c.get('display_name') or c.get('name', '') for c in customers}
+        # Fallback: use the customer_name snapshot stored on invoice (survives customer deletion)
+        invoice_name_map = {
+            inv.get('customer_id'): inv.get('customer_name', '')
+            for inv in invoices
+            if inv.get('customer_id') and inv.get('customer_name')
+        }
+        _get_cname = lambda cid: customer_map.get(cid) or invoice_name_map.get(cid) or 'Unknown'
 
         # Age brackets: Current, 1-30, 31-60, 61-90, 90+
         aging_buckets = {
@@ -502,7 +509,7 @@ def get_ar_aging():
                 'invoice_id': invoice['id'],
                 'invoice_number': invoice.get('invoice_number'),
                 'customer_id': invoice.get('customer_id'),
-                'customer_name': customer_map.get(invoice.get('customer_id'), 'Unknown'),
+                'customer_name': _get_cname(invoice.get('customer_id')),
                 'issue_date': invoice.get('issue_date'),
                 'due_date': invoice.get('due_date'),
                 'total_amount': float(invoice.get('total_amount', 0)),
@@ -539,7 +546,7 @@ def get_ar_aging():
         for customer_id, total in customer_summary.items():
             customer_aging.append({
                 'customer_id': customer_id,
-                'customer_name': customer_map.get(customer_id, 'Unknown'),
+                'customer_name': _get_cname(customer_id),
                 'total_outstanding': round(total, 2)
             })
 

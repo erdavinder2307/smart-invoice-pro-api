@@ -1,12 +1,14 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import customers_container
 from smart_invoice_pro.utils.cosmos_client import invoices_container
+from smart_invoice_pro.utils.cosmos_client import quotes_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -42,6 +44,10 @@ os.makedirs(CUSTOMER_UPLOAD_FOLDER, exist_ok=True)
 
 def _is_archived(customer):
     return customer.get('status') == 'ARCHIVED'
+
+
+def _is_truthy(value):
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'y')
 
 # ─── Validation Helpers (kept for backward compatibility with any direct calls) ─
 def validate_email(email):
@@ -211,7 +217,22 @@ def create_customer():
         return make_error_response(
             VALIDATION_ERROR, "Please fix the highlighted fields", field_errors
         )
-    
+
+    # Reject duplicate email within the same tenant
+    _dup_check = list(customers_container.query_items(
+        query="SELECT c.id FROM c WHERE c.tenant_id = @tid AND LOWER(c.email) = @email",
+        parameters=[
+            {"name": "@tid", "value": request.tenant_id},
+            {"name": "@email", "value": email_val.strip().lower()},
+        ],
+        enable_cross_partition_query=True
+    ))
+    if _dup_check:
+        return jsonify({
+            'error': 'A customer with this email already exists',
+            'details': {'email': 'A customer with this email already exists'},
+        }), 409
+
     now = datetime.utcnow().isoformat()
     customer_uuid = str(uuid.uuid4())
     item = {
@@ -233,6 +254,7 @@ def create_customer():
         'tax_preference': data.get('tax_preference', 'taxable'),
         'currency': data.get('currency', 'INR'),
         'opening_balance': float(data['opening_balance']) if data.get('opening_balance') not in (None, '', False) else 0.0,
+        'credit_limit': float(data['credit_limit']) if data.get('credit_limit') not in (None, '', False) else 0.0,
         'payment_terms': data.get('payment_terms', 'due_on_receipt'),
         'website_url': data.get('website_url', ''),
         'department': data.get('department', ''),
@@ -320,6 +342,7 @@ def create_customer():
     }
 })
 def list_customers():
+    include_meta = _is_truthy(request.args.get('include_meta'))
     lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
 
     query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
@@ -357,7 +380,51 @@ def list_customers():
     else:
         items = [item for item in items if not _is_archived(item)]
 
-    return jsonify(sanitize_items(items))
+    # Enrich each customer with per-customer outstanding_amount and overdue_amount
+    _OPEN_STATUSES = {'issued', 'partially paid', 'overdue', 'sent'}
+    today_str = datetime.utcnow().strftime('%Y-%m-%d')
+    try:
+        open_inv_query = (
+            "SELECT c.customer_id, c.balance_due, c.status, c.due_date "
+            "FROM c WHERE c.tenant_id = @tid"
+        )
+        open_invoices = list(invoices_container.query_items(
+            query=open_inv_query,
+            parameters=[{"name": "@tid", "value": request.tenant_id}],
+            enable_cross_partition_query=True
+        ))
+        outstanding_map = {}
+        overdue_map = {}
+        for inv in open_invoices:
+            status = str(inv.get('status') or '').lower()
+            if status not in _OPEN_STATUSES:
+                continue
+            cid = inv.get('customer_id')
+            if not cid:
+                continue
+            bal = float(inv.get('balance_due') or 0)
+            outstanding_map[cid] = outstanding_map.get(cid, 0.0) + bal
+            due_date_str = str(inv.get('due_date') or '')
+            if status == 'overdue' or (due_date_str and due_date_str[:10] < today_str):
+                overdue_map[cid] = overdue_map.get(cid, 0.0) + bal
+        for item in items:
+            cid = item.get('id')
+            item['outstanding_amount'] = round(outstanding_map.get(cid, 0.0), 2)
+            item['overdue_amount'] = round(overdue_map.get(cid, 0.0), 2)
+    except Exception:
+        pass  # non-critical enrichment; continue without it
+
+    if not include_meta:
+        return jsonify(sanitize_items(items))
+
+    summary = {
+        'total': len(items),
+    }
+    return jsonify({
+        'data': sanitize_items(items),
+        'total': len(items),
+        'summary': summary,
+    })
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['GET'])
 @swag_from({
@@ -457,9 +524,43 @@ def get_customer_overview(customer_id):
         if inv.get('status') not in ('Paid', 'Cancelled', 'Void')
     )
 
+    # Build payments_received from invoices where amount_paid > 0
+    payments_received = []
+    for inv in invoices:
+        paid = float(inv.get('amount_paid') or 0)
+        if paid > 0:
+            payments_received.append({
+                'invoice_number': inv.get('invoice_number'),
+                'invoice_id': inv.get('id'),
+                'issue_date': inv.get('issue_date'),
+                'amount': paid,
+                'payment_mode': inv.get('payment_mode') or inv.get('last_payment_mode', ''),
+            })
+
+    # Fetch quotes for this customer
+    quotes = []
+    try:
+        q_query = (
+            "SELECT c.id, c.quote_number, c.issue_date, c.total_amount, c.status "
+            "FROM c WHERE c.customer_id = @cid AND c.tenant_id = @tid "
+            "ORDER BY c.created_at DESC"
+        )
+        quotes = list(quotes_container.query_items(
+            query=q_query,
+            parameters=[
+                {"name": "@cid", "value": customer_id},
+                {"name": "@tid", "value": request.tenant_id},
+            ],
+            enable_cross_partition_query=True
+        ))
+    except Exception:  # non-critical
+        pass
+
     return jsonify({
         'customer': sanitize_item(customer),
         'invoices': invoices,
+        'payments_received': payments_received,
+        'quotes': quotes,
         'total_invoiced': round(total_invoiced, 2),
         'total_paid': round(total_paid, 2),
         'outstanding': round(outstanding, 2),
@@ -558,7 +659,24 @@ def update_customer(customer_id):
     # Validate email format if being updated
     if 'email' in data and not validate_email(data['email']):
         return jsonify({'error': 'Invalid email format'}), 400
-    
+
+    # Reject duplicate email (excluding current customer)
+    if 'email' in data and data['email']:
+        _dup_email = data['email'].strip().lower()
+        _dup_results = list(customers_container.query_items(
+            query="SELECT c.id FROM c WHERE c.tenant_id = @tid AND LOWER(c.email) = @email",
+            parameters=[
+                {"name": "@tid", "value": request.tenant_id},
+                {"name": "@email", "value": _dup_email},
+            ],
+            enable_cross_partition_query=True
+        ))
+        if any(d.get('id') != customer_id for d in _dup_results):
+            return jsonify({
+                'error': 'A customer with this email already exists',
+                'details': {'email': 'A customer with this email already exists'},
+            }), 409
+
     # Validate GST number if provided
     if 'gst_number' in data and data['gst_number'] and not validate_gst_number(data['gst_number']):
         return jsonify({'error': 'Invalid GST number format. Expected: 22ZZZZZ9999Z9Z9'}), 400
@@ -575,7 +693,7 @@ def update_customer(customer_id):
     updateable_fields = [
         'display_name', 'email', 'phone', 'mobile', 'customer_type', 'salutation', 'first_name', 'last_name',
         'company_name', 'language', 'gst_treatment', 'place_of_supply', 'gst_number', 'pan',
-        'tax_preference', 'currency', 'opening_balance', 'payment_terms',
+        'tax_preference', 'currency', 'opening_balance', 'credit_limit', 'payment_terms',
         'website_url', 'department', 'designation', 'x_handle', 'skype', 'facebook',
         'billing_street', 'billing_city', 'billing_state', 'billing_zip', 'billing_country',
         'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip', 'shipping_country',
@@ -585,7 +703,7 @@ def update_customer(customer_id):
     # Update each field if provided in request
     for field in updateable_fields:
         if field in data:
-            if field == 'opening_balance':
+            if field in ('opening_balance', 'credit_limit'):
                 try:
                     item[field] = float(data[field]) if data[field] != '' else 0.0
                 except (TypeError, ValueError):
@@ -661,20 +779,22 @@ def delete_customer(customer_id):
     if _is_archived(item):
         return jsonify({'error': 'Customer not found'}), 404
 
-    dependency = check_entity_dependencies('customer', customer_id, request.tenant_id)
-    archived_item = archive_entity(
-        customers_container,
-        item,
-        'customer',
-        request.tenant_id,
+    lifecycle_result = apply_lifecycle_action(
+        container=customers_container,
+        item=item,
+        entity_type='customer',
+        tenant_id=request.tenant_id,
         user_id=getattr(request, 'user_id', None),
-        reason='User requested archive from delete action',
+        requested_action='delete',
+        reason='User requested delete',
     )
 
     return jsonify({
-        'message': 'Customer archived',
-        'status': archived_item.get('status'),
-        'dependencySummary': dependency.get('dependencySummary', {}),
+        'message': 'Customer deleted permanently' if lifecycle_result.get('performedAction') == 'delete' else 'Customer archived',
+        'performedAction': lifecycle_result.get('performedAction'),
+        'status': lifecycle_result.get('status'),
+        'dependencySummary': lifecycle_result.get('dependencySummary', {}),
+        'hardDeleteAllowed': lifecycle_result.get('hardDeleteAllowed', False),
     })
 
 
@@ -793,6 +913,122 @@ def get_customer_dependencies(customer_id):
 
     dependency = check_entity_dependencies('customer', customer_id, request.tenant_id)
     return jsonify(dependency), 200
+
+@customers_blueprint.route('/customers/<source_id>/merge-into/<target_id>', methods=['POST'])
+def merge_customer(source_id, target_id):
+    """Merge a duplicate customer into a primary customer.
+
+    Reparents all invoices and quotes from `source_id` to `target_id`,
+    then archives the source customer. Both must belong to the current tenant.
+    """
+    if source_id == target_id:
+        return jsonify({'error': 'source and target must be different customers'}), 400
+
+    def _fetch(cid):
+        return list(customers_container.query_items(
+            query='SELECT * FROM c WHERE c.id = @id',
+            parameters=[{'name': '@id', 'value': cid}],
+            enable_cross_partition_query=True,
+        ))
+
+    source_results = _fetch(source_id)
+    if not source_results:
+        return jsonify({'error': 'Source customer not found'}), 404
+    source = source_results[0]
+    if source.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(source):
+        # Idempotent: already merged into this same target — treat as success
+        if source.get('merged_into_customer_id') == target_id:
+            return jsonify({
+                'message': 'Customers already merged',
+                'source_id': source_id,
+                'target_id': target_id,
+                'invoices_reparented': 0,
+                'quotes_reparented': 0,
+            }), 200
+        return jsonify({'error': 'Source customer is already archived'}), 409
+
+    target_results = _fetch(target_id)
+    if not target_results:
+        return jsonify({'error': 'Target customer not found'}), 404
+    target = target_results[0]
+    if target.get('tenant_id') != request.tenant_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if _is_archived(target):
+        return jsonify({'error': 'Target customer is archived — cannot merge into an archived record'}), 409
+
+    target_name = (
+        target.get('display_name')
+        or target.get('company_name')
+        or ' '.join(filter(None, [target.get('first_name'), target.get('last_name')]))
+        or target_id
+    )
+
+    # Cosmos DB partition keys are immutable — we cannot change customer_id on existing
+    # documents. We only update the customer_name snapshot so display is consistent.
+    # The source customer is archived below, which prevents double-counting.
+    invoices_reparented = 0
+    invoice_results = list(invoices_container.query_items(
+        query='SELECT * FROM c WHERE c.customer_id = @cid AND c.tenant_id = @tid',
+        parameters=[
+            {'name': '@cid', 'value': source_id},
+            {'name': '@tid', 'value': request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    for invoice in invoice_results:
+        # Only update display snapshot — do NOT change customer_id (partition key)
+        invoice['customer_name'] = target_name
+        invoices_container.replace_item(item=invoice['id'], body=invoice)
+        invoices_reparented += 1
+
+    quotes_reparented = 0
+    quote_results = list(quotes_container.query_items(
+        query='SELECT * FROM c WHERE c.customer_id = @cid AND c.tenant_id = @tid',
+        parameters=[
+            {'name': '@cid', 'value': source_id},
+            {'name': '@tid', 'value': request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    for quote in quote_results:
+        quote['customer_name'] = target_name
+        quotes_container.replace_item(item=quote['id'], body=quote)
+        quotes_reparented += 1
+
+    # Tag the source customer with its merge destination so the app can follow the chain
+    source['merged_into_customer_id'] = target_id
+
+    apply_lifecycle_action(
+        container=customers_container,
+        item=source,
+        entity_type='customer',
+        tenant_id=request.tenant_id,
+        user_id=getattr(request, 'user_id', None),
+        requested_action='archive',
+        reason=f'Merged into customer {target_id}',
+    )
+
+    try:
+        log_audit(
+            'customer', 'merge', source_id,
+            before={'customer_id': source_id},
+            after={'merged_into': target_id, 'invoices_reparented': invoices_reparented, 'quotes_reparented': quotes_reparented},
+            user_id=getattr(request, 'user_id', None),
+            tenant_id=request.tenant_id,
+        )
+    except Exception:
+        pass  # Audit failure must not roll back a completed merge
+
+    return jsonify({
+        'message': 'Customers merged successfully',
+        'source_id': source_id,
+        'target_id': target_id,
+        'invoices_reparented': invoices_reparented,
+        'quotes_reparented': quotes_reparented,
+    }), 200
+
 
 @customers_blueprint.route('/customer/login', methods=['POST'])
 @swag_from({

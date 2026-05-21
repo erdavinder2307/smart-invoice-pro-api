@@ -147,33 +147,40 @@ class TestUpdateProduct:
 
 class TestDeleteProduct:
 
-    @patch("smart_invoice_pro.api.product_api._item_used_in_invoices")
+    @patch("smart_invoice_pro.utils.lifecycle_service.compute_lifecycle_analysis")
     @patch("smart_invoice_pro.api.product_api.products_container")
-    def test_soft_delete_success(self, mock_prod, mock_used, client, headers_a, stored_product_a):
+    def test_soft_delete_success(self, mock_prod, mock_analysis, client, headers_a, stored_product_a):
         mock_prod.query_items.return_value = [stored_product_a]
-        mock_used.return_value = 0
+        mock_analysis.return_value = {
+            "hardDeleteAllowed": False, "hasDependencies": False,
+            "dependencySummary": {}, "isAccountingProtected": False,
+            "entityType": "product", "entityId": "prod-aaa-001",
+        }
         resp = client.delete("/api/products/prod-aaa-001", headers=headers_a)
         assert resp.status_code == 200
-        # Verify replace_item was called with is_deleted=True
+        # Verify archive_entity path: replace_item called with is_deleted=True
         mock_prod.replace_item.assert_called_once()
         body = mock_prod.replace_item.call_args[1]["body"]
         assert body["is_deleted"] is True
         assert body["deleted_at"] is not None
 
-    @patch("smart_invoice_pro.api.product_api._item_used_in_invoices")
+    @patch("smart_invoice_pro.utils.lifecycle_service.compute_lifecycle_analysis")
     @patch("smart_invoice_pro.api.product_api.products_container")
-    def test_delete_product_used_in_invoices(self, mock_prod, mock_used, client, headers_a, stored_product_a):
+    def test_delete_product_used_in_invoices(self, mock_prod, mock_analysis, client, headers_a, stored_product_a):
         mock_prod.query_items.return_value = [stored_product_a]
-        mock_used.return_value = 3
+        mock_analysis.return_value = {
+            "hardDeleteAllowed": False, "hasDependencies": True,
+            "dependencySummary": {"invoices": 3}, "isAccountingProtected": False,
+            "entityType": "product", "entityId": "prod-aaa-001",
+        }
         resp = client.delete("/api/products/prod-aaa-001", headers=headers_a)
         assert resp.status_code == 200
         body = resp.get_json()
         assert body["message"] == "Product archived"
         assert isinstance(body.get("dependencySummary"), dict)
 
-    @patch("smart_invoice_pro.api.product_api._item_used_in_invoices")
     @patch("smart_invoice_pro.api.product_api.products_container")
-    def test_delete_cross_tenant(self, mock_prod, mock_used, client, headers_b, stored_product_a):
+    def test_delete_cross_tenant(self, mock_prod, client, headers_b, stored_product_a):
         mock_prod.query_items.return_value = [stored_product_a]
         resp = client.delete("/api/products/prod-aaa-001", headers=headers_b)
         assert resp.status_code == 403

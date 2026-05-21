@@ -99,6 +99,9 @@ def add_stock():
         'quantity': quantity,
         'type': 'IN',
         'source': data.get('source', 'Purchase'),
+        'reason': data.get('reason', ''),
+        'reference_number': data.get('reference_number') or None,
+        'adjustment_date': data.get('adjustment_date') or datetime.utcnow().strftime('%Y-%m-%d'),
         'timestamp': now,
         'tenant_id': request.tenant_id,
         'user_id': getattr(request, 'user_id', None),
@@ -153,6 +156,12 @@ def reduce_stock():
     if not _product_exists_for_tenant(product_id, request.tenant_id):
         return jsonify({'error': 'Product not found'}), 404
 
+    current_stock = _compute_current_stock(product_id, request.tenant_id)
+    if current_stock - quantity < 0:
+        return jsonify({
+            'error': f'Insufficient stock. Available: {current_stock}'
+        }), 400
+
     now = datetime.utcnow().isoformat()
     transaction = {
         'id': str(uuid.uuid4()),
@@ -160,6 +169,9 @@ def reduce_stock():
         'quantity': quantity,
         'type': 'OUT',
         'source': data.get('source', 'Sale'),
+        'reason': data.get('reason', ''),
+        'reference_number': data.get('reference_number') or None,
+        'adjustment_date': data.get('adjustment_date') or datetime.utcnow().strftime('%Y-%m-%d'),
         'timestamp': now,
         'tenant_id': request.tenant_id,
         'user_id': getattr(request, 'user_id', None),
@@ -372,6 +384,18 @@ def adjust_stock():
                 return jsonify({'error': 'Quantity cannot be zero'}), 400
         except (ValueError, TypeError):
             return jsonify({'error': 'Invalid quantity format'}), 400
+
+        # Block negative stock for OUT adjustments
+        if quantity < 0:
+            product_id = str(data['product_id'])
+            if not _product_exists_for_tenant(product_id, request.tenant_id):
+                return jsonify({'error': 'Product not found'}), 404
+            current_stock = _compute_current_stock(product_id, request.tenant_id)
+            decrease_qty = abs(quantity)
+            if current_stock - decrease_qty < 0:
+                return jsonify({
+                    'error': f'Insufficient stock. Available: {current_stock}'
+                }), 400
         
         now = datetime.utcnow().isoformat()
         

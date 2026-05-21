@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, make_response
 from smart_invoice_pro.utils.cosmos_client import purchase_orders_container, bills_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 import uuid
 import base64
@@ -639,13 +640,23 @@ def delete_purchase_order(po_id):
         if po.get('status') == 'Billed':
             return jsonify({"error": "Cannot archive a purchase order that has been billed"}), 400
 
-        reason = request.args.get('reason') or 'Archived by user'
-        archive_entity(
-            purchase_orders_container, po, 'purchase_order',
-            request.tenant_id, getattr(request, 'user_id', None), reason
+        lifecycle_result = apply_lifecycle_action(
+            container=purchase_orders_container,
+            item=po,
+            entity_type='purchase_order',
+            tenant_id=request.tenant_id,
+            user_id=getattr(request, 'user_id', None),
+            requested_action='delete',
+            reason=request.args.get('reason') or 'User requested delete',
         )
 
-        return jsonify({"message": "Purchase Order archived successfully"}), 200
+        return jsonify({
+            "message": "Purchase Order archived successfully",
+            "performedAction": lifecycle_result.get("performedAction"),
+            "status": lifecycle_result.get("status"),
+            "dependencySummary": lifecycle_result.get("dependencySummary", {}),
+            "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to archive purchase order: {str(e)}"}), 500
 

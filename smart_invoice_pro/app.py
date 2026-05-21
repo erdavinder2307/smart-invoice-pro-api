@@ -42,6 +42,7 @@ from smart_invoice_pro.api.audit_logs_api import audit_logs_blueprint
 from smart_invoice_pro.api.admin_api import admin_blueprint
 from smart_invoice_pro.api.search_api import search_blueprint
 from smart_invoice_pro.api.me_api import me_blueprint
+from smart_invoice_pro.api.lifecycle_api import lifecycle_blueprint
 from smart_invoice_pro.api.auth_middleware import enforce_api_auth
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
@@ -190,6 +191,7 @@ def create_app():
     app.register_blueprint(admin_blueprint, url_prefix="/api")
     app.register_blueprint(search_blueprint, url_prefix="/api")
     app.register_blueprint(me_blueprint, url_prefix="/api")
+    app.register_blueprint(lifecycle_blueprint, url_prefix="/api")
 
     # Start the background scheduler for recurring invoices outside test runs.
     if _should_start_scheduler():

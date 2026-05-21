@@ -127,8 +127,13 @@ class TestDeleteSalesOrder:
     """DELETE /api/sales-orders/<id> tests."""
 
     def test_delete_success(self, client, headers_a):
-        with patch("smart_invoice_pro.api.sales_orders_api.sales_orders_container") as mock_ctr:
+        with patch("smart_invoice_pro.api.sales_orders_api.sales_orders_container") as mock_ctr, \
+             patch("smart_invoice_pro.utils.lifecycle_service.compute_lifecycle_analysis") as mock_analysis:
             mock_ctr.query_items.return_value = [STORED_SO_A]
+            mock_analysis.return_value = {
+                "hardDeleteAllowed": False, "hasDependencies": False,
+                "dependencySummary": {}, "isAccountingProtected": False,
+            }
             resp = client.delete("/api/sales-orders/so-001", headers=headers_a)
             assert resp.status_code == 200
             assert resp.get_json()["message"] == "Sales Order archived successfully"

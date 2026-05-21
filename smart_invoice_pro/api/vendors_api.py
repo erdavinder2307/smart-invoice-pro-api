@@ -11,6 +11,7 @@ from datetime import datetime
 from smart_invoice_pro.utils.audit_logger import log_audit_event
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 
 vendors_blueprint = Blueprint('vendors', __name__)
 
@@ -341,6 +342,8 @@ def get_vendors():
             enriched = [item for item in enriched if _to_float(item.get('outstanding_amount', 0.0)) > 0]
         elif outstanding_filter == 'cleared':
             enriched = [item for item in enriched if _to_float(item.get('outstanding_amount', 0.0)) <= 0]
+        elif outstanding_filter == 'high_outstanding':
+            enriched = [item for item in enriched if _to_float(item.get('outstanding_amount', 0.0)) >= 50000]
 
         sorted_items = _sort_vendor_items(enriched, sort_by, sort_order)
         total = len(sorted_items)
@@ -609,20 +612,22 @@ def delete_vendor(vendor_id):
         if _is_archived(vendor):
             return jsonify({"error": "Vendor not found"}), 404
 
-        dependency = check_entity_dependencies('vendor', vendor_id, request.tenant_id)
-        archived_vendor = archive_entity(
-            vendors_container,
-            vendor,
-            'vendor',
-            request.tenant_id,
+        lifecycle_result = apply_lifecycle_action(
+            container=vendors_container,
+            item=vendor,
+            entity_type='vendor',
+            tenant_id=request.tenant_id,
             user_id=getattr(request, 'user_id', None),
-            reason='User requested archive from delete action',
+            requested_action='delete',
+            reason='User requested delete',
         )
 
         return jsonify({
-            "message": "Vendor archived successfully",
-            "status": archived_vendor.get("status"),
-            "dependencySummary": dependency.get("dependencySummary", {}),
+            "message": "Vendor deleted permanently" if lifecycle_result.get("performedAction") == "delete" else "Vendor archived",
+            "performedAction": lifecycle_result.get("performedAction"),
+            "status": lifecycle_result.get("status"),
+            "dependencySummary": lifecycle_result.get("dependencySummary", {}),
+            "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
         }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete vendor: {str(e)}"}), 500

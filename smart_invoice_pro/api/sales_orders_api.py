@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity, LIFECYCLE_ARCHIVED
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -30,6 +31,10 @@ class SalesOrderStatus(Enum):
 
 def _is_archived(item):
     return str(item.get('status', '')).upper() == LIFECYCLE_ARCHIVED
+
+
+def _is_truthy(value):
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'y')
 
 
 def validate_sales_order_data(data, is_update=False):
@@ -199,6 +204,7 @@ def create_sales_order():
 def get_sales_orders():
     """Get all sales orders with optional filters"""
     try:
+        include_meta = _is_truthy(request.args.get('include_meta'))
         status_filter = request.args.get('status')
         lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
         customer_id_filter = request.args.get('customer_id', type=int)
@@ -211,32 +217,63 @@ def get_sales_orders():
         if sort_order not in ('ASC', 'DESC'):
             sort_order = 'DESC'
 
-        query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
-        conditions = []
-        parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+        # Base conditions (lifecycle + optional customer filter — no status)
+        base_conditions = []
+        base_params = [{"name": "@tenant_id", "value": request.tenant_id}]
 
         if lifecycle == 'archived':
-            conditions.append("UPPER(c.status) = @archived_status")
-            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
+            base_conditions.append("UPPER(c.status) = @archived_status")
+            base_params.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
         elif lifecycle != 'all':
-            conditions.append("(NOT IS_DEFINED(c.status) OR UPPER(c.status) != @archived_status)")
-            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
+            base_conditions.append("(NOT IS_DEFINED(c.status) OR UPPER(c.status) != @archived_status)")
+            base_params.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
 
-        if status_filter:
-            conditions.append("c.status = @status")
-            parameters.append({"name": "@status", "value": status_filter})
         if customer_id_filter:
-            conditions.append("c.customer_id = @customer_id")
-            parameters.append({"name": "@customer_id", "value": customer_id_filter})
+            base_conditions.append("c.customer_id = @customer_id")
+            base_params.append({"name": "@customer_id", "value": customer_id_filter})
 
-        if conditions:
-            query += " AND " + " AND ".join(conditions)
+        base_where = "c.tenant_id = @tenant_id"
+        if base_conditions:
+            base_where += " AND " + " AND ".join(base_conditions)
+        order_sql = f" ORDER BY c.{sort_by} {sort_order}"
 
-        query += f" ORDER BY c.{sort_by} {sort_order}"
+        if include_meta:
+            # Fetch all items without status filter for accurate global summary
+            all_items = list(sales_orders_container.query_items(
+                query=f"SELECT * FROM c WHERE {base_where}{order_sql}",
+                parameters=base_params,
+                enable_cross_partition_query=True
+            ))
+            data = [i for i in all_items if i.get('status') == status_filter] if status_filter else all_items
+            status_counts = {s.value: 0 for s in SalesOrderStatus}
+            for item in all_items:
+                s = item.get('status', '')
+                if s in status_counts:
+                    status_counts[s] += 1
+            summary = {
+                'total': len(all_items),
+                'confirmed': status_counts.get('Confirmed', 0),
+                'draft': status_counts.get('Draft', 0),
+                'invoiced': status_counts.get('Invoiced', 0),
+                'closed': status_counts.get('Closed', 0),
+                'cancelled': status_counts.get('Cancelled', 0),
+            }
+            return jsonify({
+                'data': data,
+                'total': len(all_items),
+                'summary': summary,
+            }), 200
+
+        # Legacy mode: apply status filter at DB level
+        where = base_where
+        params = list(base_params)
+        if status_filter:
+            where += " AND c.status = @status"
+            params.append({"name": "@status", "value": status_filter})
 
         items = list(sales_orders_container.query_items(
-            query=query,
-            parameters=parameters,
+            query=f"SELECT * FROM c WHERE {where}{order_sql}",
+            parameters=params,
             enable_cross_partition_query=True
         ))
 
@@ -463,19 +500,22 @@ def delete_sales_order(so_id):
         if so.get('status') == 'Invoiced':
             return jsonify({"error": "Cannot archive a sales order that has been invoiced"}), 400
 
-        dependency_data = check_entity_dependencies('sales_order', so_id, request.tenant_id)
-        archive_entity(
+        lifecycle_result = apply_lifecycle_action(
             container=sales_orders_container,
             item=so,
             entity_type='sales_order',
             tenant_id=request.tenant_id,
             user_id=getattr(request, 'user_id', None),
-            reason='archive_on_delete',
+            requested_action='delete',
+            reason='User requested delete',
         )
 
         return jsonify({
             "message": "Sales Order archived successfully",
-            "dependencies": dependency_data,
+            "performedAction": lifecycle_result.get("performedAction"),
+            "status": lifecycle_result.get("status"),
+            "dependencySummary": lifecycle_result.get("dependencySummary", {}),
+            "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
         }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete sales order: {str(e)}"}), 500

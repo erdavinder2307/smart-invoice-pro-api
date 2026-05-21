@@ -1,10 +1,11 @@
 from flask import Blueprint, request, jsonify, make_response
-from smart_invoice_pro.utils.cosmos_client import invoices_container, get_container
+from smart_invoice_pro.utils.cosmos_client import invoices_container, customers_container, get_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity, LIFECYCLE_ARCHIVED
+from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 import copy
 import uuid
@@ -36,6 +37,7 @@ class InvoiceStatus(Enum):
     Paid = 'Paid'
     Overdue = 'Overdue'
     Cancelled = 'Cancelled'
+    Partially_Paid = 'Partially Paid'
 
 
 def _is_archived(item):
@@ -107,6 +109,8 @@ def validate_invoice_payload(data):
     customer_id = data.get('customer_id')
     if customer_id in (None, '', []):
         errors['customer_id'] = 'Customer is required.'
+    elif not str(data.get('customer_name') or '').strip():
+        errors['customer_name'] = 'Customer name is required.'
 
     issue_date = _parse_iso_date(data.get('issue_date'))
     due_date = _parse_iso_date(data.get('due_date'))
@@ -153,6 +157,7 @@ def validate_invoice_payload(data):
     return errors
 
 def validate_invoice_patch(data):
+    # amount_paid, balance_due, payment_history are controlled exclusively by /record-payment
     allowed_fields = {
         'invoice_number': str,
         'customer_id': int,
@@ -165,7 +170,6 @@ def validate_invoice_patch(data):
         'igst_amount': float,
         'total_tax': float,
         'total_amount': float,
-        'amount_paid': float,
         'balance_due': float,
         'status': str,
         'payment_mode': str,
@@ -181,10 +185,46 @@ def validate_invoice_patch(data):
         if k not in allowed_fields:
             errors[k] = 'Unknown field'
             continue
-        if k == 'status' and v not in InvoiceStatus._value2member_map_:
-            errors[k] = f'Invalid status: {v}'
+        if k == 'status':
+            if v not in InvoiceStatus._value2member_map_:
+                errors[k] = f'Invalid status: {v}'
+            elif v in ('Paid', 'Partially Paid'):
+                errors[k] = ("Cannot set status to 'Paid' or 'Partially Paid' directly. "
+                              "Use the /record-payment endpoint.")
         # Optionally add more type checks here
     return errors
+
+
+# ── Stock helper: create a stock transaction for each line item ───────────────
+_STOCK_COMMITTED = {'Issued', 'Partially Paid', 'Paid', 'Overdue'}
+
+def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction):
+    """Create stock ledger entries for invoice items.
+    direction='OUT' decrements stock (invoice activated).
+    direction='IN'  reverses stock  (invoice cancelled/voided/deleted).
+    """
+    try:
+        stock_container = get_container("stock", "/product_id")
+    except Exception:
+        return
+    now = datetime.utcnow().isoformat()
+    for inv_item in items:
+        if not inv_item.get('product_id') or not inv_item.get('quantity'):
+            continue
+        try:
+            stock_container.create_item(body={
+                'id':           str(uuid.uuid4()),
+                'product_id':   str(inv_item['product_id']),
+                'tenant_id':    tenant_id,
+                'quantity':     float(inv_item['quantity']),
+                'type':         direction,
+                'source':       f'Invoice {invoice_number}',
+                'reference_id': invoice_id,
+                'timestamp':    now,
+            })
+        except Exception as e:
+            print(f"[stock] Failed to adjust stock for product "
+                  f"{inv_item.get('product_id')}: {e}")
 
 @api_blueprint.route('/invoices', methods=['POST'])
 @swag_from({
@@ -262,6 +302,20 @@ def create_invoice():
     validation_errors = validate_invoice_payload(data)
     if validation_errors:
         return jsonify({'error': 'Validation failed', 'details': validation_errors}), 400
+
+    # ── Validate customer exists and belongs to this tenant ───────────────────
+    cust_rows = list(customers_container.query_items(
+        query=("SELECT c.id FROM c WHERE c.id = @cid AND c.tenant_id = @tid "
+               "AND (NOT IS_DEFINED(c.is_deleted) OR c.is_deleted = false)"),
+        parameters=[
+            {"name": "@cid", "value": str(data['customer_id'])},
+            {"name": "@tid", "value": request.tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    ))
+    if not cust_rows:
+        return jsonify({'error': 'Validation failed',
+                        'details': {'customer_id': 'Customer not found.'}}), 400
 
     now = datetime.utcnow().isoformat()
 
@@ -387,26 +441,11 @@ def create_invoice():
         'updated_at': data.get('updated_at', now)
     }
     invoices_container.create_item(body=item)
-    
-    # Decrement stock for each item in the invoice
-    stock_container = get_container("stock", "/product_id")
-    for invoice_item in stored_items:
-        if 'product_id' in invoice_item and 'quantity' in invoice_item:
-            try:
-                stock_transaction = {
-                    'id': str(uuid.uuid4()),
-                    'product_id': str(invoice_item['product_id']),
-                    'tenant_id': request.tenant_id,
-                    'quantity': float(invoice_item['quantity']),
-                    'type': 'OUT',
-                    'source': f'Invoice {data["invoice_number"]}',
-                    'reference_id': item['id'],
-                    'timestamp': now
-                }
-                stock_container.create_item(body=stock_transaction)
-            except Exception as e:
-                print(f"Error updating stock for product {invoice_item.get('product_id')}: {str(e)}")
-    
+
+    # Commit stock only when the invoice is immediately Issued (not Draft)
+    if item['status'] in _STOCK_COMMITTED:
+        _adjust_stock(stored_items, item['invoice_number'], item['id'], request.tenant_id, 'OUT')
+
     dispatch_webhook_event(
         tenant_id=request.tenant_id,
         event="invoice.created",
@@ -465,6 +504,9 @@ def bulk_invoice_actions():
                 if archive_mode:
                     if _is_archived(doc):
                         skipped.append({"id": invoice_id, "reason": "already_archived"})
+                        continue
+                    if float(doc.get('amount_paid', 0)) > 0:
+                        skipped.append({"id": invoice_id, "reason": "has_payments"})
                         continue
                     archive_entity(
                         container=invoices_container,
@@ -551,9 +593,22 @@ def list_invoices():
             where.append("(NOT IS_DEFINED(c.status) OR UPPER(c.status) != @archived_status)")
             parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
 
+        # Snapshot base conditions (no status filter) for overdue_count calculation
+        base_where = list(where)
+        base_parameters = list(parameters)
+
         if status_filter:
-            where.append("c.status = @status")
-            parameters.append({"name": "@status", "value": status_filter})
+            if status_filter.lower() == 'overdue':
+                # Match dashboard logic: status='Overdue' OR (open status AND due_date < today)
+                today_iso = datetime.utcnow().date().isoformat()
+                where.append(
+                    "(c.status = 'Overdue' OR "
+                    "(c.status IN ('Issued', 'Partially Paid') AND c.due_date < @overdue_today))"
+                )
+                parameters.append({"name": "@overdue_today", "value": today_iso})
+            else:
+                where.append("c.status = @status")
+                parameters.append({"name": "@status", "value": status_filter})
 
         if search_query:
             where.append(
@@ -644,15 +699,27 @@ def list_invoices():
         total = int(total_items[0]) if total_items else 0
 
         summary = {}
+        base_where_sql = " AND ".join(base_where)
         for status_name in InvoiceStatus._value2member_map_.keys():
-            s_params = [*parameters, {"name": "@summary_status", "value": status_name}]
-            s_query = f"SELECT VALUE COUNT(1) FROM c WHERE {where_sql} AND c.status = @summary_status"
+            s_params = [*base_parameters, {"name": "@summary_status", "value": status_name}]
+            s_query = f"SELECT VALUE COUNT(1) FROM c WHERE {base_where_sql} AND c.status = @summary_status"
             s_result = list(invoices_container.query_items(
                 query=s_query,
                 parameters=s_params,
                 enable_cross_partition_query=True,
             ))
             summary[status_name] = int(s_result[0]) if s_result else 0
+
+        # Effective overdue count: matches dashboard logic (due_date < today AND open status)
+        oc_today = datetime.utcnow().date().isoformat()
+        oc_params = [*base_parameters, {"name": "@oc_today", "value": oc_today}]
+        oc_where_sql = base_where_sql + " AND (c.status = 'Overdue' OR (c.status IN ('Issued', 'Partially Paid') AND c.due_date < @oc_today))"
+        oc_result = list(invoices_container.query_items(
+            query=f"SELECT VALUE COUNT(1) FROM c WHERE {oc_where_sql}",
+            parameters=oc_params,
+            enable_cross_partition_query=True,
+        ))
+        summary['overdue_count'] = int(oc_result[0]) if oc_result else 0
 
         return jsonify({
             "items": sanitize_items(items),
@@ -855,6 +922,17 @@ def get_invoice_dependencies(invoice_id):
 })
 def update_invoice(invoice_id):
     data = request.get_json() or {}
+
+    # ── Payment integrity: strip fields controlled exclusively by /record-payment ─
+    _PAYMENT_LOCKED = ('amount_paid', 'balance_due', 'payment_history')
+    data = {k: v for k, v in data.items() if k not in _PAYMENT_LOCKED}
+    # Prevent manual status jump to Paid/Partially Paid without a payment record
+    if data.get('status') in ('Paid', 'Partially Paid'):
+        return jsonify({'error': 'Validation failed', 'details': {
+            'status': ("Cannot set status to 'Paid' or 'Partially Paid' directly. "
+                       "Use the /record-payment endpoint.")
+        }}), 400
+
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(invoices_container.query_items(
         query=query,
@@ -897,10 +975,12 @@ def update_invoice(invoice_id):
     before_snapshot = copy.deepcopy(item)
     # Update all fields from the request (PUT = full replacement)
     for field in [
-        'invoice_number', 'customer_id', 'issue_date', 'due_date', 'payment_terms',
+        'invoice_number', 'customer_id', 'customer_name', 'customer_email', 'customer_phone',
+        'issue_date', 'due_date', 'payment_terms',
         'subtotal', 'cgst_amount', 'sgst_amount', 'igst_amount', 'total_tax',
         'total_amount', 'amount_paid', 'balance_due', 'status', 'payment_mode',
         'notes', 'terms_conditions', 'is_gst_applicable', 'invoice_type',
+        'subject', 'salesperson', 'place_of_supply', 'gst_treatment',
         'created_at', 'updated_at'
     ]:
         if field in data:
@@ -915,6 +995,26 @@ def update_invoice(invoice_id):
     item['amount_paid'] = amount_paid
     item['balance_due'] = balance_due
     item['updated_at'] = datetime.utcnow().isoformat()
+
+    # ── Stock transition based on status change ───────────────────────────────
+    _old_status = before_snapshot.get('status', 'Draft')
+    _new_status = item.get('status', _old_status)
+    _old_committed = _old_status in _STOCK_COMMITTED
+    _new_committed = _new_status in _STOCK_COMMITTED
+    _inv_num = item.get('invoice_number', '')
+    if not _old_committed and _new_committed:
+        # e.g. Draft → Issued: commit stock
+        _adjust_stock(normalized_items, _inv_num, invoice_id, request.tenant_id, 'OUT')
+    elif _old_committed and not _new_committed:
+        # e.g. Issued → Cancelled: reverse stock
+        _adjust_stock(before_snapshot.get('items', []), _inv_num, invoice_id, request.tenant_id, 'IN')
+    elif _old_committed and _new_committed and (
+        before_snapshot.get('items') != normalized_items
+    ):
+        # Issued and items changed: delta — reverse old items, apply new
+        _adjust_stock(before_snapshot.get('items', []), _inv_num, invoice_id, request.tenant_id, 'IN')
+        _adjust_stock(normalized_items, _inv_num, invoice_id, request.tenant_id, 'OUT')
+
     invoices_container.replace_item(item=item['id'], body=item)
     log_audit("invoice", "update", invoice_id, before_snapshot, item,
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
@@ -958,20 +1058,34 @@ def delete_invoice(invoice_id):
     if _is_archived(item):
         return jsonify({'message': 'Invoice already archived'}), 200
 
-    dependency_data = check_entity_dependencies('invoice', invoice_id, request.tenant_id)
-    archived = archive_entity(
+    # ── Block archiving invoices that have recorded payments ──────────────────
+    if float(item.get('amount_paid', 0)) > 0:
+        return jsonify({'error': (
+            'Cannot archive an invoice with recorded payments. '
+            'Void or reverse the payments first.'
+        )}), 409
+
+    # Reverse stock for committed invoices before archiving
+    if item.get('status') in _STOCK_COMMITTED:
+        _adjust_stock(item.get('items', []), item.get('invoice_number', ''),
+                      invoice_id, request.tenant_id, 'IN')
+
+    lifecycle_result = apply_lifecycle_action(
         container=invoices_container,
         item=item,
         entity_type='invoice',
         tenant_id=request.tenant_id,
         user_id=getattr(request, 'user_id', None),
-        reason='archive_on_delete',
+        requested_action='delete',
+        reason='User requested delete',
     )
 
     return jsonify({
         'message': 'Invoice archived successfully',
-        'invoice': sanitize_item(archived),
-        'dependencies': dependency_data,
+        'performedAction': lifecycle_result.get('performedAction'),
+        'status': lifecycle_result.get('status'),
+        'dependencySummary': lifecycle_result.get('dependencySummary', {}),
+        'hardDeleteAllowed': lifecycle_result.get('hardDeleteAllowed', False),
     })
 
 
@@ -1414,6 +1528,73 @@ def record_payment(invoice_id):
 
     except Exception as e:
         return jsonify({'error': f'Failed to record payment: {str(e)}'}), 500
+
+
+# ── Void (cancel) an invoice ─────────────────────────────────────────────────
+@api_blueprint.route('/invoices/<invoice_id>/void', methods=['POST'])
+def void_invoice(invoice_id):
+    """Void an issued invoice: sets status to Cancelled with a mandatory reason."""
+    data = request.get_json() or {}
+    reason = str(data.get('reason', '')).strip()
+    if not reason:
+        return jsonify({'error': 'Validation failed', 'details': {'reason': 'Reason is required'}}), 400
+
+    VOIDABLE_STATUSES = {'Issued', 'Partially Paid', 'Overdue'}
+
+    try:
+        items = list(invoices_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": invoice_id}],
+            enable_cross_partition_query=True,
+        ))
+        if not items:
+            return jsonify({'error': 'Invoice not found'}), 404
+
+        inv = items[0]
+        if inv.get('tenant_id') != request.tenant_id:
+            return jsonify({'error': 'Forbidden'}), 403
+
+        before_snapshot = copy.deepcopy(inv)
+
+        if inv.get('status') not in VOIDABLE_STATUSES:
+            return jsonify({
+                'error': (
+                    f"Invoice cannot be voided. Current status: {inv.get('status')}. "
+                    f"Only {', '.join(sorted(VOIDABLE_STATUSES))} invoices can be voided."
+                )
+            }), 409
+
+        inv['status']     = 'Cancelled'
+        inv['void_reason'] = reason
+        inv['voided_at']  = datetime.utcnow().isoformat()
+        inv['voided_by']  = getattr(request, 'user_id', None)
+        inv['updated_at'] = datetime.utcnow().isoformat()
+
+        # Reverse stock committed when the invoice was issued
+        _adjust_stock(inv.get('items', []), inv.get('invoice_number', ''),
+                      invoice_id, request.tenant_id, 'IN')
+
+        invoices_container.replace_item(item=inv['id'], body=inv)
+
+        try:
+            log_audit(
+                'invoice', 'void', invoice_id,
+                before={'status': before_snapshot.get('status')},
+                after={'status': 'Cancelled', 'void_reason': reason},
+                user_id=getattr(request, 'user_id', None),
+                tenant_id=request.tenant_id,
+            )
+        except Exception:
+            pass  # Non-critical: void already succeeded
+
+        return jsonify({
+            'message':    'Invoice voided successfully',
+            'invoice_id': invoice_id,
+            'status':     'Cancelled',
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to void invoice: {str(e)}'}), 500
 
 
 # ── Send invoice email to customer ───────────────────────────────────────────
