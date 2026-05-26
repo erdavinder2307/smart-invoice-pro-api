@@ -249,3 +249,62 @@ class TestBulkQuotes:
     def test_bulk_invalid_payload(self, client, headers_a):
         resp = client.post("/api/quotes/bulk", json={"action": "delete", "ids": []}, headers=headers_a)
         assert resp.status_code == 400
+
+
+class TestExportQuotes:
+    """GET /quotes/export — CSV download tests."""
+
+    @patch("smart_invoice_pro.api.quotes_api.quotes_container")
+    def test_export_returns_csv(self, mock_ctr, client, headers_a):
+        """Happy path — returns text/csv with correct header row and data."""
+        mock_ctr.query_items.return_value = [
+            {
+                "id": "qt-exp-001",
+                "tenant_id": TENANT_A,
+                "quote_number": "QT-0001",
+                "customer_name": "Test Corp",
+                "issue_date": "2026-05-01",
+                "expiry_date": "2026-05-31",
+                "status": "Draft",
+                "subtotal": 5000,
+                "total_tax": 900,
+                "total_amount": 5900,
+            }
+        ]
+
+        resp = client.get("/api/quotes/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        body = resp.data.decode("utf-8")
+        assert "Quote #" in body
+        assert "Customer" in body
+        assert "QT-0001" in body
+        assert "Test Corp" in body
+
+    @patch("smart_invoice_pro.api.quotes_api.quotes_container")
+    def test_export_empty_returns_csv_headers_only(self, mock_ctr, client, headers_a):
+        """Empty result still returns a valid CSV with just the header row."""
+        mock_ctr.query_items.return_value = []
+
+        resp = client.get("/api/quotes/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        body = resp.data.decode("utf-8")
+        assert "Quote #" in body
+        lines = [line for line in body.strip().splitlines() if line]
+        assert len(lines) == 1
+
+    @patch("smart_invoice_pro.api.quotes_api.quotes_container")
+    def test_export_respects_status_filter(self, mock_ctr, client, headers_a):
+        """Status filter param is passed through to the query."""
+        mock_ctr.query_items.return_value = []
+
+        resp = client.get("/api/quotes/export?status=Accepted", headers=headers_a)
+
+        assert resp.status_code == 200
+        call_args = mock_ctr.query_items.call_args
+        query_str = call_args[1].get("query") or call_args[0][0]
+        assert "@status" in query_str or "status" in str(call_args)
+

@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 from flasgger import swag_from
 import uuid
 from datetime import datetime
@@ -213,6 +213,8 @@ def get_expenses():
         if sort_order not in ('ASC', 'DESC'):
             sort_order = 'DESC'
 
+        billable_filter = _is_truthy(request.args.get('billable'))
+
         # Build query with tenant isolation
         lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
         query = "SELECT * FROM c WHERE c.tenant_id = @tenant_id"
@@ -228,6 +230,9 @@ def get_expenses():
         if category:
             query += " AND c.category = @category"
             parameters.append({"name": "@category", "value": category})
+
+        if billable_filter:
+            query += " AND c.billable = true"
 
         if start_date:
             query += " AND c.date >= @start_date"
@@ -253,10 +258,16 @@ def get_expenses():
             1 for e in items
             if str(e.get('status') or e.get('payment_status') or '').strip().lower() == 'paid'
         )
+        billable_count = sum(
+            1 for e in items
+            if e.get('billable') is True or str(e.get('billable', '')).lower() in ('true', '1', 'yes')
+        )
         summary = {
             'total': len(items),
             'paid': paid_count,
             'pending': len(items) - paid_count,
+            'billable': billable_count,
+            'archived': 0,
         }
         return jsonify({
             'data': items,
@@ -265,6 +276,79 @@ def get_expenses():
         }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch expenses: {str(e)}"}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPORT EXPENSES AS CSV
+# ─────────────────────────────────────────────────────────────────────────────
+@expenses_blueprint.route('/expenses/export', methods=['GET'])
+def export_expenses():
+    """Export expenses for the current tenant as a CSV file."""
+    import csv
+    import io as _io
+
+    category_filter = (request.args.get('category') or '').strip()
+    lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
+    start_date = (request.args.get('start_date') or '').strip()
+    end_date = (request.args.get('end_date') or '').strip()
+
+    where_parts = ["c.tenant_id = @tenant_id"]
+    parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
+    if lifecycle == 'archived':
+        where_parts.append("UPPER(c.lifecycle_status) = @archived_status")
+        parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+    elif lifecycle != 'all':
+        where_parts.append("(NOT IS_DEFINED(c.lifecycle_status) OR UPPER(c.lifecycle_status) != @archived_status)")
+        parameters.append({"name": "@archived_status", "value": "ARCHIVED"})
+
+    if category_filter and category_filter.lower() != 'all':
+        where_parts.append("c.category = @category")
+        parameters.append({"name": "@category", "value": category_filter})
+
+    if start_date:
+        where_parts.append("c.date >= @start_date")
+        parameters.append({"name": "@start_date", "value": start_date})
+
+    if end_date:
+        where_parts.append("c.date <= @end_date")
+        parameters.append({"name": "@end_date", "value": end_date})
+
+    query = "SELECT * FROM c WHERE " + " AND ".join(where_parts) + " ORDER BY c.date DESC"
+
+    try:
+        items = list(expenses_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        ))
+    except Exception as e:
+        return jsonify({"error": f"Failed to export expenses: {str(e)}"}), 500
+
+    output = _io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Date", "Vendor / Payee", "Category", "Amount", "Currency",
+                     "Status", "Payment Mode", "Paid Through", "Billable", "Notes"])
+    for exp in items:
+        writer.writerow([
+            exp.get("date", ""),
+            exp.get("vendor_name", ""),
+            exp.get("category", ""),
+            exp.get("amount", 0),
+            exp.get("currency", "INR"),
+            exp.get("status") or exp.get("payment_status", ""),
+            exp.get("payment_mode", ""),
+            exp.get("paid_through", ""),
+            "Yes" if exp.get("billable") else "No",
+            exp.get("notes", ""),
+        ])
+
+    csv_data = output.getvalue()
+    response = make_response(csv_data)
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = "attachment; filename=expenses-export.csv"
+    return response
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET EXPENSE BY ID

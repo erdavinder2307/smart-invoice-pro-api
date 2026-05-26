@@ -173,3 +173,76 @@ class TestExpenseStats:
             data = resp.get_json()
             assert data["total_amount"] == 0
             assert data["average_amount"] == 0
+
+
+class TestExportExpenses:
+    """GET /api/expenses/export — CSV download tests."""
+
+    @patch("smart_invoice_pro.api.expenses_api.expenses_container")
+    def test_export_returns_csv(self, mock_ctr, client, headers_a):
+        """Happy path — returns text/csv with correct header row and data row."""
+        mock_ctr.query_items.return_value = [
+            {
+                "id": "exp-export-001",
+                "tenant_id": TENANT_A,
+                "vendor_name": "Staples",
+                "category": "Office Supplies",
+                "amount": 2500,
+                "currency": "INR",
+                "date": "2026-05-01",
+                "status": "Pending",
+                "payment_mode": "Cash",
+                "paid_through": "Cash",
+                "billable": False,
+                "notes": "",
+            }
+        ]
+
+        resp = client.get("/api/expenses/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        body = resp.data.decode("utf-8")
+        assert "Date" in body
+        assert "Vendor / Payee" in body
+        assert "Staples" in body
+        assert "Office Supplies" in body
+
+    @patch("smart_invoice_pro.api.expenses_api.expenses_container")
+    def test_export_empty_returns_header_row_only(self, mock_ctr, client, headers_a):
+        """Empty result still returns a valid CSV with just the header row."""
+        mock_ctr.query_items.return_value = []
+
+        resp = client.get("/api/expenses/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        body = resp.data.decode("utf-8")
+        assert "Date" in body
+        lines = [line for line in body.strip().splitlines() if line]
+        assert len(lines) == 1
+
+    @patch("smart_invoice_pro.api.expenses_api.expenses_container")
+    def test_export_respects_category_filter(self, mock_ctr, client, headers_a):
+        """Category filter param is wired into the Cosmos query."""
+        mock_ctr.query_items.return_value = []
+
+        resp = client.get("/api/expenses/export?category=Travel", headers=headers_a)
+
+        assert resp.status_code == 200
+        call_kwargs = mock_ctr.query_items.call_args[1]
+        params_list = call_kwargs.get("parameters", [])
+        param_values = [p["value"] for p in params_list]
+        assert "Travel" in param_values
+
+    @patch("smart_invoice_pro.api.expenses_api.expenses_container")
+    def test_export_content_disposition_header(self, mock_ctr, client, headers_a):
+        """Response includes Content-Disposition attachment header."""
+        mock_ctr.query_items.return_value = []
+
+        resp = client.get("/api/expenses/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        disposition = resp.headers.get("Content-Disposition", "")
+        assert "attachment" in disposition
+        assert "expenses-export.csv" in disposition

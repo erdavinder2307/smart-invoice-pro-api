@@ -731,6 +731,106 @@ def list_invoices():
     except Exception as e:
         return jsonify({"error": f"Failed to fetch invoices: {str(e)}"}), 500
 
+
+@api_blueprint.route('/invoices/export', methods=['GET'])
+def export_invoices_csv():
+    """Export invoices as a CSV file. Accepts same filter params as list endpoint."""
+    import csv
+    import io as _io
+    try:
+        tenant_id = request.tenant_id
+        status_filter = request.args.get('status')
+        lifecycle = (request.args.get('lifecycle') or 'active').strip().lower()
+        search_query = (request.args.get('q') or '').strip()
+        date_range = (request.args.get('date_range') or '').strip().lower()
+        date_from = (request.args.get('date_from') or '').strip()
+        date_to = (request.args.get('date_to') or '').strip()
+
+        where = ["c.tenant_id = @tenant_id"]
+        parameters = [{"name": "@tenant_id", "value": tenant_id}]
+
+        if lifecycle == 'archived':
+            where.append("UPPER(c.status) = @archived_status")
+            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
+        elif lifecycle != 'all':
+            where.append("(NOT IS_DEFINED(c.status) OR UPPER(c.status) != @archived_status)")
+            parameters.append({"name": "@archived_status", "value": LIFECYCLE_ARCHIVED})
+
+        if status_filter:
+            where.append("c.status = @status")
+            parameters.append({"name": "@status", "value": status_filter})
+
+        if search_query:
+            where.append(
+                "(CONTAINS(LOWER(c.invoice_number), @q) OR CONTAINS(LOWER(c.customer_name), @q))"
+            )
+            parameters.append({"name": "@q", "value": search_query.lower()})
+
+        if date_range:
+            today = datetime.utcnow().date()
+            start_date = None
+            end_date = None
+            if date_range == 'this_week':
+                start_date = today - timedelta(days=today.weekday())
+                end_date = start_date + timedelta(days=6)
+            elif date_range == 'this_month':
+                start_date = today.replace(day=1)
+                next_month = (start_date.replace(month=start_date.month % 12 + 1, day=1)
+                              if start_date.month < 12 else start_date.replace(year=start_date.year + 1, month=1, day=1))
+                end_date = next_month - timedelta(days=1)
+            elif date_range == 'this_year':
+                start_date = today.replace(month=1, day=1)
+                end_date = today.replace(month=12, day=31)
+            elif date_range == 'custom':
+                if date_from:
+                    start_date = datetime.fromisoformat(date_from).date()
+                if date_to:
+                    end_date = datetime.fromisoformat(date_to).date()
+            if start_date:
+                where.append("c.issue_date >= @date_from")
+                parameters.append({"name": "@date_from", "value": start_date.isoformat()})
+            if end_date:
+                where.append("c.issue_date <= @date_to")
+                parameters.append({"name": "@date_to", "value": end_date.isoformat()})
+
+        where_sql = " AND ".join(where)
+        query = f"SELECT * FROM c WHERE {where_sql} ORDER BY c.issue_date DESC"
+        items = list(invoices_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        ))
+
+        output = _io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Invoice #", "Customer", "Issue Date", "Due Date", "Status",
+            "Subtotal", "Tax", "Total", "Amount Paid", "Balance Due"
+        ])
+        for inv in items:
+            writer.writerow([
+                inv.get("invoice_number", ""),
+                inv.get("customer_name", ""),
+                inv.get("issue_date", ""),
+                inv.get("due_date", ""),
+                inv.get("status", ""),
+                inv.get("subtotal", 0),
+                inv.get("total_tax", 0),
+                inv.get("total_amount", 0),
+                inv.get("amount_paid", 0),
+                inv.get("balance_due", 0),
+            ])
+
+        csv_data = output.getvalue()
+        response = make_response(csv_data)
+        response.headers["Content-Type"] = "text/csv; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=invoices-export.csv"
+        return response
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to export invoices: {str(e)}"}), 500
+
+
 # @api_blueprint.route('/invoices/<customer_id>', methods=['GET'])
 # @swag_from({
 #     'tags': ['Invoices'],
