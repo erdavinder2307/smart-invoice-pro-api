@@ -359,6 +359,70 @@ def get_quotes():
         return jsonify({"error": f"Failed to fetch quotes: {str(e)}"}), 500
 
 
+@quotes_blueprint.route('/quotes/export', methods=['GET'])
+def export_quotes():
+    """Export quotes as CSV for the authenticated tenant."""
+    import csv
+    import io as _io
+
+    status_filter = request.args.get('status')
+    lifecycle = str(request.args.get('lifecycle', 'active')).strip().lower()
+    search_query = (request.args.get('q') or '').strip()
+    date_from = (request.args.get('date_from') or '').strip()
+    date_to = (request.args.get('date_to') or '').strip()
+
+    where = ["c.tenant_id = @tenant_id"]
+    parameters = [{"name": "@tenant_id", "value": request.tenant_id}]
+
+    if status_filter and status_filter != 'All':
+        where.append("c.status = @status")
+        parameters.append({"name": "@status", "value": status_filter})
+    if search_query:
+        where.append("(CONTAINS(LOWER(c.quote_number), @q) OR CONTAINS(LOWER(c.customer_name), @q))")
+        parameters.append({"name": "@q", "value": search_query.lower()})
+    if date_from:
+        where.append("c.issue_date >= @date_from")
+        parameters.append({"name": "@date_from", "value": date_from})
+    if date_to:
+        where.append("c.issue_date <= @date_to")
+        parameters.append({"name": "@date_to", "value": date_to})
+
+    where_sql = " AND ".join(where)
+    query = f"SELECT * FROM c WHERE {where_sql} ORDER BY c.created_at DESC"
+    try:
+        items = list(quotes_container.query_items(
+            query=query, parameters=parameters, enable_cross_partition_query=True
+        ))
+    except Exception as e:
+        return jsonify({"error": f"Failed to export quotes: {str(e)}"}), 500
+
+    if lifecycle == 'archived':
+        items = [i for i in items if _is_archived(i)]
+    elif lifecycle != 'all':
+        items = [i for i in items if not _is_archived(i)]
+
+    output = _io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Quote #", "Customer", "Issue Date", "Expiry Date", "Status", "Subtotal", "Tax", "Total"])
+    for q in items:
+        writer.writerow([
+            q.get("quote_number", ""),
+            q.get("customer_name", ""),
+            q.get("issue_date", ""),
+            q.get("expiry_date", ""),
+            q.get("status", ""),
+            q.get("subtotal", 0),
+            q.get("total_tax", 0),
+            q.get("total_amount", 0),
+        ])
+
+    csv_data = output.getvalue()
+    response = make_response(csv_data)
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = "attachment; filename=quotes-export.csv"
+    return response
+
+
 @quotes_blueprint.route('/quotes/bulk', methods=['POST'])
 @quotes_blueprint.route('/quotes/bulk-archive', methods=['POST'])
 def bulk_quote_actions():

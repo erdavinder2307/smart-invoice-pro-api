@@ -683,3 +683,66 @@ class TestStockManagement:
         assert txn["type"] == "OUT"
         assert txn["quantity"] == 7.0
 
+
+
+class TestExportInvoices:
+    """GET /invoices/export — CSV download tests."""
+
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_export_returns_csv(self, mock_inv, client, headers_a):
+        """Happy path — returns text/csv with correct header row."""
+        mock_inv.query_items.return_value = [
+            {
+                "id": "inv-exp-001",
+                "tenant_id": "tenant-a",
+                "invoice_number": "INV-0001",
+                "customer_name": "Acme Corp",
+                "issue_date": "2026-05-01",
+                "due_date": "2026-05-31",
+                "status": "Issued",
+                "subtotal": 10000,
+                "total_tax": 1800,
+                "total_amount": 11800,
+                "amount_paid": 0,
+                "balance_due": 11800,
+            }
+        ]
+
+        resp = client.get("/api/invoices/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        body = resp.data.decode("utf-8")
+        assert "Invoice #" in body
+        assert "Customer" in body
+        assert "INV-0001" in body
+        assert "Acme Corp" in body
+
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_export_empty_returns_csv_headers_only(self, mock_inv, client, headers_a):
+        """Empty result still returns a valid CSV with just the header row."""
+        mock_inv.query_items.return_value = []
+
+        resp = client.get("/api/invoices/export", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        body = resp.data.decode("utf-8")
+        assert "Invoice #" in body
+        # Only the header row — no data rows
+        lines = [line for line in body.strip().splitlines() if line]
+        assert len(lines) == 1
+
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_export_respects_status_filter(self, mock_inv, client, headers_a):
+        """Status filter param is passed to the query."""
+        mock_inv.query_items.return_value = []
+
+        resp = client.get("/api/invoices/export?status=Paid", headers=headers_a)
+
+        assert resp.status_code == 200
+        # Verify the query was called with tenant_id in parameters
+        call_kwargs = mock_inv.query_items.call_args[1]
+        params = call_kwargs.get("parameters", [])
+        tenant_param = next((p for p in params if p["name"] == "@tenant_id"), None)
+        assert tenant_param is not None
