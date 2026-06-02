@@ -107,6 +107,19 @@ class TestCreateBankAccount:
         resp = client.post("/api/bank-accounts", json={}, headers=headers_a)
         assert resp.status_code == 400
 
+    def test_create_honors_inactive_status(self, client, headers_a):
+        with patch("smart_invoice_pro.api.bank_accounts_api.bank_accounts_container") as mock_ctr:
+            payload = {
+                "bank_name": "ICICI",
+                "account_name": "Secondary",
+                "account_type": "current",
+                "status": "inactive",
+            }
+            resp = client.post("/api/bank-accounts", json=payload, headers=headers_a)
+            assert resp.status_code == 201
+            created_doc = mock_ctr.create_item.call_args.kwargs["body"]
+            assert created_doc["status"] == "inactive"
+
 
 class TestListBankAccounts:
     """GET /api/bank-accounts tests."""

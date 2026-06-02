@@ -23,3 +23,8 @@ faker>=20.0.0
 pytest>=7.0.0
 pytest-cov>=4.0.0
 user-agents==2.2.0
+azure-storage-blob==12.25.1
+anthropic>=0.40.0
+openpyxl>=3.0.0
+pdfplumber>=0.9.0
+msoffcrypto-tool>=5.0.0

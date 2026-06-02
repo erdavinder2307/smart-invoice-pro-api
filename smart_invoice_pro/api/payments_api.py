@@ -226,11 +226,22 @@ def zoho_payments_webhook():
                 ))
                 if inv_items:
                     inv = inv_items[0]
-                    inv["status"]      = "Paid"
-                    inv["amount_paid"] = amount_paid
-                    inv["balance_due"] = max(0.0, float(inv.get("total_amount", 0)) - amount_paid)
+                    total_amount       = max(0.0, float(inv.get("total_amount", 0)))
+                    new_amount_paid    = round(float(inv.get("amount_paid", 0)) + amount_paid, 2)
+                    new_balance_due    = round(max(0.0, total_amount - new_amount_paid), 2)
+                    inv["amount_paid"] = new_amount_paid
+                    inv["balance_due"] = new_balance_due
+                    inv["status"]      = "Paid" if new_balance_due == 0 else "Partially Paid"
                     inv["payment_mode"]= "Zoho Payments (Online)"
                     inv["updated_at"]  = datetime.utcnow().isoformat()
+                    # Append to payment history so it stays in sync with amount_paid
+                    history_entry = {
+                        "date":    datetime.utcnow().strftime("%Y-%m-%d"),
+                        "amount":  amount_paid,
+                        "method":  "Zoho Payments (Online)",
+                        "note":    f"Online payment via Zoho (txn: {zoho_txn_id or 'N/A'})",
+                    }
+                    inv.setdefault("payment_history", []).append(history_entry)
                     invoices_container.replace_item(
                         item=inv["id"], body=inv,
                         partition_key=inv.get("customer_id")

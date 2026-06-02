@@ -5,12 +5,19 @@ All Cosmos DB containers are mocked at the module level so that
 no test ever hits a real database.
 """
 import datetime
+import os
 import sys
 import uuid
 from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
+
+# ── Force synchronous import processing in all tests ────────────────────────
+# load_dotenv() in cosmos_client.py (override=False) won't overwrite values
+# already set in os.environ, so setting this here ensures tests are
+# deterministic even when .env contains BANK_IMPORT_ASYNC=true.
+os.environ.setdefault("BANK_IMPORT_ASYNC", "false")
 
 # ── Mock CosmosClient before any application module is imported ─────────────
 # cosmos_client.py creates a real CosmosClient at import time, which fails
@@ -155,6 +162,11 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.bank_reconciliation_api.bank_txns_container",
     "smart_invoice_pro.api.bank_reconciliation_api.invoices_container",
     "smart_invoice_pro.api.bank_reconciliation_api.expenses_container",
+    # Bank import workflow
+    "smart_invoice_pro.services.bank_import.import_workflow_service.bank_import_batches_container",
+    "smart_invoice_pro.services.bank_import.import_workflow_service.bank_import_jobs_container",
+    "smart_invoice_pro.services.bank_import.import_workflow_service.bank_import_rows_container",
+    "smart_invoice_pro.services.bank_import.import_workflow_service.bank_import_artifacts_container",
     # Roles (purchase orders for approval workflow)
     "smart_invoice_pro.api.roles_api.purchase_orders_container",
     # Roles permissions

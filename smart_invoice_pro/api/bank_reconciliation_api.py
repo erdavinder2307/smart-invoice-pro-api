@@ -1,5 +1,18 @@
 from flask import Blueprint, request, jsonify
+from smart_invoice_pro.services.bank_import.import_workflow_service import (
+    create_import_batch,
+    delete_batch,
+    get_batch,
+    get_job,
+    list_batches,
+    list_rows,
+    mark_batch_approved,
+    update_row,
+)
+from smart_invoice_pro.utils.audit_logger import log_audit_event
 from smart_invoice_pro.utils.cosmos_client import get_container
+from smart_invoice_pro.utils.domain_events import record_domain_event
+from smart_invoice_pro.utils.notifications import create_notification
 import uuid
 from datetime import datetime
 import csv
@@ -17,6 +30,31 @@ expenses_container     = get_container("expenses", "/id")
 def get_user_id():
     uid = getattr(request, 'user_id', None)
     return uid  # None -> caller returns 401
+
+
+def get_tenant_id():
+    return getattr(request, 'tenant_id', None)
+
+
+def _require_actor():
+    user_id = get_user_id()
+    tenant_id = get_tenant_id()
+    if not user_id or not tenant_id:
+        return None, None, (jsonify({'error': 'Unauthorized'}), 401)
+    return user_id, tenant_id, None
+
+
+def _tenant_legacy_clause(tenant_id):
+    if not tenant_id:
+        return ''
+    return f" AND (NOT IS_DEFINED(c.tenant_id) OR c.tenant_id = '{tenant_id}')"
+
+
+def _txn_lookup_query(txn_id, user_id, tenant_id):
+    return (
+        f"SELECT * FROM c WHERE c.id = '{txn_id}' AND c.user_id = '{user_id}'"
+        f"{_tenant_legacy_clause(tenant_id)}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +159,7 @@ def _parse_qif(text):
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTO-MATCH LOGIC
 # ─────────────────────────────────────────────────────────────────────────────
-def _auto_match(txn, user_id):
+def _auto_match(txn, user_id, tenant_id=None):
     """Try to match a bank transaction to an unpaid invoice or expense."""
     amt = abs(txn['amount'])
     if amt == 0:
@@ -129,12 +167,10 @@ def _auto_match(txn, user_id):
 
     # Match against unpaid invoices (balance_due within 1%)
     try:
-        inv_query = (
-            f"SELECT c.id, c.invoice_number, c.balance_due, c.customer_id "
-            f"FROM c WHERE c.user_id = '{user_id}' "
-            f"AND c.status IN ('Issued','Overdue') "
-            f"AND c.balance_due > 0"
-        )
+        inv_query = f"SELECT c.id, c.invoice_number, c.balance_due, c.customer_id FROM c WHERE c.user_id = '{user_id}' "
+        if tenant_id:
+            inv_query += f"AND c.tenant_id = '{tenant_id}' "
+        inv_query += "AND c.status IN ('Issued','Overdue') AND c.balance_due > 0"
         invoices = list(invoices_container.query_items(
             query=inv_query, enable_cross_partition_query=True
         ))
@@ -147,10 +183,9 @@ def _auto_match(txn, user_id):
 
     # Match against expenses by amount (within 1%)
     try:
-        exp_query = (
-            f"SELECT c.id, c.vendor_name, c.amount "
-            f"FROM c WHERE 1=1"
-        )
+        exp_query = "SELECT c.id, c.vendor_name, c.amount FROM c WHERE 1=1 "
+        if tenant_id:
+            exp_query += f"AND c.tenant_id = '{tenant_id}' "
         exps = list(expenses_container.query_items(
             query=exp_query, enable_cross_partition_query=True
         ))
@@ -164,6 +199,265 @@ def _auto_match(txn, user_id):
     return None, None
 
 
+def _persist_approved_bank_transaction(row_doc, user_id, tenant_id):
+    now = datetime.utcnow().isoformat() + 'Z'
+    match_type, match_id = _auto_match(
+        {
+            'amount': row_doc.get('amount', 0),
+            'description': row_doc.get('description', ''),
+            'date': row_doc.get('normalized_date', ''),
+        },
+        user_id,
+        tenant_id,
+    )
+    txn_doc = {
+        'id': str(uuid.uuid4()),
+        'user_id': user_id,
+        'tenant_id': tenant_id,
+        'bank_account_id': row_doc.get('bank_account_id'),
+        'date': row_doc.get('normalized_date'),
+        'description': row_doc.get('description'),
+        'amount': row_doc.get('amount'),
+        'currency': row_doc.get('currency', 'INR'),
+        'import_batch_id': row_doc.get('batch_id'),
+        'import_row_id': row_doc.get('id'),
+        'source': 'bank_import_review',
+        'match_status': 'matched' if match_id else 'unmatched',
+        'match_type': match_type,
+        'match_id': match_id,
+        'created_at': now,
+        'updated_at': now,
+    }
+    bank_txns_container.create_item(body=txn_doc)
+    return txn_doc
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches', methods=['POST'])
+def create_statement_import_batch():
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    upload = request.files['file']
+    if not upload.filename:
+        return jsonify({'error': 'Empty filename'}), 400
+
+    file_bytes = upload.read()
+    if not file_bytes:
+        return jsonify({'error': 'Empty file'}), 400
+
+    bank_account_id = (request.form.get('bank_account_id') or '').strip()
+    pdf_password = (request.form.get('pdf_password') or request.form.get('file_password') or '').strip()
+
+    try:
+        batch_doc, job_doc, row_docs = create_import_batch(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            bank_account_id=bank_account_id,
+            filename=upload.filename,
+            content_type=upload.content_type or 'application/octet-stream',
+            file_bytes=file_bytes,
+            pdf_password=pdf_password,
+        )
+    except ValueError as exc:
+        err_str = str(exc)
+        if err_str.startswith('PDF_PASSWORD_REQUIRED'):
+            return jsonify({
+                'error': 'This PDF is password-protected. Please provide the password.',
+                'error_code': 'FILE_PASSWORD_REQUIRED',
+            }), 400
+        if err_str.startswith('EXCEL_PASSWORD_REQUIRED'):
+            return jsonify({
+                'error': 'This Excel file is password-protected. Please provide the password.',
+                'error_code': 'FILE_PASSWORD_REQUIRED',
+            }), 400
+        return jsonify({'error': err_str}), 400
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+
+    log_audit_event(
+        {
+            'action': 'BANK_IMPORT_BATCH_CREATED',
+            'entity': 'bank_import_batch',
+            'entity_id': batch_doc['id'],
+            'after': {
+                'filename': batch_doc.get('filename'),
+                'row_count': batch_doc.get('row_count'),
+                'status': batch_doc.get('status'),
+            },
+            'metadata': {
+                'job_id': job_doc.get('id'),
+                'workflow_mode': batch_doc.get('workflow_mode'),
+                'job_status': job_doc.get('status'),
+            },
+        }
+    )
+    record_domain_event(
+        'BANK_IMPORT_BATCH_CREATED',
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='bank_import_batch',
+        entity_id=batch_doc['id'],
+        payload={'job_id': job_doc['id'], 'row_count': batch_doc.get('row_count', 0)},
+    )
+    create_notification(
+        tenant_id,
+        'bank_import_started' if job_doc.get('status') != 'completed' else 'bank_import_ready',
+        'Bank import processing started' if job_doc.get('status') != 'completed' else 'Bank import ready for review',
+        (
+            f"{batch_doc['filename']} has been queued for processing."
+            if job_doc.get('status') != 'completed'
+            else f"{batch_doc['filename']} is ready for review."
+        ),
+        entity_id=batch_doc['id'],
+        entity_type='bank_import_batch',
+        user_id=user_id,
+    )
+    return jsonify({'batch': batch_doc, 'job': job_doc, 'rows': row_docs}), 201
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches', methods=['GET'])
+def list_statement_import_batches():
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    bank_account_id = request.args.get('bank_account_id') or None
+    try:
+        return jsonify(list_batches(tenant_id=tenant_id, bank_account_id=bank_account_id)), 200
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>', methods=['GET'])
+def get_statement_import_batch(batch_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    batch_doc = get_batch(tenant_id=tenant_id, batch_id=batch_id)
+    if not batch_doc:
+        return jsonify({'error': 'Import batch not found'}), 404
+    return jsonify(batch_doc), 200
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>', methods=['DELETE'])
+def delete_statement_import_batch(batch_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    try:
+        deleted = delete_batch(tenant_id=tenant_id, batch_id=batch_id)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 409
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+
+    if not deleted:
+        return jsonify({'error': 'Import batch not found'}), 404
+    return jsonify({'deleted': True, 'batch_id': batch_id}), 200
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-jobs/<job_id>', methods=['GET'])
+def get_statement_import_job(job_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    job_doc = get_job(tenant_id=tenant_id, job_id=job_id)
+    if not job_doc:
+        return jsonify({'error': 'Import job not found'}), 404
+    return jsonify(job_doc), 200
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>/rows', methods=['GET'])
+def get_statement_import_rows(batch_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    if not get_batch(tenant_id=tenant_id, batch_id=batch_id):
+        return jsonify({'error': 'Import batch not found'}), 404
+    return jsonify(list_rows(tenant_id=tenant_id, batch_id=batch_id)), 200
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>/rows/<row_id>', methods=['PATCH'])
+def update_statement_import_row(batch_id, row_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    updated_doc = update_row(
+        tenant_id=tenant_id,
+        batch_id=batch_id,
+        row_id=row_id,
+        updates=request.get_json() or {},
+    )
+    if not updated_doc:
+        return jsonify({'error': 'Import row not found'}), 404
+
+    log_audit_event(
+        {
+            'action': 'BANK_IMPORT_ROW_UPDATED',
+            'entity': 'bank_import_row',
+            'entity_id': row_id,
+            'after': updated_doc,
+            'metadata': {'batch_id': batch_id},
+        }
+    )
+    return jsonify(updated_doc), 200
+
+
+@bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>/approve', methods=['POST'])
+def approve_statement_import_batch(batch_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    batch_doc = get_batch(tenant_id=tenant_id, batch_id=batch_id)
+    if not batch_doc:
+        return jsonify({'error': 'Import batch not found'}), 404
+
+    row_docs = list_rows(tenant_id=tenant_id, batch_id=batch_id)
+    approved_rows = [row for row in row_docs if row.get('review_status') != 'rejected']
+    created_txns = [_persist_approved_bank_transaction(row, user_id, tenant_id) for row in approved_rows]
+    batch_doc = mark_batch_approved(tenant_id=tenant_id, batch_id=batch_id, approved_row_count=len(created_txns))
+
+    log_audit_event(
+        {
+            'action': 'BANK_IMPORT_BATCH_APPROVED',
+            'entity': 'bank_import_batch',
+            'entity_id': batch_id,
+            'after': {
+                'approved_row_count': len(created_txns),
+                'status': batch_doc.get('status'),
+            },
+        }
+    )
+    record_domain_event(
+        'BANK_IMPORT_BATCH_APPROVED',
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entity_type='bank_import_batch',
+        entity_id=batch_id,
+        payload={'approved_row_count': len(created_txns)},
+    )
+    create_notification(
+        tenant_id,
+        'bank_import_approved',
+        'Bank import approved',
+        f"Import batch {batch_doc.get('filename', batch_id)} is ready in reconciliation.",
+        entity_id=batch_id,
+        entity_type='bank_import_batch',
+        user_id=user_id,
+    )
+    return jsonify({'batch': batch_doc, 'transactions_created': len(created_txns), 'transactions': created_txns}), 200
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UPLOAD & PARSE BANK STATEMENT
 # POST /api/reconciliation/upload
@@ -171,9 +465,9 @@ def _auto_match(txn, user_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/upload', methods=['POST'])
 def upload_statement():
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -204,11 +498,12 @@ def upload_statement():
 
     for t in raw_txns:
         # Auto-match attempt
-        match_type, match_id = _auto_match(t, user_id)
+        match_type, match_id = _auto_match(t, user_id, tenant_id)
 
         doc = {
             'id': str(uuid.uuid4()),
             'user_id': user_id,
+            'tenant_id': tenant_id,
             'bank_account_id': bank_account_id,
             'date': t['date'],
             'description': t['description'],
@@ -235,14 +530,14 @@ def upload_statement():
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/transactions', methods=['GET'])
 def list_transactions():
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     bank_account_id = request.args.get('bank_account_id')
     status_filter   = request.args.get('status')    # matched | unmatched | excluded
 
-    query = f"SELECT * FROM c WHERE c.user_id = '{user_id}'"
+    query = f"SELECT * FROM c WHERE c.user_id = '{user_id}'{_tenant_legacy_clause(tenant_id)}"
     if bank_account_id:
         query += f" AND c.bank_account_id = '{bank_account_id}'"
     if status_filter:
@@ -265,9 +560,9 @@ def list_transactions():
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/match', methods=['POST'])
 def match_transaction(txn_id):
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     data = request.get_json() or {}
     match_type = data.get('match_type')   # 'invoice' | 'expense'
@@ -278,7 +573,7 @@ def match_transaction(txn_id):
 
     try:
         items = list(bank_txns_container.query_items(
-            query=f"SELECT * FROM c WHERE c.id = '{txn_id}' AND c.user_id = '{user_id}'",
+            query=_txn_lookup_query(txn_id, user_id, tenant_id),
             enable_cross_partition_query=True
         ))
         if not items:
@@ -302,13 +597,13 @@ def match_transaction(txn_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/unmatch', methods=['POST'])
 def unmatch_transaction(txn_id):
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     try:
         items = list(bank_txns_container.query_items(
-            query=f"SELECT * FROM c WHERE c.id = '{txn_id}' AND c.user_id = '{user_id}'",
+            query=_txn_lookup_query(txn_id, user_id, tenant_id),
             enable_cross_partition_query=True
         ))
         if not items:
@@ -333,15 +628,15 @@ def unmatch_transaction(txn_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/create-expense', methods=['POST'])
 def create_expense_from_txn(txn_id):
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     data = request.get_json() or {}
 
     try:
         items = list(bank_txns_container.query_items(
-            query=f"SELECT * FROM c WHERE c.id = '{txn_id}' AND c.user_id = '{user_id}'",
+            query=_txn_lookup_query(txn_id, user_id, tenant_id),
             enable_cross_partition_query=True
         ))
         if not items:
@@ -384,13 +679,13 @@ def create_expense_from_txn(txn_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/auto-match', methods=['POST'])
 def run_auto_match():
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     try:
         unmatched = list(bank_txns_container.query_items(
-            query=f"SELECT * FROM c WHERE c.user_id = '{user_id}' AND c.match_status = 'unmatched'",
+            query=f"SELECT * FROM c WHERE c.user_id = '{user_id}'{_tenant_legacy_clause(tenant_id)} AND c.match_status = 'unmatched'",
             enable_cross_partition_query=True
         ))
 
@@ -398,7 +693,7 @@ def run_auto_match():
         now = datetime.utcnow().isoformat() + 'Z'
 
         for txn in unmatched:
-            match_type, match_id = _auto_match(txn, user_id)
+            match_type, match_id = _auto_match(txn, user_id, tenant_id)
             if match_id:
                 txn['match_status'] = 'matched'
                 txn['match_type']   = match_type
@@ -421,13 +716,13 @@ def run_auto_match():
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>', methods=['DELETE'])
 def delete_transaction(txn_id):
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     try:
         items = list(bank_txns_container.query_items(
-            query=f"SELECT * FROM c WHERE c.id = '{txn_id}' AND c.user_id = '{user_id}'",
+            query=_txn_lookup_query(txn_id, user_id, tenant_id),
             enable_cross_partition_query=True
         ))
         if not items:
@@ -445,32 +740,185 @@ def delete_transaction(txn_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/matchable', methods=['GET'])
 def get_matchable():
-    user_id = get_user_id()
-    if not user_id:
-        return jsonify({'error': 'X-User-Id header is required'}), 401
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
 
     rec_type = request.args.get('type', 'invoice')  # 'invoice' | 'expense'
     search   = request.args.get('q', '').lower()
 
     try:
         if rec_type == 'invoice':
+            query = (
+                f"SELECT c.id, c.invoice_number, c.balance_due, c.customer_id, c.status "
+                f"FROM c WHERE c.user_id = '{user_id}' "
+            )
+            if tenant_id:
+                query += f"AND c.tenant_id = '{tenant_id}' "
+            query += "AND c.status IN ('Issued','Overdue') AND c.balance_due > 0"
             items = list(invoices_container.query_items(
-                query=(
-                    f"SELECT c.id, c.invoice_number, c.balance_due, c.customer_id, c.status "
-                    f"FROM c WHERE c.user_id = '{user_id}' AND c.status IN ('Issued','Overdue') AND c.balance_due > 0"
-                ),
+                query=query,
                 enable_cross_partition_query=True
             ))
             if search:
                 items = [i for i in items if search in (i.get('invoice_number', '') or '').lower()]
         else:
+            query = "SELECT c.id, c.vendor_name, c.amount, c.date, c.category FROM c WHERE 1=1 "
+            if tenant_id:
+                query += f"AND c.tenant_id = '{tenant_id}' "
             items = list(expenses_container.query_items(
-                query="SELECT c.id, c.vendor_name, c.amount, c.date, c.category FROM c WHERE 1=1",
+                query=query,
                 enable_cross_partition_query=True
             ))
             if search:
                 items = [i for i in items if search in (i.get('vendor_name', '') or '').lower()]
 
         return jsonify(items[:50]), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI SUGGEST MATCH  (Claude-powered, per-transaction)
+# POST /api/reconciliation/<txn_id>/ai-suggest
+# Returns a ranked suggestion with confidence + reasoning.
+# Does NOT apply the match — the user confirms via the manual-match flow.
+# ─────────────────────────────────────────────────────────────────────────────
+@bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/ai-suggest', methods=['POST'])
+def ai_suggest_match(txn_id):
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    try:
+        items = list(bank_txns_container.query_items(
+            query=_txn_lookup_query(txn_id, user_id, tenant_id),
+            enable_cross_partition_query=True,
+        ))
+        if not items:
+            return jsonify({'error': 'Transaction not found'}), 404
+        txn = items[0]
+
+        # Fetch candidate invoices
+        inv_query = (
+            f"SELECT c.id, c.invoice_number, c.balance_due, c.customer_id, c.customer_name, c.due_date "
+            f"FROM c WHERE c.user_id = '{user_id}' "
+        )
+        if tenant_id:
+            inv_query += f"AND c.tenant_id = '{tenant_id}' "
+        inv_query += "AND c.status IN ('Issued','Overdue') AND c.balance_due > 0"
+        candidates_invoices = list(invoices_container.query_items(
+            query=inv_query, enable_cross_partition_query=True,
+        ))
+
+        # Fetch candidate expenses
+        exp_query = "SELECT c.id, c.vendor_name, c.amount, c.date, c.category FROM c WHERE 1=1 "
+        if tenant_id:
+            exp_query += f"AND c.tenant_id = '{tenant_id}' "
+        candidates_expenses = list(expenses_container.query_items(
+            query=exp_query, enable_cross_partition_query=True,
+        ))
+
+        from smart_invoice_pro.services.ai_reconciliation_service import ai_match_transaction
+        suggestion = ai_match_transaction(txn, candidates_invoices, candidates_expenses)
+
+        return jsonify({'transaction_id': txn_id, 'suggestion': suggestion}), 200
+
+    except RuntimeError as e:
+        # ANTHROPIC_API_KEY not configured
+        return jsonify({'error': str(e)}), 503
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI AUTO-MATCH ALL UNMATCHED  (Claude-powered bulk run)
+# POST /api/reconciliation/ai-match
+# Body (optional): { "confidence_threshold": 0.85 }
+# Fetches all unmatched transactions, asks Claude for each, and auto-applies
+# matches whose confidence meets the threshold.
+# ─────────────────────────────────────────────────────────────────────────────
+@bank_reconciliation_blueprint.route('/reconciliation/ai-match', methods=['POST'])
+def run_ai_match():
+    user_id, tenant_id, error_response = _require_actor()
+    if error_response:
+        return error_response
+
+    body = request.get_json(silent=True) or {}
+    confidence_threshold = float(body.get('confidence_threshold', 0.85))
+
+    try:
+        from smart_invoice_pro.services.ai_reconciliation_service import ai_match_transaction
+
+        unmatched = list(bank_txns_container.query_items(
+            query=(
+                f"SELECT * FROM c WHERE c.user_id = '{user_id}'"
+                f"{_tenant_legacy_clause(tenant_id)}"
+                f" AND c.match_status = 'unmatched'"
+            ),
+            enable_cross_partition_query=True,
+        ))
+
+        # Fetch all candidates once to avoid N+1 API calls to Cosmos
+        inv_query = (
+            f"SELECT c.id, c.invoice_number, c.balance_due, c.customer_id, c.customer_name, c.due_date "
+            f"FROM c WHERE c.user_id = '{user_id}' "
+        )
+        if tenant_id:
+            inv_query += f"AND c.tenant_id = '{tenant_id}' "
+        inv_query += "AND c.status IN ('Issued','Overdue') AND c.balance_due > 0"
+        candidates_invoices = list(invoices_container.query_items(
+            query=inv_query, enable_cross_partition_query=True,
+        ))
+
+        exp_query = "SELECT c.id, c.vendor_name, c.amount, c.date, c.category FROM c WHERE 1=1 "
+        if tenant_id:
+            exp_query += f"AND c.tenant_id = '{tenant_id}' "
+        candidates_expenses = list(expenses_container.query_items(
+            query=exp_query, enable_cross_partition_query=True,
+        ))
+
+        matched_count = 0
+        results = []
+        now = datetime.utcnow().isoformat() + 'Z'
+
+        for txn in unmatched:
+            try:
+                suggestion = ai_match_transaction(txn, candidates_invoices, candidates_expenses)
+            except RuntimeError:
+                raise  # propagate API key / config errors to the outer handler
+            except Exception:
+                continue  # skip individual per-transaction failures
+
+            will_apply = (
+                suggestion.get('match_id') is not None
+                and suggestion.get('confidence', 0) >= confidence_threshold
+            )
+
+            if will_apply:
+                txn['match_status'] = 'matched'
+                txn['match_type'] = suggestion['match_type']
+                txn['match_id'] = suggestion['match_id']
+                txn['match_confidence'] = suggestion['confidence']
+                txn['match_reasoning'] = suggestion.get('reasoning', '')
+                txn['updated_at'] = now
+                bank_txns_container.replace_item(item=txn['id'], body=txn)
+                matched_count += 1
+
+            results.append({
+                'transaction_id': txn['id'],
+                'suggestion': suggestion,
+                'applied': will_apply,
+            })
+
+        return jsonify({
+            'processed': len(unmatched),
+            'newly_matched': matched_count,
+            'confidence_threshold': confidence_threshold,
+            'results': results,
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 503
     except Exception as e:
         return jsonify({'error': str(e)}), 500
