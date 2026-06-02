@@ -41,4 +41,8 @@ tenants_container = get_container("tenants", "/id")
 feature_flags_container = get_container("feature_flags", "/tenant_id")
 search_history_container = get_container("search_history", "/user_id")
 recently_viewed_container = get_container("recently_viewed", "/user_id")
+bank_import_batches_container = get_container("bank_import_batches", "/tenant_id")
+bank_import_jobs_container = get_container("bank_import_jobs", "/tenant_id")
+bank_import_rows_container = get_container("bank_import_rows", "/tenant_id")
+bank_import_artifacts_container = get_container("bank_import_artifacts", "/tenant_id")
 

@@ -150,6 +150,8 @@ def create_bank_account():
         
         # Create bank account object
         now = datetime.utcnow().isoformat() + 'Z'
+        requested_status = (data.get('status') or 'active').strip().lower()
+        status_value = requested_status if requested_status in {'active', 'inactive'} else 'active'
         bank_account = {
             'id': str(uuid.uuid4()),
             'user_id': user_id,
@@ -158,7 +160,7 @@ def create_bank_account():
             'account_type': data['account_type'],
             'sync_type': 'manual',
             'last_imported_at': None,
-            'status': 'active',
+            'status': status_value,
             'created_at': now,
             'updated_at': now
         }

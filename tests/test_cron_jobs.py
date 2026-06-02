@@ -213,5 +213,185 @@ class TestScheduleInfo:
         assert resp.status_code == 200
         data = resp.get_json()
         assert "jobs" in data
-        assert len(data["jobs"]) >= 1
-        assert data["jobs"][0]["name"] == "Low Stock Check"
+        assert len(data["jobs"]) >= 2
+        names = [j["name"] for j in data["jobs"]]
+        assert "Low Stock Check" in names
+        assert "Generate Recurring Invoices" in names
+
+
+# ── BUG-002 fix: recurring invoice generation ─────────────────────────────────
+
+SAMPLE_PROFILE = {
+    "id": "prof-001",
+    "tenant_id": TENANT_A,
+    "customer_id": "cust-001",
+    "customer_name": "ACME Corp",
+    "profile_name": "Monthly Maintenance",
+    "frequency": "Monthly",
+    "recurrence_rule": {},
+    "next_run_date": "2024-01-01",   # past date → due today
+    "last_run_date": None,
+    "status": "Active",
+    "auto_send": False,
+    "occurrences_created": 0,
+    "occurrence_limit": None,
+    "ends_type": "never",
+    "end_date": None,
+    "items": [
+        {"name": "Maintenance", "quantity": 1, "unit_price": 500.0, "amount": 500.0}
+    ],
+    "subtotal": 500.0,
+    "cgst_amount": 45.0,
+    "sgst_amount": 45.0,
+    "igst_amount": 0.0,
+    "notes": "",
+    "terms_conditions": "",
+    "is_gst_applicable": True,
+    "payment_terms": "Net 30",
+}
+
+
+class TestGenerateRecurringInvoices:
+    """POST /cron/generate-recurring"""
+
+    @patch("smart_invoice_pro.api.cron_jobs.create_notification")
+    @patch("smart_invoice_pro.api.cron_jobs.log_audit")
+    @patch("smart_invoice_pro.api.cron_jobs.invoices_container")
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_generates_invoice_for_due_profile(
+        self, mock_rp, mock_inv, mock_audit, mock_notif, client, headers_a
+    ):
+        """A due Active profile produces one Draft invoice."""
+        mock_rp.query_items.return_value = [SAMPLE_PROFILE.copy()]
+
+        with patch("smart_invoice_pro.api.recurring_profiles_api.calculate_next_run_date", return_value="2024-02-01"), \
+             patch("smart_invoice_pro.api.invoice_preferences_api.generate_invoice_number", return_value="INV-00042"):
+            resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["generated_count"] == 1
+        assert data["error_count"] == 0
+        mock_inv.create_item.assert_called_once()
+        created_inv = mock_inv.create_item.call_args[1]["body"]
+        assert created_inv["invoice_number"] == "INV-00042"
+        assert created_inv["status"] == "Draft"
+        assert created_inv["tenant_id"] == TENANT_A
+        assert created_inv["customer_id"] == "cust-001"
+        assert created_inv["total_amount"] == 590.0   # 500 + 45 + 45
+
+    @patch("smart_invoice_pro.api.cron_jobs.create_notification")
+    @patch("smart_invoice_pro.api.cron_jobs.log_audit")
+    @patch("smart_invoice_pro.api.cron_jobs.invoices_container")
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_auto_send_true_creates_issued_invoice(
+        self, mock_rp, mock_inv, mock_audit, mock_notif, client, headers_a
+    ):
+        """Profile with auto_send=True generates an Issued invoice."""
+        profile = {**SAMPLE_PROFILE, "auto_send": True}
+        mock_rp.query_items.return_value = [profile]
+
+        with patch("smart_invoice_pro.api.recurring_profiles_api.calculate_next_run_date", return_value="2024-02-01"), \
+             patch("smart_invoice_pro.api.invoice_preferences_api.generate_invoice_number", return_value="INV-00043"):
+            resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        created_inv = mock_inv.create_item.call_args[1]["body"]
+        assert created_inv["status"] == "Issued"
+
+    @patch("smart_invoice_pro.api.cron_jobs.create_notification")
+    @patch("smart_invoice_pro.api.cron_jobs.log_audit")
+    @patch("smart_invoice_pro.api.cron_jobs.invoices_container")
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_profile_next_run_date_advances(
+        self, mock_rp, mock_inv, mock_audit, mock_notif, client, headers_a
+    ):
+        """Profile's next_run_date is updated to the next calculated date."""
+        profile = {**SAMPLE_PROFILE.copy()}
+        mock_rp.query_items.return_value = [profile]
+
+        with patch("smart_invoice_pro.api.recurring_profiles_api.calculate_next_run_date", return_value="2024-02-15"), \
+             patch("smart_invoice_pro.api.invoice_preferences_api.generate_invoice_number", return_value="INV-00044"):
+            resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        updated_profile = mock_rp.replace_item.call_args[1]["body"]
+        assert updated_profile["next_run_date"] == "2024-02-15"
+        assert updated_profile["occurrences_created"] == 1
+
+    @patch("smart_invoice_pro.api.cron_jobs.create_notification")
+    @patch("smart_invoice_pro.api.cron_jobs.log_audit")
+    @patch("smart_invoice_pro.api.cron_jobs.invoices_container")
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_marks_completed_when_occurrence_limit_reached(
+        self, mock_rp, mock_inv, mock_audit, mock_notif, client, headers_a
+    ):
+        """Profile reaching occurrence_limit is marked Completed after generating final invoice."""
+        profile = {
+            **SAMPLE_PROFILE,
+            "ends_type": "after_occurrences",
+            "occurrence_limit": 3,
+            "occurrences_created": 2,   # this will be the 3rd (final) occurrence
+        }
+        mock_rp.query_items.return_value = [profile]
+
+        with patch("smart_invoice_pro.api.recurring_profiles_api.calculate_next_run_date", return_value="2024-02-01"), \
+             patch("smart_invoice_pro.api.invoice_preferences_api.generate_invoice_number", return_value="INV-00045"):
+            resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert resp.get_json()["generated_count"] == 1
+        updated_profile = mock_rp.replace_item.call_args[1]["body"]
+        assert updated_profile["status"] == "Completed"
+        assert updated_profile["occurrences_created"] == 3
+
+    @patch("smart_invoice_pro.api.cron_jobs.invoices_container")
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_skips_profile_already_at_limit(self, mock_rp, mock_inv, client, headers_a):
+        """Profile already at occurrence_limit is marked Completed without creating invoice."""
+        profile = {
+            **SAMPLE_PROFILE,
+            "ends_type": "after_occurrences",
+            "occurrence_limit": 3,
+            "occurrences_created": 3,   # already reached
+        }
+        mock_rp.query_items.return_value = [profile]
+
+        resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert resp.get_json()["generated_count"] == 0
+        mock_inv.create_item.assert_not_called()
+        updated_profile = mock_rp.replace_item.call_args[1]["body"]
+        assert updated_profile["status"] == "Completed"
+
+    @patch("smart_invoice_pro.api.cron_jobs.invoices_container")
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_skips_profile_past_end_date(self, mock_rp, mock_inv, client, headers_a):
+        """Profile with ends_type=on_date and expired end_date is marked Completed, no invoice."""
+        profile = {
+            **SAMPLE_PROFILE,
+            "ends_type": "on_date",
+            "end_date": "2023-12-31",   # expired
+        }
+        mock_rp.query_items.return_value = [profile]
+
+        resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        assert resp.get_json()["generated_count"] == 0
+        mock_inv.create_item.assert_not_called()
+        updated_profile = mock_rp.replace_item.call_args[1]["body"]
+        assert updated_profile["status"] == "Completed"
+
+    @patch("smart_invoice_pro.api.cron_jobs.recurring_profiles_container")
+    def test_no_due_profiles_returns_zero(self, mock_rp, client, headers_a):
+        """When no profiles are due, generated_count is 0 with no errors."""
+        mock_rp.query_items.return_value = []
+
+        resp = client.post("/api/cron/generate-recurring", headers=headers_a)
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["generated_count"] == 0
+        assert data["error_count"] == 0

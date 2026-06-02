@@ -198,6 +198,136 @@ class TestZohoWebhook:
         )
         assert resp.status_code == 200
 
+    # ── BUG-001 fix: amount_paid accumulation ─────────────────────────────────
+
+    @patch("smart_invoice_pro.api.payments_api.invoices_container")
+    @patch("smart_invoice_pro.api.payments_api.payments_container")
+    def test_partial_payment_sets_partially_paid_status(self, mock_pay, mock_inv, client, headers_a):
+        """Partial Zoho payment leaves status=Partially Paid with correct balance."""
+        inv = {**SAMPLE_INVOICE, "total_amount": 1000.0, "balance_due": 1000.0, "amount_paid": 0.0}
+        mock_pay.query_items.return_value = [SAMPLE_TXN.copy()]
+        mock_inv.query_items.return_value = [inv]
+
+        resp = client.post(
+            "/api/payments/webhook",
+            json={
+                "event_type": "payment.success",
+                "data": {
+                    "reference_id": "inv-001",
+                    "payment_link_id": "pl-001",
+                    "amount": 400.0,
+                    "transaction_id": "zoho-txn-partial",
+                },
+            },
+            headers=headers_a,
+        )
+        assert resp.status_code == 200
+        replaced_inv = mock_inv.replace_item.call_args[1]["body"]
+        assert replaced_inv["amount_paid"] == 400.0
+        assert replaced_inv["balance_due"] == 600.0
+        assert replaced_inv["status"] == "Partially Paid"
+
+    @patch("smart_invoice_pro.api.payments_api.invoices_container")
+    @patch("smart_invoice_pro.api.payments_api.payments_container")
+    def test_second_partial_payment_accumulates(self, mock_pay, mock_inv, client, headers_a):
+        """Second partial Zoho payment accumulates, does NOT overwrite amount_paid."""
+        inv = {
+            **SAMPLE_INVOICE,
+            "total_amount": 1000.0,
+            "amount_paid": 400.0,   # already paid from first webhook
+            "balance_due": 600.0,
+            "status": "Partially Paid",
+        }
+        mock_pay.query_items.return_value = [SAMPLE_TXN.copy()]
+        mock_inv.query_items.return_value = [inv]
+
+        resp = client.post(
+            "/api/payments/webhook",
+            json={
+                "event_type": "payment.success",
+                "data": {
+                    "reference_id": "inv-001",
+                    "payment_link_id": "pl-001",
+                    "amount": 300.0,
+                    "transaction_id": "zoho-txn-2nd",
+                },
+            },
+            headers=headers_a,
+        )
+        assert resp.status_code == 200
+        replaced_inv = mock_inv.replace_item.call_args[1]["body"]
+        # Must be 400 + 300 = 700, NOT just 300
+        assert replaced_inv["amount_paid"] == 700.0
+        assert replaced_inv["balance_due"] == 300.0
+        assert replaced_inv["status"] == "Partially Paid"
+
+    @patch("smart_invoice_pro.api.payments_api.invoices_container")
+    @patch("smart_invoice_pro.api.payments_api.payments_container")
+    def test_final_payment_marks_fully_paid(self, mock_pay, mock_inv, client, headers_a):
+        """Final payment that covers remaining balance sets status=Paid and balance_due=0."""
+        inv = {
+            **SAMPLE_INVOICE,
+            "total_amount": 1000.0,
+            "amount_paid": 700.0,
+            "balance_due": 300.0,
+            "status": "Partially Paid",
+        }
+        mock_pay.query_items.return_value = [SAMPLE_TXN.copy()]
+        mock_inv.query_items.return_value = [inv]
+
+        resp = client.post(
+            "/api/payments/webhook",
+            json={
+                "event_type": "payment.success",
+                "data": {
+                    "reference_id": "inv-001",
+                    "payment_link_id": "pl-001",
+                    "amount": 300.0,
+                    "transaction_id": "zoho-txn-final",
+                },
+            },
+            headers=headers_a,
+        )
+        assert resp.status_code == 200
+        replaced_inv = mock_inv.replace_item.call_args[1]["body"]
+        assert replaced_inv["amount_paid"] == 1000.0
+        assert replaced_inv["balance_due"] == 0.0
+        assert replaced_inv["status"] == "Paid"
+
+    @patch("smart_invoice_pro.api.payments_api.invoices_container")
+    @patch("smart_invoice_pro.api.payments_api.payments_container")
+    def test_webhook_appends_payment_history(self, mock_pay, mock_inv, client, headers_a):
+        """Each webhook call appends a new entry to payment_history."""
+        inv = {
+            **SAMPLE_INVOICE,
+            "total_amount": 1000.0,
+            "amount_paid": 0.0,
+            "balance_due": 1000.0,
+            "payment_history": [],
+        }
+        mock_pay.query_items.return_value = [SAMPLE_TXN.copy()]
+        mock_inv.query_items.return_value = [inv]
+
+        resp = client.post(
+            "/api/payments/webhook",
+            json={
+                "event_type": "payment.success",
+                "data": {
+                    "reference_id": "inv-001",
+                    "payment_link_id": "pl-001",
+                    "amount": 500.0,
+                    "transaction_id": "zoho-txn-hist",
+                },
+            },
+            headers=headers_a,
+        )
+        assert resp.status_code == 200
+        replaced_inv = mock_inv.replace_item.call_args[1]["body"]
+        history = replaced_inv.get("payment_history", [])
+        assert len(history) == 1
+        assert history[0]["amount"] == 500.0
+        assert history[0]["method"] == "Zoho Payments (Online)"
+
 
 class TestPaymentStatus:
     """GET /payments/status/<transaction_id>"""
