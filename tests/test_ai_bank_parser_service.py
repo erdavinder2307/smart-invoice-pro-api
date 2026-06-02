@@ -58,13 +58,23 @@ def test_parse_xlsx_decrypts_with_msoffcrypto_and_returns_rows():
     mock_office.decrypt.side_effect = decrypt
 
     with patch.object(msoffcrypto, "OfficeFile", return_value=mock_office), \
-         patch("openpyxl.load_workbook") as mock_load_workbook:
+         patch("openpyxl.load_workbook") as mock_load_workbook, \
+         patch("smart_invoice_pro.services.ai_bank_parser_service._call_claude") as mock_call_claude:
         fake_ws = MagicMock()
         fake_ws.iter_rows.return_value = [
             ("2026-02-01", "Test transaction", 0, 100.0, 100.0),
         ]
         fake_wb = MagicMock(active=fake_ws)
         mock_load_workbook.return_value = fake_wb
+        mock_call_claude.return_value = [
+            {
+                "date": "2026-02-01",
+                "description": "Test transaction",
+                "debit": 0,
+                "credit": 100.0,
+                "balance": 100.0,
+            }
+        ]
 
         rows = parse_xlsx(b"fake-xlsx-bytes", password="secret")
 
