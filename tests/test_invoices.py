@@ -59,14 +59,17 @@ class TestCreateInvoice:
         data = resp.get_json()
         assert data["balance_due"] == data["total_amount"]
 
+    @patch("smart_invoice_pro.utils.stock_utils.stock_container")
     @patch("smart_invoice_pro.api.invoices.customers_container")
     @patch("smart_invoice_pro.api.invoices.get_container")
     @patch("smart_invoice_pro.api.invoices.invoices_container")
-    def test_create_invoice_stock_decrement(self, mock_inv, mock_gc, mock_cust, client, headers_a, sample_invoice):
+    def test_create_invoice_stock_decrement(self, mock_inv, mock_gc, mock_cust, mock_su_stock, client, headers_a, sample_invoice):
         """Issued invoice creation should create OUT stock transactions for each line item."""
         mock_stock = MagicMock()
         mock_gc.return_value = mock_stock
         mock_cust.query_items.return_value = [{"id": "cust-001"}]
+        # Sufficient stock so validate_stock_out (in stock_utils) passes
+        mock_su_stock.query_items.return_value = [{"type": "IN", "quantity": 10}]
         sample_invoice["status"] = "Issued"  # stock only committed for non-Draft statuses
         sample_invoice["items"] = [
             {"product_id": "p-1", "product_name": "Widget", "quantity": 5, "rate": 100, "amount": 500},

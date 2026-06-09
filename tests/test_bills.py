@@ -62,9 +62,11 @@ class TestCreateBill:
     def test_create_with_stock_items(self, client, headers_a):
         """Bill items with product_id create IN stock transactions."""
         with patch("smart_invoice_pro.api.bills_api.bills_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.bills_api.stock_container") as mock_stock_ctr:
-            payload = {**SAMPLE_BILL, "items": [{"product_id": "p1", "quantity": 10}]}
+             patch("smart_invoice_pro.api.bills_api.stock_container") as mock_stock_ctr, \
+             patch("smart_invoice_pro.utils.stock_utils.products_container") as mock_su_products:
+            payload = {**SAMPLE_BILL, "items": [{"product_id": "p1", "quantity": 10, "rate": 50}]}
             mock_ctr.create_item.return_value = {**payload, "id": "new-id"}
+            mock_su_products.query_items.return_value = [{"id": "p1", "tenant_id": "tenant-aaa-1111", "is_deleted": False}]
             resp = client.post("/api/bills", json=payload, headers=headers_a)
             assert resp.status_code == 201
             # Verify stock IN transaction was created
