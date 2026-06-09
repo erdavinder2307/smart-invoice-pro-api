@@ -29,7 +29,7 @@ stock_summary_router = APIRouter()
 # ─────────────────────────────────────────────
 #  Validation helpers
 # ─────────────────────────────────────────────
-MAX_NAME_LEN = 255
+MAX_NAME_LEN = 150
 MAX_DESC_LEN = 1000
 MAX_PRICE = 999_999_999
 

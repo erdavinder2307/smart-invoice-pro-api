@@ -1,0 +1,19 @@
+name: Keep API Warm
+
+on:
+  schedule:
+    # Every 15 minutes, Mon–Fri, 3:30 AM–2:30 PM UTC (9 AM–8 PM IST)
+    - cron: '*/15 3-14 * * 1-5'
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping API
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://smartinvoicepro-e8ekfnf4b4abfvhx.centralindia-01.azurewebsites.net/api/ping")
+          echo "Response status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Warning: ping returned $STATUS"
+          fi

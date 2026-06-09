@@ -249,6 +249,15 @@ def create_statement_import_batch():
     if not file_bytes:
         return jsonify({'error': 'Empty file'}), 400
 
+    max_bytes = 10 * 1024 * 1024
+    if len(file_bytes) > max_bytes:
+        return jsonify({'error': 'File exceeds maximum size of 10 MB'}), 400
+
+    from smart_invoice_pro.services.bank_import.import_workflow_service import detect_file_profile
+    profile = detect_file_profile(upload.filename, upload.content_type)
+    if not profile.get('supported'):
+        return jsonify({'error': 'Unsupported or invalid bank statement file type'}), 400
+
     bank_account_id = (request.form.get('bank_account_id') or '').strip()
     pdf_password = (request.form.get('pdf_password') or request.form.get('file_password') or '').strip()
 
@@ -480,8 +489,14 @@ def upload_statement():
     if ext not in ('csv', 'qif'):
         return jsonify({'error': 'Only CSV and QIF files are supported'}), 400
 
+    raw = file.read()
+    if len(raw) > 10 * 1024 * 1024:
+        return jsonify({'error': 'File exceeds maximum size of 10 MB'}), 400
+    if ext == 'csv' and raw[:512].count(0) > 2:
+        return jsonify({'error': 'File does not appear to be a valid text-based CSV'}), 400
+
     bank_account_id = request.form.get('bank_account_id', '')
-    text = file.read().decode('utf-8', errors='replace')
+    text = raw.decode('utf-8', errors='replace')
 
     # Parse
     try:
@@ -580,10 +595,18 @@ def match_transaction(txn_id):
             return jsonify({'error': 'Transaction not found'}), 404
 
         txn = items[0]
+        if txn.get('match_status') == 'matched' and txn.get('match_id'):
+            return jsonify({
+                'error': 'Transaction is already matched',
+                'match_id': txn.get('match_id'),
+            }), 409
+
+        now = datetime.utcnow().isoformat() + 'Z'
         txn['match_status'] = 'matched'
         txn['match_type']   = match_type
         txn['match_id']     = match_id
-        txn['updated_at']   = datetime.utcnow().isoformat() + 'Z'
+        txn['matched_at']   = now
+        txn['updated_at']   = now
 
         bank_txns_container.replace_item(item=txn_id, body=txn)
         return jsonify(txn), 200

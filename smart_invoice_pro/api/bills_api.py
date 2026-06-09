@@ -168,6 +168,9 @@ def validate_bill_data(data, is_update=False):
         except ValueError:
             errors['dates'] = 'Invalid date format'
     
+    from smart_invoice_pro.utils.line_item_validation import validate_line_item_rates
+    errors.update(validate_line_item_rates(data.get('items')))
+
     return errors
 
 @bills_blueprint.route('/bills', methods=['POST'])
@@ -261,25 +264,35 @@ def create_bill():
         'updated_at': now
     }
     
+    from smart_invoice_pro.utils.stock_utils import product_exists_for_tenant
+    for line_idx, bill_item in enumerate(data.get('items', [])):
+        product_id = bill_item.get('product_id')
+        if not product_id or 'quantity' not in bill_item:
+            continue
+        if not product_exists_for_tenant(product_id, request.tenant_id):
+            return jsonify({
+                'error': f'Line {line_idx + 1}: product no longer exists or is archived',
+                'details': {f'items[{line_idx}].product_id': 'Product not found'},
+            }), 400
+
     try:
         created_item = bills_container.create_item(body=item)
-        
-        # Increment stock for each item in the bill
-        for bill_item in data.get('items', []):
-            if 'product_id' in bill_item and 'quantity' in bill_item:
-                try:
-                    stock_transaction = {
-                        'id': str(uuid.uuid4()),
-                        'product_id': str(bill_item['product_id']),
-                        'quantity': float(bill_item['quantity']),
-                        'type': 'IN',
-                        'source': f'Bill {data["bill_number"]}',
-                        'reference_id': item['id'],
-                        'timestamp': now
-                    }
-                    stock_container.create_item(body=stock_transaction)
-                except Exception as e:
-                    print(f"Error updating stock for product {bill_item.get('product_id')}: {str(e)}")
+
+        for line_idx, bill_item in enumerate(data.get('items', [])):
+            product_id = bill_item.get('product_id')
+            if not product_id or 'quantity' not in bill_item:
+                continue
+            stock_transaction = {
+                'id': str(uuid.uuid4()),
+                'product_id': str(product_id),
+                'quantity': float(bill_item['quantity']),
+                'type': 'IN',
+                'source': f'Bill {data["bill_number"]}',
+                'reference_id': item['id'],
+                'timestamp': now,
+                'tenant_id': request.tenant_id,
+            }
+            stock_container.create_item(body=stock_transaction)
 
         return jsonify(_sanitize_bill(_derive_bill_bucket(created_item))), 201
     except Exception as e:
@@ -721,11 +734,6 @@ def delete_bill(bill_id):
             "dependencySummary": lifecycle_result.get("dependencySummary", {}),
             "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
         }), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to archive bill: {str(e)}"}), 500
-
-
-        return jsonify({"message": "Bill archived successfully"}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to archive bill: {str(e)}"}), 500
 

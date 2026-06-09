@@ -199,6 +199,8 @@ def update_me():
         user_record = _get_user_record(user_id)
         if user_record:
             user_record["name"] = data["full_name"]
+            if data.get("display_name"):
+                user_record["display_name"] = data["display_name"]
             users_container.upsert_item(body=user_record)
 
     log_audit_event({
@@ -245,6 +247,8 @@ def get_preferences():
             "approval_notifications": True,
             "reminder_notifications": True,
             "operational_alerts":     True,
+            "billing_notifications":  True,
+            "invoice_delivery_notifications": True,
         },
     }), 200
 
@@ -286,7 +290,14 @@ def update_preferences():
         "default_dashboard", "compact_mode", "notification_preferences",
     ]
     for field in allowed:
-        if field in data:
+        if field not in data:
+            continue
+        if field == "notification_preferences" and isinstance(data[field], dict):
+            existing = prefs.get("notification_preferences") or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            prefs["notification_preferences"] = {**existing, **data[field]}
+        else:
             prefs[field] = data[field]
     prefs["updated_at"] = now
 
@@ -325,6 +336,20 @@ def get_sessions():
     now = datetime.utcnow()
     current_token_id = getattr(request, "token_id", None)
 
+    # Remove expired refresh tokens (housekeeping)
+    for item in items:
+        try:
+            exp_dt = datetime.fromisoformat(item.get("expires_at", ""))
+            if exp_dt < now:
+                try:
+                    refresh_tokens_container.delete_item(
+                        item=item["id"], partition_key=item["user_id"]
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     sessions = []
     for item in items:
         try:
@@ -339,10 +364,15 @@ def get_sessions():
         device_type = item.get("device_type", "Desktop")
         device_name = item.get("device_name", "")
         is_legacy = not bool(browser)
+        is_current = item.get("id") == current_token_id
+
+        # Hide stale legacy tokens (pre user-agent tracking) unless current session
+        if is_legacy and not is_current:
+            continue
 
         # Build a meaningful display name
         if not device_name:
-            device_name = " on ".join(filter(None, [browser, os_name]))
+            device_name = " on ".join(filter(None, [browser, os_name])) or "Unknown Device"
 
         sessions.append({
             "id":              item.get("id"),
@@ -355,7 +385,7 @@ def get_sessions():
             "browser_version": item.get("browser_version", ""),
             "os":              os_name,
             "ip_address":      item.get("ip_address", ""),
-            "is_current":      item.get("id") == current_token_id,
+            "is_current":      is_current,
             "is_legacy":       is_legacy,
         })
 

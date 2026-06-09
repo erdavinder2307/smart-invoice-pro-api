@@ -22,6 +22,7 @@ from smart_invoice_pro.utils.validation_utils import (
     validate_required, validate_email as _validate_email,
     validate_gst as _validate_gst, validate_pan as _validate_pan,
     validate_mobile as _validate_mobile,
+    validate_string_length,
     VALIDATION_ERROR, NOT_FOUND_ERROR,
 )
 import copy
@@ -44,6 +45,42 @@ os.makedirs(CUSTOMER_UPLOAD_FOLDER, exist_ok=True)
 
 def _is_archived(customer):
     return customer.get('status') == 'ARCHIVED'
+
+
+def _normalize_customer_name(value):
+    return ' '.join(str(value or '').strip().lower().split())
+
+
+def _customer_name_keys(company_name='', display_name=''):
+    keys = set()
+    for raw in (company_name, display_name):
+        normalized = _normalize_customer_name(raw)
+        if normalized:
+            keys.add(normalized)
+    return keys
+
+
+def _find_customer_name_conflict(tenant_id, company_name='', display_name='', exclude_id=None):
+    keys = _customer_name_keys(company_name, display_name)
+    if not keys:
+        return None
+    rows = list(customers_container.query_items(
+        query=(
+            "SELECT c.id, c.company_name, c.display_name, c.status FROM c "
+            "WHERE c.tenant_id = @tid"
+        ),
+        parameters=[{"name": "@tid", "value": tenant_id}],
+        enable_cross_partition_query=True,
+    ))
+    for row in rows:
+        if exclude_id and row.get('id') == exclude_id:
+            continue
+        if str(row.get('status', '')).upper() == 'ARCHIVED':
+            continue
+        row_keys = _customer_name_keys(row.get('company_name'), row.get('display_name'))
+        if keys & row_keys:
+            return row
+    return None
 
 
 def _is_truthy(value):
@@ -204,33 +241,57 @@ def create_customer():
     if customer_type == 'business' and not company_name:
         company_name_error = 'Company name is required for business customers'
 
+    if not email_val and not phone_val:
+        contact_error = 'At least one of Email or Phone is required'
+    else:
+        contact_error = None
+
     field_errors = collect_errors(
-        display_name=validate_required(display_name, 'Display Name'),
-        email=validate_required(email_val, 'Email') or _validate_email(email_val),
-        phone=validate_required(phone_val, 'Phone'),
+        display_name=(
+            validate_required(display_name, 'Display Name')
+            or validate_string_length(display_name, 'Display name', 100)
+        ),
+        email=(_validate_email(email_val) if email_val else None),
+        phone=(_validate_mobile(phone_val) if phone_val else contact_error),
         gst_number=_validate_gst(gst_val),
         pan=_validate_pan(pan_val),
         mobile=_validate_mobile(mobile_val) if mobile_val else None,
-        company_name=company_name_error,
+        company_name=company_name_error or validate_string_length(company_name, 'Company name', 100),
     )
+    if contact_error and not field_errors.get('phone'):
+        field_errors['phone'] = contact_error
     if field_errors:
         return make_error_response(
             VALIDATION_ERROR, "Please fix the highlighted fields", field_errors
         )
 
     # Reject duplicate email within the same tenant
-    _dup_check = list(customers_container.query_items(
-        query="SELECT c.id FROM c WHERE c.tenant_id = @tid AND LOWER(c.email) = @email",
-        parameters=[
-            {"name": "@tid", "value": request.tenant_id},
-            {"name": "@email", "value": email_val.strip().lower()},
-        ],
-        enable_cross_partition_query=True
-    ))
+    if email_val:
+        _dup_check = list(customers_container.query_items(
+            query="SELECT c.id FROM c WHERE c.tenant_id = @tid AND LOWER(c.email) = @email",
+            parameters=[
+                {"name": "@tid", "value": request.tenant_id},
+                {"name": "@email", "value": email_val.strip().lower()},
+            ],
+            enable_cross_partition_query=True
+        ))
+    else:
+        _dup_check = []
     if _dup_check:
         return jsonify({
             'error': 'A customer with this email already exists',
             'details': {'email': 'A customer with this email already exists'},
+        }), 409
+
+    name_conflict = _find_customer_name_conflict(
+        request.tenant_id, company_name, display_name
+    )
+    if name_conflict:
+        return jsonify({
+            'error': 'A customer with this company or display name already exists',
+            'details': {
+                'company_name': 'A customer with this name already exists',
+            },
         }), 409
 
     now = datetime.utcnow().isoformat()
@@ -239,8 +300,8 @@ def create_customer():
         'id': str(uuid.uuid4()),
         'customer_id': customer_uuid,
         'display_name': data['display_name'],
-        'email': data['email'],
-        'phone': data['phone'],
+        'email': email_val,
+        'phone': phone_val,
         'customer_type': data.get('customer_type', 'business'),
         'salutation': data.get('salutation', 'Mr'),
         'first_name': data.get('first_name', ''),
@@ -676,6 +737,38 @@ def update_customer(customer_id):
                 'error': 'A customer with this email already exists',
                 'details': {'email': 'A customer with this email already exists'},
             }), 409
+
+    next_company = data.get('company_name', item.get('company_name', ''))
+    next_display = data.get('display_name', item.get('display_name', ''))
+    name_conflict = _find_customer_name_conflict(
+        request.tenant_id, next_company, next_display, exclude_id=customer_id
+    )
+    if name_conflict:
+        return jsonify({
+            'error': 'A customer with this company or display name already exists',
+            'details': {'company_name': 'A customer with this name already exists'},
+        }), 409
+
+    next_email = (data.get('email', item.get('email', '')) or '').strip()
+    next_phone = (data.get('phone', item.get('phone', '')) or '').strip()
+    if not next_email and not next_phone:
+        return jsonify({
+            'error': 'At least one of Email or Phone is required',
+            'details': {'phone': 'At least one of Email or Phone is required'},
+        }), 400
+
+    if 'company_name' in data:
+        len_err = validate_string_length(str(data['company_name']).strip(), 'Company name', 100)
+        if len_err:
+            return jsonify({'error': len_err, 'details': {'company_name': len_err}}), 400
+    if 'display_name' in data:
+        len_err = validate_string_length(str(data['display_name']).strip(), 'Display name', 100)
+        if len_err:
+            return jsonify({'error': len_err, 'details': {'display_name': len_err}}), 400
+    if 'phone' in data and data['phone']:
+        phone_err = _validate_mobile(data['phone'])
+        if phone_err:
+            return jsonify({'error': phone_err, 'details': {'phone': phone_err}}), 400
 
     # Validate GST number if provided
     if 'gst_number' in data and data['gst_number'] and not validate_gst_number(data['gst_number']):

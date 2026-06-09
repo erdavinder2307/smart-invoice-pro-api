@@ -48,6 +48,18 @@ def validate_quote_data(data, is_update=False):
         except ValueError:
             errors['dates'] = 'Invalid date format'
     
+    items = data.get('items') or []
+    if isinstance(items, list):
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            qty = float(item.get('quantity') or 0)
+            if qty <= 0:
+                continue
+            rate = float(item.get('rate') or 0)
+            if rate <= 0:
+                errors[f'items[{idx}].rate'] = 'Rate must be greater than zero'
+
     return errors
 
 @quotes_blueprint.route('/quotes', methods=['POST'])

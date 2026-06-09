@@ -649,10 +649,14 @@ class TestStockManagement:
         assert txn["type"] == "IN"
         assert txn["quantity"] == 2.0
 
+    @patch("smart_invoice_pro.utils.stock_utils.compute_current_stock")
     @patch("smart_invoice_pro.api.invoices.get_container")
     @patch("smart_invoice_pro.api.invoices.invoices_container")
-    def test_update_draft_to_issued_commits_stock(self, mock_inv, mock_gc, client, headers_a, stored_invoice_a):
+    def test_update_draft_to_issued_commits_stock(
+        self, mock_inv, mock_gc, mock_stock_level, client, headers_a, stored_invoice_a
+    ):
         """PUT that transitions status from Draft to Issued must commit stock."""
+        mock_stock_level.return_value = 100.0
         mock_stock = MagicMock()
         mock_gc.return_value = mock_stock
 
@@ -682,6 +686,23 @@ class TestStockManagement:
         txn = mock_stock.create_item.call_args[1]["body"]
         assert txn["type"] == "OUT"
         assert txn["quantity"] == 7.0
+
+    @patch("smart_invoice_pro.utils.stock_utils.compute_current_stock")
+    @patch("smart_invoice_pro.api.invoices.customers_container")
+    @patch("smart_invoice_pro.api.invoices.get_container")
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_issued_invoice_blocks_insufficient_stock(
+        self, mock_inv, mock_gc, mock_cust, mock_stock_level, client, headers_a, sample_invoice
+    ):
+        mock_stock_level.return_value = 2.0
+        mock_cust.query_items.return_value = [{"id": "cust-001"}]
+        sample_invoice["status"] = "Issued"
+        sample_invoice["items"] = [
+            {"product_id": "p-1", "product_name": "Widget", "quantity": 10, "rate": 100, "amount": 1000},
+        ]
+        resp = client.post("/api/invoices", json=sample_invoice, headers=headers_a)
+        assert resp.status_code == 400
+        mock_inv.create_item.assert_not_called()
 
 
 

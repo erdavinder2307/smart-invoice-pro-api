@@ -30,6 +30,7 @@ class TestCreateVendor:
 
     def test_create_success(self, client, headers_a):
         with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
+            mock_ctr.query_items.return_value = []
             mock_ctr.create_item.return_value = {**SAMPLE_VENDOR, "id": "new-id"}
             resp = client.post("/api/vendors", json=SAMPLE_VENDOR, headers=headers_a)
             assert resp.status_code == 201
@@ -48,6 +49,16 @@ class TestCreateVendor:
         payload = {**SAMPLE_VENDOR, "email": "not-an-email"}
         resp = client.post("/api/vendors", json=payload, headers=headers_a)
         assert resp.status_code == 400
+
+    def test_create_duplicate_vendor_name(self, client, headers_a):
+        with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [{
+                "id": "v-existing",
+                "vendor_name": "ABC Suppliers",
+                "status": "ACTIVE",
+            }]
+            resp = client.post("/api/vendors", json=SAMPLE_VENDOR, headers=headers_a)
+            assert resp.status_code == 409
 
     def test_create_defaults_payment_terms(self, client, headers_a):
         with patch("smart_invoice_pro.api.vendors_api.vendors_container") as mock_ctr:

@@ -88,6 +88,9 @@ def validate_po_data(data, is_update=False):
         except ValueError:
             errors['dates'] = 'Invalid date format'
     
+    from smart_invoice_pro.utils.line_item_validation import validate_line_item_rates
+    errors.update(validate_line_item_rates(data.get('items')))
+
     return errors
 
 @purchase_orders_blueprint.route('/purchase-orders', methods=['POST'])

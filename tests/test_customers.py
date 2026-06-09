@@ -16,6 +16,7 @@ class TestCreateCustomer:
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_success(self, mock_cust, client, headers_a, sample_customer):
+        mock_cust.query_items.return_value = []
         resp = client.post("/api/customers", json=sample_customer, headers=headers_a)
         assert resp.status_code == 201
         data = resp.get_json()
@@ -37,28 +38,58 @@ class TestCreateCustomer:
         assert "display_name" in error["fields"]
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
-    def test_create_customer_missing_email(self, mock_cust, client, headers_a):
+    def test_create_customer_email_optional_when_phone_present(self, mock_cust, client, headers_a):
+        mock_cust.query_items.return_value = []
         resp = client.post(
             "/api/customers",
-            json={"display_name": "Test", "phone": "9876543210"},
+            json={
+                "display_name": "Test",
+                "phone": "9876543210",
+                "customer_type": "individual",
+            },
             headers=headers_a,
         )
-        assert resp.status_code == 400
-        error = self._error_payload(resp)
-        assert error["type"] == "validation_error"
-        assert "email" in error["fields"]
+        assert resp.status_code == 201
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
-    def test_create_customer_missing_phone(self, mock_cust, client, headers_a):
+    def test_create_customer_phone_optional_when_email_present(self, mock_cust, client, headers_a):
+        mock_cust.query_items.return_value = []
         resp = client.post(
             "/api/customers",
-            json={"display_name": "Test", "email": "a@b.com"},
+            json={
+                "display_name": "Test",
+                "email": "a@b.com",
+                "customer_type": "individual",
+            },
+            headers=headers_a,
+        )
+        assert resp.status_code == 201
+
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_create_customer_requires_email_or_phone(self, mock_cust, client, headers_a):
+        resp = client.post(
+            "/api/customers",
+            json={"display_name": "Test"},
             headers=headers_a,
         )
         assert resp.status_code == 400
         error = self._error_payload(resp)
         assert error["type"] == "validation_error"
         assert "phone" in error["fields"]
+
+    @patch("smart_invoice_pro.api.customers_api.customers_container")
+    def test_create_customer_duplicate_company_name(self, mock_cust, client, headers_a, sample_customer):
+        mock_cust.query_items.side_effect = [
+            [],
+            [{
+                "id": "existing-1",
+                "company_name": "Acme Corp Pvt Ltd",
+                "display_name": "Other",
+                "status": "ACTIVE",
+            }],
+        ]
+        resp = client.post("/api/customers", json=sample_customer, headers=headers_a)
+        assert resp.status_code == 409
 
     @patch("smart_invoice_pro.api.customers_api.customers_container")
     def test_create_customer_invalid_email(self, mock_cust, client, headers_a):
