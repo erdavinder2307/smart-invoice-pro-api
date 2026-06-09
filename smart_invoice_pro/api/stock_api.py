@@ -33,20 +33,8 @@ def _product_exists_for_tenant(product_id, tenant_id):
 
 
 def _compute_current_stock(product_id, tenant_id):
-    items = list(stock_container.query_items(
-        query=(
-            "SELECT c.type, c.quantity FROM c "
-            "WHERE c.product_id = @product_id AND c.tenant_id = @tenant_id"
-        ),
-        parameters=[
-            {"name": "@product_id", "value": product_id},
-            {"name": "@tenant_id", "value": tenant_id},
-        ],
-        enable_cross_partition_query=True
-    ))
-    stock_in = sum(float(item.get('quantity', 0)) for item in items if item.get('type') == 'IN')
-    stock_out = sum(float(item.get('quantity', 0)) for item in items if item.get('type') == 'OUT')
-    return stock_in - stock_out
+    from smart_invoice_pro.utils.stock_utils import compute_current_stock
+    return compute_current_stock(product_id, tenant_id)
 
 # Add a test route to verify the blueprint is working
 @stock_blueprint.route('/stock/test', methods=['GET'])

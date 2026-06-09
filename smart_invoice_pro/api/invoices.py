@@ -28,6 +28,7 @@ from smart_invoice_pro.api.tax_rates_api import (
     _get_seller_state,
     _get_customer_state,
 )
+from smart_invoice_pro.utils.stock_utils import validate_stock_out
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -147,8 +148,8 @@ def validate_invoice_payload(data):
             errors[f'items[{idx}].name'] = 'Item name is required.'
         if quantity <= 0:
             errors[f'items[{idx}].quantity'] = 'Quantity must be greater than 0.'
-        if rate < 0:
-            errors[f'items[{idx}].rate'] = 'Rate cannot be negative.'
+        if rate <= 0:
+            errors[f'items[{idx}].rate'] = 'Rate must be greater than zero.'
         if discount < 0:
             errors[f'items[{idx}].discount'] = 'Discount cannot be negative.'
         if tax < 0:
@@ -198,15 +199,22 @@ def validate_invoice_patch(data):
 # ── Stock helper: create a stock transaction for each line item ───────────────
 _STOCK_COMMITTED = {'Issued', 'Partially Paid', 'Paid', 'Overdue'}
 
-def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction):
+def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction, credit_items=None):
     """Create stock ledger entries for invoice items.
     direction='OUT' decrements stock (invoice activated).
     direction='IN'  reverses stock  (invoice cancelled/voided/deleted).
+    credit_items: optional lines to virtually credit before OUT validation.
+    Returns (None, None) on success or (message, details) on failure.
     """
+    if direction == 'OUT':
+        err_msg, err_details = validate_stock_out(items, tenant_id, credit_items=credit_items)
+        if err_msg:
+            return err_msg, err_details
+
     try:
         stock_container = get_container("stock", "/product_id")
     except Exception:
-        return
+        return None, None
     now = datetime.utcnow().isoformat()
     for inv_item in items:
         if not inv_item.get('product_id') or not inv_item.get('quantity'):
@@ -225,6 +233,8 @@ def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction):
         except Exception as e:
             print(f"[stock] Failed to adjust stock for product "
                   f"{inv_item.get('product_id')}: {e}")
+            return f"Failed to adjust stock: {e}", {'stock': str(e)}
+    return None, None
 
 @api_blueprint.route('/invoices', methods=['POST'])
 @swag_from({
@@ -440,11 +450,15 @@ def create_invoice():
         'created_at': data.get('created_at', now),
         'updated_at': data.get('updated_at', now)
     }
-    invoices_container.create_item(body=item)
-
     # Commit stock only when the invoice is immediately Issued (not Draft)
     if item['status'] in _STOCK_COMMITTED:
-        _adjust_stock(stored_items, item['invoice_number'], item['id'], request.tenant_id, 'OUT')
+        stock_err, stock_details = _adjust_stock(
+            stored_items, item['invoice_number'], item['id'], request.tenant_id, 'OUT'
+        )
+        if stock_err:
+            return jsonify({'error': stock_err, 'details': stock_details or {}}), 400
+
+    invoices_container.create_item(body=item)
 
     dispatch_webhook_event(
         tenant_id=request.tenant_id,
@@ -1103,15 +1117,26 @@ def update_invoice(invoice_id):
     _new_committed = _new_status in _STOCK_COMMITTED
     _inv_num = item.get('invoice_number', '')
     if not _old_committed and _new_committed:
-        # e.g. Draft → Issued: commit stock
-        _adjust_stock(normalized_items, _inv_num, invoice_id, request.tenant_id, 'OUT')
+        stock_err, stock_details = _adjust_stock(
+            normalized_items, _inv_num, invoice_id, request.tenant_id, 'OUT'
+        )
+        if stock_err:
+            return jsonify({'error': stock_err, 'details': stock_details or {}}), 400
     elif _old_committed and not _new_committed:
-        # e.g. Issued → Cancelled: reverse stock
         _adjust_stock(before_snapshot.get('items', []), _inv_num, invoice_id, request.tenant_id, 'IN')
     elif _old_committed and _new_committed and (
         before_snapshot.get('items') != normalized_items
     ):
-        # Issued and items changed: delta — reverse old items, apply new
+        stock_err, stock_details = _adjust_stock(
+            normalized_items,
+            _inv_num,
+            invoice_id,
+            request.tenant_id,
+            'OUT',
+            credit_items=before_snapshot.get('items', []),
+        )
+        if stock_err:
+            return jsonify({'error': stock_err, 'details': stock_details or {}}), 400
         _adjust_stock(before_snapshot.get('items', []), _inv_num, invoice_id, request.tenant_id, 'IN')
         _adjust_stock(normalized_items, _inv_num, invoice_id, request.tenant_id, 'OUT')
 

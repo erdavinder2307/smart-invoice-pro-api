@@ -195,6 +195,85 @@ def _get_role_by_name(role_name: str, tenant_id: str):
     return items[0] if items else None
 
 
+_NON_ACCOUNT_USER_TYPES = frozenset({
+    'user_profile',
+    'user_identity',
+    'user_preferences',
+})
+
+
+def _is_account_user(doc: dict) -> bool:
+    """True for login account records, not identity/profile/prefs side documents."""
+    if not doc:
+        return False
+    doc_type = doc.get('type') or ''
+    if doc_type in _NON_ACCOUNT_USER_TYPES:
+        return False
+    if doc.get('permissions') is not None and doc.get('is_system_role') is not None:
+        return False
+    return bool(doc.get('password')) or bool(doc.get('username')) or (
+        not doc_type and bool(doc.get('role'))
+    )
+
+
+def _safe_user(u: dict) -> dict:
+    return {
+        'id':         u.get('id'),
+        'username':   u.get('username', ''),
+        'email':      u.get('email', ''),
+        'name':       u.get('name', u.get('username', '')),
+        'role':       u.get('role', 'Sales'),
+        'role_id':    u.get('role_id'),
+        'is_active':  u.get('is_active', True),
+        'created_at': u.get('created_at', ''),
+    }
+
+
+def _build_identity_maps(items):
+    """Index user_identity and user_profile docs by user_id."""
+    identities = {}
+    profiles = {}
+    for doc in items:
+        doc_type = doc.get('type') or ''
+        uid = doc.get('user_id') or doc.get('id')
+        if not uid:
+            continue
+        if doc_type == 'user_identity':
+            identities[uid] = doc
+        elif doc_type == 'user_profile':
+            profiles[uid] = doc
+    return identities, profiles
+
+
+def _enriched_safe_user(account_doc, identities, profiles):
+    safe = _safe_user(account_doc)
+    uid = account_doc.get('id')
+    ident = identities.get(uid, {})
+    prof = profiles.get(uid, {})
+
+    if not safe['name']:
+        safe['name'] = (
+            ident.get('full_name')
+            or prof.get('name')
+            or account_doc.get('name', '')
+        ).strip()
+    if not safe['email']:
+        safe['email'] = (
+            ident.get('email')
+            or prof.get('email')
+            or account_doc.get('email', '')
+        ).strip().lower()
+    if not safe['username']:
+        if safe['email'] and '@' in safe['email']:
+            safe['username'] = safe['email'].split('@')[0]
+        elif safe['name']:
+            safe['username'] = safe['name'].replace(' ', '').lower()[:48]
+
+    if not safe['name']:
+        safe['name'] = safe['username'] or safe['email'] or 'Unknown user'
+    return safe
+
+
 # ── Fetch a user by user_id (cross-partition) ─────────────────────────────────
 def _fetch_user_by_id(user_id: str):
     items = list(users_container.query_items(
@@ -202,7 +281,10 @@ def _fetch_user_by_id(user_id: str):
         parameters=[{"name": "@uid", "value": user_id}],
         enable_cross_partition_query=True,
     ))
-    return items[0] if items else None
+    for item in items:
+        if _is_account_user(item):
+            return item
+    return None
 
 
 # ── Permission checker ────────────────────────────────────────────────────────
@@ -408,6 +490,8 @@ def delete_role(role_id):
         ))
         fallback = _get_role_by_name('Sales', request.tenant_id)
         for u in users_on_role:
+            if not _is_account_user(u):
+                continue
             u['role_id'] = fallback['id'] if fallback else None
             u['role'] = 'Sales'
             u['updated_at'] = datetime.utcnow().isoformat()
@@ -421,19 +505,6 @@ def delete_role(role_id):
 
 # ── Users CRUD (tenant scoped) ────────────────────────────────────────────────
 
-def _safe_user(u: dict) -> dict:
-    return {
-        'id':         u.get('id'),
-        'username':   u.get('username', ''),
-        'email':      u.get('email', ''),
-        'name':       u.get('name', u.get('username', '')),
-        'role':       u.get('role', 'Sales'),
-        'role_id':    u.get('role_id'),
-        'is_active':  u.get('is_active', True),
-        'created_at': u.get('created_at', ''),
-    }
-
-
 @roles_permissions_blueprint.route('/settings/users', methods=['GET'])
 @require_role('Admin')
 def list_settings_users():
@@ -444,8 +515,13 @@ def list_settings_users():
             parameters=[{"name": "@tid", "value": request.tenant_id}],
             enable_cross_partition_query=True,
         ))
-        # Filter out profile docs
-        users = [_safe_user(u) for u in items if u.get('type') != 'user_profile']
+        identities, profiles = _build_identity_maps(items)
+        users = [
+            _enriched_safe_user(u, identities, profiles)
+            for u in items
+            if _is_account_user(u)
+        ]
+        users.sort(key=lambda u: (u.get('role') != 'Admin', (u.get('name') or '').lower()))
         return jsonify(users), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -470,8 +546,8 @@ def invite_user():
             return jsonify({'error': 'Valid email is required'}), 400
         if not username:
             return jsonify({'error': 'username is required'}), 400
-        if not password or len(password) < 6:
-            return jsonify({'error': 'password must be at least 6 characters'}), 400
+        if not password or len(password) < 8:
+            return jsonify({'error': 'password must be at least 8 characters'}), 400
 
         # Check duplicate email within tenant
         dupes = list(users_container.query_items(
@@ -484,6 +560,20 @@ def invite_user():
         ))
         if dupes:
             return jsonify({'error': 'A user with this email already exists'}), 409
+
+        username_dupes = list(users_container.query_items(
+            query=(
+                "SELECT c.id FROM c WHERE c.tenant_id = @tid "
+                "AND LOWER(c.username) = @username"
+            ),
+            parameters=[
+                {"name": "@tid", "value": request.tenant_id},
+                {"name": "@username", "value": username.lower()},
+            ],
+            enable_cross_partition_query=True,
+        ))
+        if username_dupes:
+            return jsonify({'error': 'A user with this username already exists'}), 409
 
         # Resolve role
         role_id = data.get('role_id')

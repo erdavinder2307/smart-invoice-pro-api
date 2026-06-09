@@ -69,6 +69,30 @@ def _get_client_ip() -> str:
 api_blueprint = Blueprint('api_core', __name__)
 auth_blueprint = Blueprint('auth', __name__)
 
+_LOGIN_RATE_LIMIT = {}
+_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_WINDOW_SECONDS = 900
+
+
+def _login_rate_limit_exceeded():
+    """Simple per-IP login attempt limiter (10 failures per 15 minutes)."""
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+    now = datetime.datetime.utcnow()
+    bucket = _LOGIN_RATE_LIMIT.get(ip)
+    if not bucket or (now - bucket['window_start']).total_seconds() > _LOGIN_WINDOW_SECONDS:
+        _LOGIN_RATE_LIMIT[ip] = {'count': 0, 'window_start': now}
+        bucket = _LOGIN_RATE_LIMIT[ip]
+    if bucket['count'] >= _LOGIN_MAX_ATTEMPTS:
+        return True
+    return False
+
+
+def _record_failed_login():
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+    bucket = _LOGIN_RATE_LIMIT.get(ip)
+    if bucket:
+        bucket['count'] += 1
+
 @api_blueprint.route('/ping', methods=['GET'])
 def ping():
     return jsonify({"message": "pong"}), 200
@@ -136,13 +160,18 @@ def register_user():
     default_role = 'Admin' if (not existing_users or existing_users[0] == 0) else 'Sales'
 
     user_id = str(uuid.uuid4())
+    username = data['username'].strip()
+    email = username.lower() if '@' in username else (data.get('email') or '').strip().lower()
     user = {
         'id': user_id,
         'userid': user_id,  # partition key field for Cosmos DB
         'tenant_id': tenant_id,
-        'username': data['username'],
+        'username': username,
+        'email': email,
+        'name': (data.get('name') or username).strip(),
         'password': hashed_password,
         'role': data.get('role', default_role),
+        'is_active': True,
         'created_at': datetime.datetime.utcnow().isoformat()
     }
     users_container.create_item(body=user)
@@ -208,6 +237,11 @@ def login_user():
     data = validate_json_request()
     if isinstance(data, tuple):
         return data  # Return error response if JSON is invalid
+
+    if _login_rate_limit_exceeded():
+        return jsonify({
+            "message": "Too many login attempts. Please try again in 15 minutes.",
+        }), 429
 
     query = "SELECT * FROM c WHERE c.username = @username"
     items = list(users_container.query_items(
@@ -304,6 +338,7 @@ def login_user():
             "refresh_token": refresh_token_value
         }), 200
     else:
+        _record_failed_login()
         return jsonify({"message": "Invalid username or password."}), 401
  
 @auth_blueprint.route('/auth/refresh', methods=['POST'])

@@ -274,6 +274,43 @@ class TestListSettingsUsers:
         for u in data:
             assert "password" not in u
 
+    def test_list_merges_user_identity_and_excludes_side_docs(self, client, headers_a):
+        sparse_account = {
+            "id": "user-sparse",
+            "userid": "user-sparse",
+            "tenant_id": TENANT_A,
+            "password": "hashed",
+            "role": "Sales",
+            "role_id": "role-sales-1",
+            "is_active": True,
+            "created_at": "2024-06-01T00:00:00",
+        }
+        identity_doc = {
+            "id": "identity-1",
+            "type": "user_identity",
+            "user_id": "user-sparse",
+            "tenant_id": TENANT_A,
+            "full_name": "QA Test User",
+            "email": "qa@example.com",
+        }
+        prefs_doc = {
+            "id": "prefs-1",
+            "type": "user_preferences",
+            "user_id": "user-sparse",
+            "tenant_id": TENANT_A,
+        }
+        p1, p2, p3 = _patches()
+        with p1 as mock_users, p2, p3 as mock_role_users:
+            mock_role_users.query_items.return_value = [ADMIN_USER]
+            mock_users.query_items.return_value = [sparse_account, identity_doc, prefs_doc]
+            resp = client.get("/api/settings/users", headers=headers_a)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["name"] == "QA Test User"
+        assert data[0]["email"] == "qa@example.com"
+        assert data[0]["username"] == "qa"
+
 
 class TestInviteUser:
     """POST /api/settings/users (Admin only)"""
@@ -334,12 +371,29 @@ class TestInviteUser:
             }, headers=headers_a)
         assert resp.status_code == 409
 
+    def test_duplicate_username(self, client, headers_a):
+        p1, p2, p3 = _patches()
+        mock_rctr = _mock_roles_ctr()
+        with p1 as mock_users, p2 as mock_roles_fn, p3 as mock_role_users:
+            mock_role_users.query_items.return_value = [ADMIN_USER]
+            mock_roles_fn.return_value = mock_rctr
+            mock_users.query_items.side_effect = [
+                [],
+                [{"id": ADMIN_USER["id"]}],
+            ]
+            resp = client.post("/api/settings/users", json={
+                "email": "other@example.com",
+                "username": "admin",
+                "password": "securepass123",
+            }, headers=headers_a)
+        assert resp.status_code == 409
+
 
 class TestDeactivateUser:
     """DELETE /api/settings/users/<id> (Admin only)"""
 
     def test_deactivate_success(self, client, headers_a):
-        target = {**SALES_USER, "id": "user-to-deactivate"}
+        target = {**SALES_USER, "id": "user-to-deactivate", "password": "hashed"}
         p1, p2, p3 = _patches()
         with p1 as mock_users, p2, p3 as mock_role_users:
             mock_role_users.query_items.return_value = [ADMIN_USER]
@@ -347,6 +401,26 @@ class TestDeactivateUser:
             resp = client.delete("/api/settings/users/user-to-deactivate",
                                  headers=headers_a)
         assert resp.status_code == 200
+
+    def test_deactivate_uses_account_not_identity_doc(self, client, headers_a):
+        target = {**SALES_USER, "id": "user-to-deactivate", "password": "hashed"}
+        identity_doc = {
+            "id": "identity-side",
+            "type": "user_identity",
+            "user_id": "user-to-deactivate",
+            "tenant_id": TENANT_A,
+            "full_name": "Sales User",
+            "email": "sales@example.com",
+        }
+        p1, p2, p3 = _patches()
+        with p1 as mock_users, p2, p3 as mock_role_users:
+            mock_role_users.query_items.return_value = [ADMIN_USER]
+            mock_users.query_items.return_value = [identity_doc, target]
+            resp = client.delete("/api/settings/users/user-to-deactivate",
+                                 headers=headers_a)
+        assert resp.status_code == 200
+        mock_users.upsert_item.assert_called_once()
+        assert mock_users.upsert_item.call_args[0][0]["id"] == "user-to-deactivate"
 
     def test_cannot_deactivate_self(self, client, headers_a):
         p1, p2, p3 = _patches()

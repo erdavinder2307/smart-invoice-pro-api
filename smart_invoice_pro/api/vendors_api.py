@@ -26,6 +26,32 @@ _ALLOWED_SORT_FIELDS = {
 }
 
 
+def _normalize_vendor_name(value):
+    return ' '.join(str(value or '').strip().lower().split())
+
+
+def _find_vendor_conflict(tenant_id, vendor_name='', gst_number='', exclude_id=None):
+    normalized_name = _normalize_vendor_name(vendor_name)
+    gst = str(gst_number or '').strip().upper()
+    if not normalized_name and not gst:
+        return None, None
+    rows = list(vendors_container.query_items(
+        query="SELECT c.id, c.vendor_name, c.gst_number, c.status FROM c WHERE c.tenant_id = @tid",
+        parameters=[{"name": "@tid", "value": tenant_id}],
+        enable_cross_partition_query=True,
+    ))
+    for row in rows:
+        if exclude_id and row.get('id') == exclude_id:
+            continue
+        if str(row.get('status', '')).upper() == 'ARCHIVED':
+            continue
+        if normalized_name and _normalize_vendor_name(row.get('vendor_name')) == normalized_name:
+            return row, 'vendor_name'
+        if gst and str(row.get('gst_number', '')).strip().upper() == gst:
+            return row, 'gst_number'
+    return None, None
+
+
 def _validate_vendor(data, is_update=False):
     """
     Validate vendor payload.  Returns a dict of {field: error_msg} or None.
@@ -195,6 +221,19 @@ def create_vendor():
         return make_error_response(
             VALIDATION_ERROR, "Please fix the highlighted fields", errors
         )
+
+    vendor_name = data.get('vendor_name', '').strip()
+    gst_number = data.get('gst_number', '').strip()
+    conflict, conflict_field = _find_vendor_conflict(
+        request.tenant_id, vendor_name, gst_number
+    )
+    if conflict:
+        msg = (
+            'A vendor with this GST number already exists'
+            if conflict_field == 'gst_number'
+            else 'A vendor with this name already exists'
+        )
+        return jsonify({'error': msg, 'details': {conflict_field: msg}}), 409
 
     now = datetime.utcnow().isoformat()
     vendor_id = str(uuid.uuid4())
@@ -540,6 +579,19 @@ def update_vendor(vendor_id):
             return make_error_response(NOT_FOUND_ERROR, "Vendor not found", status=404)
         before_snapshot = dict(vendor)
 
+        next_name = data.get('vendor_name', vendor.get('vendor_name', ''))
+        next_gst = data.get('gst_number', vendor.get('gst_number', ''))
+        conflict, conflict_field = _find_vendor_conflict(
+            request.tenant_id, next_name, next_gst, exclude_id=vendor_id
+        )
+        if conflict:
+            msg = (
+                'A vendor with this GST number already exists'
+                if conflict_field == 'gst_number'
+                else 'A vendor with this name already exists'
+            )
+            return jsonify({'error': msg, 'details': {conflict_field: msg}}), 409
+
         updatable_fields = [
             'vendor_name', 'contact_person', 'email', 'phone',
             'address', 'gst_number', 'payment_terms', 'status', 'notes',
@@ -628,15 +680,6 @@ def delete_vendor(vendor_id):
             "status": lifecycle_result.get("status"),
             "dependencySummary": lifecycle_result.get("dependencySummary", {}),
             "hardDeleteAllowed": lifecycle_result.get("hardDeleteAllowed", False),
-        }), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to delete vendor: {str(e)}"}), 500
-
-
-        return jsonify({
-            "message": "Vendor archived successfully",
-            "status": archived_vendor.get("status"),
-            "dependencySummary": dependency.get("dependencySummary", {}),
         }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to delete vendor: {str(e)}"}), 500

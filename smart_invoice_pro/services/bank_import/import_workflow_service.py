@@ -94,6 +94,14 @@ def _normalize_date(raw_value):
     return text
 
 
+def _sanitize_csv_cell(value):
+    """Strip CSV formula-injection prefixes from imported cell values."""
+    text = str(value or "").strip()
+    if text and text[0] in ("=", "+", "-", "@"):
+        return f"'{text}"
+    return text
+
+
 def _parse_amount(value):
     if value is None:
         return 0.0
@@ -107,7 +115,10 @@ def _parse_csv(text):
     reader = csv.DictReader(io.StringIO(text))
     rows = []
     for index, row in enumerate(reader, start=1):
-        row_clean = {str(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+        row_clean = {
+            str(k or "").strip().lower(): _sanitize_csv_cell(v)
+            for k, v in row.items()
+        }
         date_value = (
             row_clean.get("date")
             or row_clean.get("transaction date")
