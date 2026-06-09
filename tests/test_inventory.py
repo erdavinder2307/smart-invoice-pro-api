@@ -10,11 +10,13 @@ from tests.conftest import TENANT_A
 
 class TestStockAdd:
 
+    @patch("smart_invoice_pro.utils.stock_utils.stock_container")
     @patch("smart_invoice_pro.api.stock_api.stock_container")
     @patch("smart_invoice_pro.api.stock_api.products_container")
-    def test_add_stock_success(self, mock_products, mock_stock, client, headers_a):
+    def test_add_stock_success(self, mock_products, mock_stock, mock_su_stock, client, headers_a):
         mock_products.query_items.return_value = [{"id": "p-1", "tenant_id": TENANT_A, "is_deleted": False}]
         mock_stock.query_items.return_value = [{"type": "IN", "quantity": 50}]
+        mock_su_stock.query_items.return_value = [{"type": "IN", "quantity": 50}]
         resp = client.post(
             "/api/stock/add",
             json={"product_id": "p-1", "quantity": 50, "source": "Purchase"},
@@ -34,12 +36,14 @@ class TestStockAdd:
 
 class TestStockReduce:
 
+    @patch("smart_invoice_pro.utils.stock_utils.stock_container")
     @patch("smart_invoice_pro.api.stock_api.stock_container")
     @patch("smart_invoice_pro.api.stock_api.products_container")
-    def test_reduce_stock_success(self, mock_products, mock_stock, client, headers_a):
+    def test_reduce_stock_success(self, mock_products, mock_stock, mock_su_stock, client, headers_a):
         mock_products.query_items.return_value = [{"id": "p-1", "tenant_id": TENANT_A, "is_deleted": False}]
         # Sufficient stock: 50 IN → current_stock=50; reduce by 10 → 40 >= 0
         mock_stock.query_items.return_value = [{"type": "IN", "quantity": 50}]
+        mock_su_stock.query_items.return_value = [{"type": "IN", "quantity": 50}]
         resp = client.post(
             "/api/stock/reduce",
             json={"product_id": "p-1", "quantity": 10, "source": "Sale"},
@@ -119,12 +123,14 @@ class TestStockLedger:
 
 class TestStockAdjust:
 
+    @patch("smart_invoice_pro.utils.stock_utils.stock_container")
     @patch("smart_invoice_pro.api.stock_api.stock_container")
     @patch("smart_invoice_pro.api.stock_api.products_container")
-    def test_adjustment_success(self, mock_products, mock_stock, client, headers_a):
+    def test_adjustment_success(self, mock_products, mock_stock, mock_su_stock, client, headers_a):
         # Negative quantity triggers product + stock existence checks
         mock_products.query_items.return_value = [{"id": "p-1", "tenant_id": TENANT_A}]
         mock_stock.query_items.return_value = [{"type": "IN", "quantity": 20}]  # current=20, enough for -5
+        mock_su_stock.query_items.return_value = [{"type": "IN", "quantity": 20}]  # for compute_current_stock in stock_utils
         resp = client.post(
             "/api/stock/adjust",
             json={

@@ -106,6 +106,9 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.product_api.get_container",
     # Stock
     "smart_invoice_pro.api.stock_api.stock_container",
+    # Stock utils (shared helpers used by invoices, bills, stock_api)
+    "smart_invoice_pro.utils.stock_utils.stock_container",
+    "smart_invoice_pro.utils.stock_utils.products_container",
     # Payments
     "smart_invoice_pro.api.payments_api.get_container",
     # Dashboard
