@@ -1,7 +1,7 @@
 import os
 import sys
 
-from flask import Flask, request
+from flask import Flask, request, send_from_directory
 from flasgger import Swagger
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -119,6 +119,16 @@ def create_app():
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         supports_credentials=True,
     )
+
+    uploads_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '..', 'uploads')
+    )
+    os.makedirs(uploads_root, exist_ok=True)
+
+    @app.route('/uploads/<path:filename>')
+    def serve_upload(filename):
+        """Serve uploaded files (org logos, receipts, etc.)."""
+        return send_from_directory(uploads_root, filename)
 
     @app.route('/')
     def home():

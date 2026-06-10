@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, g, make_response
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import sales_orders_container, invoices_container
 from smart_invoice_pro.api.auth_middleware import token_required
 import uuid
@@ -6,9 +7,10 @@ import base64
 from flasgger import swag_from
 from datetime import datetime
 from enum import Enum
-from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding, branding_for_document
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity, LIFECYCLE_ARCHIVED
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
+from smart_invoice_pro.utils.org_tax_mode import must_suppress_sales_tax, get_org_gst_mode
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -64,6 +66,7 @@ def validate_sales_order_data(data, is_update=False):
     return errors
 
 @sales_orders_blueprint.route('/sales-orders', methods=['POST'])
+@require_permission('purchase_orders', 'create')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -154,7 +157,7 @@ def create_sales_order():
         'lifecycle_status': 'ACTIVE',
         'notes': data.get('notes', ''),
         'terms_conditions': data.get('terms_conditions', ''),
-        'is_gst_applicable': data.get('is_gst_applicable', False),
+        'is_gst_applicable': False if must_suppress_sales_tax(request.tenant_id) else bool(data.get('is_gst_applicable', False)),
         'subject': data.get('subject', ''),
         'salesperson': data.get('salesperson', ''),
         'items': data.get('items', []),
@@ -172,6 +175,7 @@ def create_sales_order():
         return jsonify({"error": f"Failed to create sales order: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -282,6 +286,7 @@ def get_sales_orders():
         return jsonify({"error": f"Failed to retrieve sales orders: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -327,6 +332,7 @@ def get_sales_order(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/dependencies', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @token_required
 def get_sales_order_dependencies(so_id):
     try:
@@ -350,6 +356,7 @@ def get_sales_order_dependencies(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['PUT'])
+@require_permission('purchase_orders', 'edit')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -453,6 +460,7 @@ def update_sales_order(so_id):
         return jsonify({"error": f"Failed to update sales order: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['DELETE'])
+@require_permission('purchase_orders', 'delete')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -525,6 +533,7 @@ def delete_sales_order(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/restore', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 @token_required
 def restore_sales_order(so_id):
     """Restore an archived sales order back to ACTIVE status."""
@@ -553,6 +562,7 @@ def restore_sales_order(so_id):
 
 @sales_orders_blueprint.route('/sales-orders/bulk-archive', methods=['POST'])
 @sales_orders_blueprint.route('/sales-orders/bulk', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 @token_required
 def bulk_archive_sales_orders():
     """Lifecycle-aware bulk archive for sales orders."""
@@ -638,6 +648,7 @@ def bulk_archive_sales_orders():
     return jsonify(result), 200
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/convert-invoice', methods=['POST'])
+@require_permission('invoices', 'create')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -770,6 +781,7 @@ def convert_so_to_invoice(so_id):
         return jsonify({"error": f"Failed to convert sales order to invoice: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/convert-po', methods=['POST'])
+@require_permission('purchase_orders', 'create')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -868,6 +880,7 @@ def convert_so_to_po(so_id):
         return jsonify({"error": f"Failed to convert sales order to PO: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/next-number', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Sales Orders'],
     'responses': {
@@ -912,6 +925,7 @@ def get_next_so_number():
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/pdf', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @token_required
 def get_so_pdf(so_id):
     """Generate and return a PDF for a sales order."""
@@ -935,8 +949,9 @@ def get_so_pdf(so_id):
         ]
     }
     try:
-        branding = _get_tenant_branding(request.tenant_id)
-        pdf_bytes = build_invoice_pdf(doc, branding=branding)
+        branding = branding_for_document(so, request.tenant_id)
+        pdf_bytes = build_invoice_pdf(doc, branding=branding, doc_type='sales_order',
+                                     gst_mode=get_org_gst_mode(request.tenant_id))
         ref = so.get('so_number', 'so').replace('/', '-')
         response = make_response(pdf_bytes)
         response.headers['Content-Type'] = 'application/pdf'
@@ -947,6 +962,7 @@ def get_so_pdf(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/send-email', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 @token_required
 def send_so_email(so_id):
     """Send a sales order to the customer via Azure Communication Services."""
@@ -986,44 +1002,24 @@ def send_so_email(so_id):
     personal_msg  = data.get('message', '')
 
     _branding = _get_tenant_branding(request.tenant_id)
-    _primary  = _branding.get('primary_color', '#2563EB')
 
-    item_rows_html = ''
-    for line in so.get('items', []):
-        item_rows_html += (
-            f"<tr>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0'>{line.get('item_name', line.get('name', ''))}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>{float(line.get('quantity', 0)):.2f}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('rate', 0)):,.2f}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('amount', 0)):,.2f}</td>"
-            f"</tr>"
-        )
-
-    personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
-    html_content = f"""
-    <html><body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
-        <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
-            <h2 style='color:#fff;margin:0'>Sales Order {so_number}</h2>
-        </div>
-        <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
-            <p>Dear {customer_name},</p>
-            {personal_msg_html}
-            <p>Please find your sales order details below:</p>
-            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
-                <thead><tr style='background:#F8FAFC'>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
-                </tr></thead>
-                <tbody>{item_rows_html}</tbody>
-            </table>
-            <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
-            <p style='color:#475569'><strong>Order Date:</strong> {order_date}</p>
-            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Solidev Books.</p>
-        </div>
-    </body></html>
-    """
+    from smart_invoice_pro.services.email_template_service import render_branded_email
+    html_content, _plain_content = render_branded_email(
+        doc_type='sales_order',
+        context={
+            'doc_number':    so_number,
+            'customer_name': customer_name,
+            'issue_date':    order_date,
+            'due_date':      so.get('delivery_date', ''),
+            'total_amount':  total_amount,
+            'balance_due':   total_amount,
+            'subtotal':      float(so.get('subtotal', 0)),
+            'total_tax':     float(so.get('total_tax', 0)),
+            'items':         [{**i, 'name': i.get('item_name', i.get('name', ''))} for i in so.get('items', [])],
+            'message':       personal_msg,
+        },
+        branding=_branding,
+    )
 
     email_message = {
         "senderAddress": sender_address,
@@ -1041,7 +1037,8 @@ def send_so_email(so_id):
                 'invoice_number': so_number,
                 'items': [{**i, 'name': i.get('item_name', i.get('name', ''))} for i in so.get('items', [])]
             }
-            pdf_bytes = build_invoice_pdf(doc, branding=_branding)
+            pdf_bytes = build_invoice_pdf(doc, branding=_branding, doc_type='sales_order',
+                                         gst_mode=get_org_gst_mode(request.tenant_id))
             email_message["attachments"] = [{
                 "name": f"so_{so_number}.pdf",
                 "contentType": "application/pdf",
@@ -1054,6 +1051,22 @@ def send_so_email(so_id):
         client = EmailClient.from_connection_string(connection_string)
         poller = client.begin_send(email_message)
         result = poller.result()
+
+        now = datetime.utcnow().isoformat()
+        so['email_status']  = 'sent'
+        so['email_sent_at'] = now
+        so['updated_at']    = now
+        if not so.get('brand_snapshot'):
+            so['brand_snapshot'] = {
+                'primary_color':     _branding.get('primary_color', ''),
+                'accent_color':      _branding.get('accent_color', ''),
+                'secondary_color':   _branding.get('secondary_color', ''),
+                'logo_url':          _branding.get('logo_url', ''),
+                'organization_name': _branding.get('organization_name', ''),
+                'snapshotted_at':    now,
+            }
+        sales_orders_container.replace_item(item=so['id'], body=so)
+
         return jsonify({
             'message':    'Sales order email sent successfully',
             'sent_to':    recipient_email,

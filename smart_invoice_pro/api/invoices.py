@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import jwt
 from functools import wraps
-from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding, branding_for_document
 from smart_invoice_pro.api.invoice_preferences_api import (
     generate_invoice_number,
     peek_next_invoice_number,
@@ -28,7 +28,9 @@ from smart_invoice_pro.api.tax_rates_api import (
     _get_seller_state,
     _get_customer_state,
 )
+from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, COMPOSITION
 from smart_invoice_pro.utils.stock_utils import validate_stock_out
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -237,6 +239,7 @@ def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction, credi
     return None, None
 
 @api_blueprint.route('/invoices', methods=['POST'])
+@require_permission('invoices', 'create')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -362,7 +365,13 @@ def create_invoice():
         due_date = issue_date
 
     # ── Server-side GST calculation ──────────────────────────────────────────
-    is_gst_applicable = bool(data.get('is_gst_applicable', False))
+    # Org registration type is the ceiling: Composition and Unregistered can
+    # never charge GST on sales regardless of what the payload says.
+    org_gst_mode = get_org_gst_mode(request.tenant_id)
+    if must_suppress_sales_tax(request.tenant_id):
+        is_gst_applicable = False
+    else:
+        is_gst_applicable = bool(data.get('is_gst_applicable', False))
     raw_items = data.get('items', [])
     place_of_supply = (data.get('place_of_supply') or '').strip()
 
@@ -481,6 +490,7 @@ def create_invoice():
 
 @api_blueprint.route('/invoices/bulk', methods=['POST'])
 @api_blueprint.route('/invoices/bulk-archive', methods=['POST'])
+@require_permission('invoices', 'edit')
 def bulk_invoice_actions():
     """Bulk actions on invoices: archive/delete, mark_paid, send_email."""
     try:
@@ -564,6 +574,7 @@ def bulk_invoice_actions():
 
 
 @api_blueprint.route('/invoices', methods=['GET'])
+@require_permission('invoices', 'view')
 def list_invoices():
     """List invoices with search, filtering, sorting, pagination and summary meta."""
     try:
@@ -747,6 +758,7 @@ def list_invoices():
 
 
 @api_blueprint.route('/invoices/export', methods=['GET'])
+@require_permission('invoices', 'view')
 def export_invoices_csv():
     """Export invoices as a CSV file. Accepts same filter params as list endpoint."""
     import csv
@@ -897,6 +909,7 @@ def export_invoices_csv():
 #     return jsonify(items)
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['GET'])
+@require_permission('invoices', 'view')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -961,6 +974,7 @@ def get_invoice(invoice_id):
 
 
 @api_blueprint.route('/invoices/<invoice_id>/dependencies', methods=['GET'])
+@require_permission('invoices', 'view')
 def get_invoice_dependencies(invoice_id):
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(invoices_container.query_items(
@@ -979,6 +993,7 @@ def get_invoice_dependencies(invoice_id):
     return jsonify(dependencies), 200
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PUT'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1070,14 +1085,18 @@ def update_invoice(invoice_id):
     if validation_errors:
         return jsonify({'error': 'Validation failed', 'details': validation_errors}), 400
 
-    is_gst_applicable = bool(merged_payload.get('is_gst_applicable', False))
+    # Enforce org-level GST mode — Composition/Unregistered cannot charge GST on sales
+    if must_suppress_sales_tax(request.tenant_id):
+        is_gst_applicable = False
+    else:
+        is_gst_applicable = bool(merged_payload.get('is_gst_applicable', False))
     normalized_items, computed_subtotal, computed_item_tax = _compute_item_totals(
         merged_payload.get('items', []),
         is_gst_applicable=is_gst_applicable,
     )
-    cgst_amount = _to_number(merged_payload.get('cgst_amount', 0.0))
-    sgst_amount = _to_number(merged_payload.get('sgst_amount', 0.0))
-    igst_amount = _to_number(merged_payload.get('igst_amount', 0.0))
+    cgst_amount = _to_number(merged_payload.get('cgst_amount', 0.0)) if is_gst_applicable else 0.0
+    sgst_amount = _to_number(merged_payload.get('sgst_amount', 0.0)) if is_gst_applicable else 0.0
+    igst_amount = _to_number(merged_payload.get('igst_amount', 0.0)) if is_gst_applicable else 0.0
     manual_tax = cgst_amount + sgst_amount + igst_amount
     computed_total_tax = computed_item_tax + (manual_tax if is_gst_applicable else 0.0)
     invoice_discount = max(0.0, _to_number(merged_payload.get('invoice_discount', 0.0)))
@@ -1146,6 +1165,7 @@ def update_invoice(invoice_id):
     return jsonify(sanitize_item(item))
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['DELETE'])
+@require_permission('invoices', 'delete')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1215,6 +1235,7 @@ def delete_invoice(invoice_id):
 
 
 @api_blueprint.route('/invoices/<invoice_id>/restore', methods=['POST'])
+@require_permission('invoices', 'edit')
 def restore_invoice(invoice_id):
     """Restore an archived invoice back to its previous active status."""
     items = list(invoices_container.query_items(
@@ -1341,6 +1362,7 @@ def patch_invoice(invoice_id):
     return jsonify({'message': 'Invoice updated', 'invoice': sanitize_item(item)})
 
 @api_blueprint.route('/invoices/next-number', methods=['GET'])
+@require_permission('invoices', 'view')
 @swag_from({
     'tags': ['Invoices'],
     'responses': {
@@ -1452,34 +1474,64 @@ def get_customer_invoices(current_customer):
 def get_invoice_by_portal_token(token):
     """Return a read-only view of an invoice via its portal_token. Public, no auth."""
     try:
-        query = f"SELECT * FROM c WHERE c.portal_token = '{token}'"
-        items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+        # Parameterized query — never interpolate token directly (injection risk)
+        items = list(invoices_container.query_items(
+            query="SELECT * FROM c WHERE c.portal_token = @token",
+            parameters=[{"name": "@token", "value": token}],
+            enable_cross_partition_query=True,
+        ))
         if not items:
             return jsonify({'error': 'Invoice not found or link is invalid'}), 404
         inv = items[0]
-        # Return only safe, read-only fields
+
+        # Resolve tenant branding for the customer portal (no staff JWT needed)
+        portal_branding = {}
+        tenant_id = inv.get('tenant_id')
+        if tenant_id:
+            try:
+                from smart_invoice_pro.api.organization_profile_api import _get_profile
+                from smart_invoice_pro.api.branding_api import _extract_branding
+                profile = _get_profile(tenant_id)
+                b = _extract_branding(profile)
+                from smart_invoice_pro.utils.org_tax_mode import derive_gst_mode
+                _gst_mode = derive_gst_mode(
+                    profile.get('gst_registration_type', 'regular'),
+                    profile.get('gst_enabled'),
+                )
+                portal_branding = {
+                    'primary_color':    b.get('primary_color', '#2563EB'),
+                    'accent_color':     b.get('accent_color', '#2d6cdf'),
+                    'logo_url':         b.get('logo_url', ''),
+                    'organization_name': (profile.get('organization_name') or '').strip(),
+                    'gst_mode':          _gst_mode,
+                    'gstin':             (profile.get('gstin') or '').strip(),
+                }
+            except Exception:
+                pass
+
         safe = {
-            'id': inv.get('id'),
-            'invoice_number': inv.get('invoice_number'),
-            'issue_date': inv.get('issue_date'),
-            'due_date': inv.get('due_date'),
-            'status': inv.get('status'),
-            'customer_name': inv.get('customer_name'),
-            'customer_email': inv.get('customer_email'),
-            'subtotal': inv.get('subtotal', 0),
-            'total_tax': inv.get('total_tax', 0),
-            'cgst_amount': inv.get('cgst_amount', 0),
-            'sgst_amount': inv.get('sgst_amount', 0),
-            'igst_amount': inv.get('igst_amount', 0),
-            'total_amount': inv.get('total_amount', 0),
-            'amount_paid': inv.get('amount_paid', 0),
-            'balance_due': inv.get('balance_due', 0),
-            'payment_terms': inv.get('payment_terms', ''),
-            'notes': inv.get('notes', ''),
-            'terms_conditions': inv.get('terms_conditions', ''),
+            'id':                inv.get('id'),
+            'invoice_number':    inv.get('invoice_number'),
+            'issue_date':        inv.get('issue_date'),
+            'due_date':          inv.get('due_date'),
+            'status':            inv.get('status'),
+            'customer_name':     inv.get('customer_name'),
+            'customer_email':    inv.get('customer_email'),
+            'subtotal':          inv.get('subtotal', 0),
+            'total_tax':         inv.get('total_tax', 0),
+            'cgst_amount':       inv.get('cgst_amount', 0),
+            'sgst_amount':       inv.get('sgst_amount', 0),
+            'igst_amount':       inv.get('igst_amount', 0),
+            'total_amount':      inv.get('total_amount', 0),
+            'amount_paid':       inv.get('amount_paid', 0),
+            'balance_due':       inv.get('balance_due', 0),
+            'payment_terms':     inv.get('payment_terms', ''),
+            'notes':             inv.get('notes', ''),
+            'terms_conditions':  inv.get('terms_conditions', ''),
             'is_gst_applicable': inv.get('is_gst_applicable', False),
-            'items': inv.get('items', []),
-            'portal_token': token,
+            'items':             inv.get('items', []),
+            'portal_token':      token,
+            'branding':          portal_branding,
         }
         return jsonify(safe), 200
     except Exception as e:
@@ -1488,6 +1540,7 @@ def get_invoice_by_portal_token(token):
 
 # ── Generate / regenerate a portal token for an existing invoice ─────────────
 @api_blueprint.route('/invoices/<invoice_id>/generate-portal-token', methods=['POST'])
+@require_permission('invoices', 'edit')
 def generate_portal_token(invoice_id):
     """Generate or regenerate a portal_token for an existing invoice."""
     try:
@@ -1514,6 +1567,7 @@ def generate_portal_token(invoice_id):
 
 # ── Record a payment against an invoice ──────────────────────────────────────
 @api_blueprint.route('/invoices/<invoice_id>/record-payment', methods=['POST'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1657,6 +1711,7 @@ def record_payment(invoice_id):
 
 # ── Void (cancel) an invoice ─────────────────────────────────────────────────
 @api_blueprint.route('/invoices/<invoice_id>/void', methods=['POST'])
+@require_permission('invoices', 'edit')
 def void_invoice(invoice_id):
     """Void an issued invoice: sets status to Cancelled with a mandatory reason."""
     data = request.get_json() or {}
@@ -1724,6 +1779,7 @@ def void_invoice(invoice_id):
 
 # ── Send invoice email to customer ───────────────────────────────────────────
 @api_blueprint.route('/invoices/<invoice_id>/send-email', methods=['POST'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1811,70 +1867,32 @@ def send_invoice_email(invoice_id):
                 f"</tr>"
             )
 
-        # ── Fetch tenant branding for email colours ─────────────────────────
+        # ── Fetch tenant branding for email ──────────────────────────────────
         _email_branding = _get_tenant_branding(request.tenant_id)
-        _primary  = _email_branding.get('primary_color',  '#2563EB')
-        _accent   = _email_branding.get('accent_color',   '#2d6cdf')
 
-        view_link = ''
+        portal_url = ''
         if portal_token:
             base_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-            view_link = (
-                f"<p style='margin-top:20px'>"
-                f"<a href='{base_url}/portal/invoice/{portal_token}' "
-                f"style='background:{_primary};color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none'>"
-                f"View Invoice Online</a></p>"
-            )
+            portal_url = f"{base_url}/portal/invoice/{portal_token}"
 
-        personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
-
-        html_content = f"""
-        <html>
-        <body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
-            <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
-                <h2 style='color:#fff;margin:0'>Invoice {invoice_number}</h2>
-            </div>
-            <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
-                <p>Dear {customer_name},</p>
-                {personal_msg_html}
-                <p>Please find your invoice details below:</p>
-                <table style='width:100%;border-collapse:collapse;margin:16px 0'>
-                    <thead>
-                        <tr style='background:#F8FAFC'>
-                            <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
-                            <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
-                            <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
-                            <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
-                        </tr>
-                    </thead>
-                    <tbody>{item_rows_html}</tbody>
-                </table>
-                <table style='width:100%;border-collapse:collapse;margin-top:8px'>
-                    <tr><td style='padding:4px 8px;color:#475569'>Subtotal</td>
-                        <td style='padding:4px 8px;text-align:right'>\u20b9{float(inv.get("subtotal",0)):,.2f}</td></tr>
-                    <tr><td style='padding:4px 8px;color:#475569'>Tax</td>
-                        <td style='padding:4px 8px;text-align:right'>\u20b9{float(inv.get("total_tax",0)):,.2f}</td></tr>
-                    <tr style='font-weight:bold;font-size:16px'>
-                        <td style='padding:8px;border-top:2px solid #E2E8F0'>Total</td>
-                        <td style='padding:8px;border-top:2px solid #E2E8F0;text-align:right'>\u20b9{float(total_amount):,.2f}</td>
-                    </tr>
-                    <tr style='color:#D97706'>
-                        <td style='padding:4px 8px'>Balance Due</td>
-                        <td style='padding:4px 8px;text-align:right;font-weight:bold'>\u20b9{float(balance_due):,.2f}</td>
-                    </tr>
-                </table>
-                <p style='margin-top:16px;color:#475569'>
-                    <strong>Issue Date:</strong> {issue_date} &nbsp;|&nbsp;
-                    <strong>Due Date:</strong> {due_date}
-                </p>
-                {view_link}
-                <p style='color:#94A3B8;font-size:12px;margin-top:32px'>
-                    This is an automated email from Solidev Books.
-                </p>
-            </div>
-        </body>
-        </html>
-        """
+        from smart_invoice_pro.services.email_template_service import render_branded_email
+        html_content, _plain_content = render_branded_email(
+            doc_type='invoice',
+            context={
+                'doc_number':    invoice_number,
+                'customer_name': customer_name,
+                'issue_date':    issue_date,
+                'due_date':      due_date,
+                'total_amount':  total_amount,
+                'balance_due':   balance_due,
+                'subtotal':      float(inv.get('subtotal', 0)),
+                'total_tax':     float(inv.get('total_tax', 0)),
+                'items':         inv.get('items', []),
+                'message':       personal_msg,
+                'portal_url':    portal_url,
+            },
+            branding=_email_branding,
+        )
 
         # ── Build email message ───────────────────────────────────────────────
         email_message = {
@@ -1894,7 +1912,8 @@ def send_invoice_email(invoice_id):
         if attach_pdf:
             try:
                 _branding = _get_tenant_branding(request.tenant_id)
-                pdf_bytes = build_invoice_pdf(inv, branding=_branding)
+                pdf_bytes = build_invoice_pdf(inv, branding=_branding, doc_type='invoice',
+                                             gst_mode=get_org_gst_mode(request.tenant_id))
                 email_message["attachments"] = [{
                     "name":          f"invoice_{invoice_number}.pdf",
                     "contentType":   "application/pdf",
@@ -1917,6 +1936,20 @@ def send_invoice_email(invoice_id):
         inv['updated_at']    = now
         if inv.get('status') == 'Draft':       # auto-advance on first send
             inv['status'] = 'Issued'
+
+        # ── Brand snapshot: record branding at send time ──────────────────────
+        # Only captured once (on first send). Re-sending does not overwrite so
+        # that re-generated PDFs continue to match the originally-issued version.
+        if not inv.get('brand_snapshot'):
+            inv['brand_snapshot'] = {
+                'primary_color':     _email_branding.get('primary_color', ''),
+                'accent_color':      _email_branding.get('accent_color', ''),
+                'secondary_color':   _email_branding.get('secondary_color', ''),
+                'logo_url':          _email_branding.get('logo_url', ''),
+                'organization_name': _email_branding.get('organization_name', ''),
+                'snapshotted_at':    now,
+            }
+
         invoices_container.replace_item(item=inv['id'], body=inv)
 
         return jsonify({
@@ -1942,6 +1975,7 @@ def send_invoice_email(invoice_id):
 
 # ── GET /invoices/:id/pdf — stream PDF bytes for a specific invoice ───────────
 @api_blueprint.route('/invoices/<invoice_id>/pdf', methods=['GET'])
+@require_permission('invoices', 'view')
 def get_invoice_pdf(invoice_id):
     """Fetch an invoice and return it as a generated PDF file."""
     items = list(invoices_container.query_items(
@@ -1956,8 +1990,9 @@ def get_invoice_pdf(invoice_id):
         return jsonify({'error': 'Forbidden'}), 403
 
     try:
-        _branding = _get_tenant_branding(request.tenant_id)
-        pdf_bytes = build_invoice_pdf(inv, branding=_branding)
+        _branding = branding_for_document(inv, request.tenant_id)
+        pdf_bytes = build_invoice_pdf(inv, branding=_branding, doc_type='invoice',
+                                     gst_mode=get_org_gst_mode(request.tenant_id))
         inv_number = inv.get('invoice_number', 'invoice').replace('/', '-')
         response = make_response(pdf_bytes)
         response.headers['Content-Type'] = 'application/pdf'
@@ -1969,6 +2004,7 @@ def get_invoice_pdf(invoice_id):
 
 # ── POST /invoices/:id/send-reminder — send a payment reminder email ──────────
 @api_blueprint.route('/invoices/<invoice_id>/send-reminder', methods=['POST'])
+@require_permission('invoices', 'edit')
 def send_invoice_reminder(invoice_id):
     """Send a payment reminder email for an outstanding invoice."""
     import os
@@ -2003,31 +2039,18 @@ def send_invoice_reminder(invoice_id):
     balance_due = float(inv.get('balance_due', inv.get('total_amount', 0)))
     due_date    = inv.get('due_date', 'N/A')
 
-    plain = (
-        f"Dear Customer,\n\n"
-        f"This is a friendly payment reminder for Invoice {inv_number}.\n"
-        f"Balance Due: \u20b9{balance_due:,.2f}\n"
-        f"Due Date: {due_date}\n\n"
-        f"Please arrange payment at your earliest convenience.\n\n"
-        f"Thank you,\nSolidev Books"
+    _reminder_branding = _get_tenant_branding(inv.get('tenant_id') or request.tenant_id)
+
+    from smart_invoice_pro.services.email_template_service import render_reminder_email
+    html, plain = render_reminder_email(
+        context={
+            'doc_number':    inv_number,
+            'customer_name': inv.get('customer_name', 'Customer'),
+            'balance_due':   balance_due,
+            'due_date':      due_date,
+        },
+        branding=_reminder_branding,
     )
-    html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-      <h2 style="color:#1E40AF">Payment Reminder</h2>
-      <p>Dear Customer,</p>
-      <p>This is a friendly reminder that Invoice <strong>{inv_number}</strong> has an outstanding balance.</p>
-      <table style="width:100%;border-collapse:collapse;margin:16px 0">
-        <tr><td style="padding:8px;background:#F8FAFC"><strong>Invoice #</strong></td>
-            <td style="padding:8px">{inv_number}</td></tr>
-        <tr><td style="padding:8px;background:#F8FAFC"><strong>Balance Due</strong></td>
-            <td style="padding:8px;color:#DC2626"><strong>\u20b9{balance_due:,.2f}</strong></td></tr>
-        <tr><td style="padding:8px;background:#F8FAFC"><strong>Due Date</strong></td>
-            <td style="padding:8px">{due_date}</td></tr>
-      </table>
-      <p>Please arrange payment at your earliest convenience.</p>
-      <p>Thank you,<br/><strong>Solidev Books</strong></p>
-    </div>
-    """
 
     try:
         from azure.communication.email import EmailClient

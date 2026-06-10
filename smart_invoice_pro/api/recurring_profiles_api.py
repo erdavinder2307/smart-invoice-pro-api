@@ -7,6 +7,7 @@ from flask import Blueprint, jsonify, request
 from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
+from smart_invoice_pro.utils.org_tax_mode import must_suppress_sales_tax
 from smart_invoice_pro.utils.bulk_archive_contracts import (
     add_archive_failure,
     add_archive_success,
@@ -458,7 +459,7 @@ def create_recurring_profile():
         'payment_terms': data.get('payment_terms', ''),
         'notes': data.get('notes', ''),
         'terms_conditions': data.get('terms_conditions', ''),
-        'is_gst_applicable': bool(data.get('is_gst_applicable', False)),
+        'is_gst_applicable': False if must_suppress_sales_tax(request.tenant_id) else bool(data.get('is_gst_applicable', False)),
         'cgst_amount': _to_float(data.get('cgst_amount', 0.0)),
         'sgst_amount': _to_float(data.get('sgst_amount', 0.0)),
         'igst_amount': _to_float(data.get('igst_amount', 0.0)),

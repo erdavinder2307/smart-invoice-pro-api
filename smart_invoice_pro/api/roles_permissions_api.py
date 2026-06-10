@@ -66,14 +66,30 @@ PERMISSION_MODULES = {
     'purchase_orders': ['view', 'create', 'edit', 'delete'],
     'bills':           ['view', 'create', 'edit', 'delete'],
     'expenses':        ['view', 'create', 'edit', 'delete'],
+    'banking':         ['view', 'create', 'edit'],
     'reports':         ['view'],
     'settings':        ['view', 'edit'],
+    'user_management': ['view', 'invite', 'edit', 'suspend'],
+    'roles':           ['view', 'edit'],
+    'audit_logs':      ['view'],
+    'automation':      ['view', 'edit'],
+    'integrations':    ['view', 'edit'],
 }
 
 # ── Default permissions for each system role ──────────────────────────────────
 def _all(actions): return {a: True for a in actions}
 def _none(actions): return {a: False for a in actions}
 def _some(actions, allowed): return {a: (a in allowed) for a in actions}
+
+def _new_modules_none():
+    return {
+        'banking':         _none(PERMISSION_MODULES['banking']),
+        'user_management': _none(PERMISSION_MODULES['user_management']),
+        'roles':           _none(PERMISSION_MODULES['roles']),
+        'audit_logs':      _none(PERMISSION_MODULES['audit_logs']),
+        'automation':      _none(PERMISSION_MODULES['automation']),
+        'integrations':    _none(PERMISSION_MODULES['integrations']),
+    }
 
 SYSTEM_ROLE_DEFAULTS = {
     'Admin': {m: _all(a) for m, a in PERMISSION_MODULES.items()},
@@ -86,8 +102,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit']),
         'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _some(PERMISSION_MODULES['banking'],      ['view']),
         'reports':         _all(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
     'Sales': {
         'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view', 'create', 'edit']),
@@ -98,8 +117,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _none(PERMISSION_MODULES['purchase_orders']),
         'bills':           _none(PERMISSION_MODULES['bills']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _none(PERMISSION_MODULES['banking']),
         'reports':         _none(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
     'Accountant': {
         'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view', 'create', 'edit']),
@@ -110,8 +132,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view']),
         'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _some(PERMISSION_MODULES['banking'],      ['view']),
         'reports':         _all(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
     'Purchaser': {
         'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view']),
@@ -122,8 +147,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit']),
         'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _none(PERMISSION_MODULES['banking']),
         'reports':         _none(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
 }
 
@@ -527,6 +555,123 @@ def list_settings_users():
         return jsonify({'error': str(e)}), 500
 
 
+def _send_invite_email(to_email: str, to_name: str, username: str,
+                       password: str, role: str, tenant_id: str) -> None:
+    """
+    Send a welcome / invite email to the newly created user via Azure ACS.
+    Failures are logged but do NOT prevent user creation from succeeding.
+    """
+    import os
+    import logging
+
+    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
+    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    app_url           = os.getenv('APP_URL', 'https://app.solidevbooks.com')
+
+    if not connection_string:
+        logging.warning("invite_user: AZURE_EMAIL_CONNECTION_STRING not set — skipping invite email")
+        return
+
+    try:
+        # Fetch org name for personalisation
+        org_name = 'Solidev Books'
+        try:
+            from smart_invoice_pro.api.organization_profile_api import _get_profile
+            profile = _get_profile(tenant_id)
+            org_name = (profile.get('organization_name') or '').strip() or org_name
+        except Exception:
+            pass
+
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0">
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr><td align="center" style="padding:32px 16px">
+      <table width="560" style="background:#fff;border-radius:8px;
+             border:1px solid #e2e8f0;padding:40px 36px">
+        <tr><td>
+          <h2 style="margin:0 0 8px;color:#1a202c;font-size:20px">
+            You've been invited to {org_name}
+          </h2>
+          <p style="color:#4a5568;font-size:14px;line-height:1.6;margin:0 0 24px">
+            Hi {to_name},<br><br>
+            An administrator has created an account for you on
+            <strong>Solidev Books</strong>. You can log in immediately
+            using the credentials below.
+          </p>
+
+          <table style="background:#f7fafc;border:1px solid #e2e8f0;
+                        border-radius:6px;padding:16px 20px;width:100%;
+                        margin-bottom:24px">
+            <tr>
+              <td style="font-size:13px;color:#718096;padding:4px 0">Username</td>
+              <td style="font-size:13px;color:#2d3748;font-weight:600;
+                         padding:4px 0">{username}</td>
+            </tr>
+            <tr>
+              <td style="font-size:13px;color:#718096;padding:4px 0">
+                Temporary password</td>
+              <td style="font-size:13px;color:#2d3748;font-weight:600;
+                         padding:4px 0;font-family:monospace">{password}</td>
+            </tr>
+            <tr>
+              <td style="font-size:13px;color:#718096;padding:4px 0">Role</td>
+              <td style="font-size:13px;color:#2d3748;font-weight:600;
+                         padding:4px 0">{role}</td>
+            </tr>
+          </table>
+
+          <p style="margin:0 0 24px">
+            <a href="{app_url}/login"
+               style="display:inline-block;background:#1a56db;color:#fff;
+                      text-decoration:none;padding:12px 28px;border-radius:6px;
+                      font-size:14px;font-weight:600">
+              Log in to Solidev Books
+            </a>
+          </p>
+
+          <p style="font-size:12px;color:#a0aec0;margin:0">
+            Please change your password after your first login.
+            If you were not expecting this invitation, you can safely ignore
+            this email.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+"""
+
+        plain_body = (
+            f"You've been invited to {org_name} on Solidev Books.\n\n"
+            f"Username: {username}\n"
+            f"Temporary password: {password}\n"
+            f"Role: {role}\n\n"
+            f"Log in at: {app_url}/login\n\n"
+            f"Please change your password after your first login."
+        )
+
+        from azure.communication.email import EmailClient
+        client = EmailClient.from_connection_string(connection_string)
+        poller = client.begin_send({
+            "senderAddress": sender_address,
+            "recipients": {"to": [{"address": to_email, "displayName": to_name}]},
+            "content": {
+                "subject": f"You've been invited to {org_name} — Solidev Books",
+                "html": html_body,
+                "plainText": plain_body,
+            },
+        })
+        poller.result(timeout=30)
+        logging.info(f"invite_user: welcome email sent to {to_email}")
+
+    except Exception as exc:
+        logging.error(f"invite_user: failed to send invite email to {to_email}: {exc}")
+
+
 @roles_permissions_blueprint.route('/settings/users', methods=['POST'])
 @require_role('Admin')
 def invite_user():
@@ -610,6 +755,17 @@ def invite_user():
         users_container.create_item(body=user_doc)
         log_audit("user", "create", user_doc["id"], None, user_doc,
                   user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
+
+        # ── Send invite email ─────────────────────────────────────────────────
+        _send_invite_email(
+            to_email=email,
+            to_name=name,
+            username=username,
+            password=password,          # plain password — only available here
+            role=role_name,
+            tenant_id=request.tenant_id,
+        )
+
         return jsonify(_safe_user(user_doc)), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500

@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import customers_container
 from smart_invoice_pro.utils.cosmos_client import invoices_container
 from smart_invoice_pro.utils.cosmos_client import quotes_container
@@ -155,6 +156,7 @@ def process_customer_documents(documents, customer_id):
     return processed
 
 @customers_blueprint.route('/customers', methods=['POST'])
+@require_permission('customers', 'create')
 @swag_from({
     'tags': ['Customers'],
     'parameters': [
@@ -380,6 +382,7 @@ def create_customer():
     return jsonify(response_item), 201
 
 @customers_blueprint.route('/customers', methods=['GET'])
+@require_permission('customers', 'view')
 @swag_from({
     'tags': ['Customers'],
     'responses': {
@@ -488,6 +491,7 @@ def list_customers():
     })
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['GET'])
+@require_permission('customers', 'view')
 @swag_from({
     'tags': ['Customers'],
     'parameters': [
@@ -542,6 +546,7 @@ def get_customer(customer_id):
 
 
 @customers_blueprint.route('/customers/<customer_id>/overview', methods=['GET'])
+@require_permission('customers', 'view')
 def get_customer_overview(customer_id):
     """
     Get customer detail with invoice history and financial summary.
@@ -630,6 +635,7 @@ def get_customer_overview(customer_id):
 
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['PUT'])
+@require_permission('customers', 'edit')
 @swag_from({
     'tags': ['Customers'],
     'parameters': [
@@ -835,6 +841,7 @@ def update_customer(customer_id):
     return jsonify(response_item)
 
 @customers_blueprint.route('/customers/<customer_id>', methods=['DELETE'])
+@require_permission('customers', 'delete')
 @swag_from({
     'tags': ['Customers'],
     'parameters': [
@@ -893,6 +900,7 @@ def delete_customer(customer_id):
 
 @customers_blueprint.route('/customers/bulk-archive', methods=['POST'])
 @customers_blueprint.route('/customers/bulk', methods=['POST'])
+@require_permission('customers', 'edit')
 def bulk_archive_customers():
     """Lifecycle-aware bulk archive for customers."""
     payload = request.get_json() or {}
@@ -964,6 +972,7 @@ def bulk_archive_customers():
 
 
 @customers_blueprint.route('/customers/<customer_id>/restore', methods=['POST'])
+@require_permission('customers', 'edit')
 def restore_customer(customer_id):
     """Restore an archived customer back to ACTIVE status."""
     items = list(customers_container.query_items(
@@ -990,6 +999,7 @@ def restore_customer(customer_id):
 
 
 @customers_blueprint.route('/customers/<customer_id>/dependencies', methods=['GET'])
+@require_permission('customers', 'view')
 def get_customer_dependencies(customer_id):
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(customers_container.query_items(
@@ -1008,6 +1018,7 @@ def get_customer_dependencies(customer_id):
     return jsonify(dependency), 200
 
 @customers_blueprint.route('/customers/<source_id>/merge-into/<target_id>', methods=['POST'])
+@require_permission('customers', 'edit')
 def merge_customer(source_id, target_id):
     """Merge a duplicate customer into a primary customer.
 

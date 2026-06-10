@@ -16,6 +16,7 @@ Fields managed here:
         show_signature         – bool
 """
 
+import copy
 import re
 from datetime import datetime
 
@@ -24,6 +25,7 @@ from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.api.organization_profile_api import _get_profile, _safe
+from smart_invoice_pro.utils.audit_logger import log_audit
 
 branding_blueprint = Blueprint('branding', __name__)
 
@@ -91,6 +93,8 @@ def update_branding():
                 }), 400
 
         existing = _get_profile(request.tenant_id)
+        before_snapshot = _extract_branding(existing)
+
         its_in   = data.get('invoice_template_settings') or {}
         ext_its  = existing.get('invoice_template_settings') or {}
 
@@ -101,6 +105,9 @@ def update_branding():
                 existing[field] = new_val
             elif field not in existing:
                 existing[field] = DEFAULT_BRANDING[field]
+
+        if 'logo_url' in data:
+            existing['logo_url'] = (data['logo_url'] or '').strip()
 
         if 'email_header_logo_url' in data:
             existing['email_header_logo_url'] = (data['email_header_logo_url'] or '').strip()
@@ -128,7 +135,73 @@ def update_branding():
             existing['type'] = 'organization_profile'
 
         settings_container.upsert_item(existing)
-        return jsonify(_extract_branding(existing)), 200
+        after_snapshot = _extract_branding(existing)
+
+        log_audit(
+            'branding', 'update',
+            f"{request.tenant_id}:organization_profile",
+            before_snapshot, after_snapshot,
+        )
+
+        return jsonify(after_snapshot), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ── GET /api/settings/branding/preview ───────────────────────────────────────
+@branding_blueprint.route('/settings/branding/preview', methods=['GET'])
+def preview_branding_pdf():
+    """
+    Return a sample invoice PDF rendered with the current tenant branding.
+    Query params:
+        doc_type  – one of invoice (default), quote, purchase_order, sales_order
+    This is the same code-path as production PDF generation, so the preview is
+    pixel-accurate (WYSIWYG).
+    """
+    try:
+        from flask import make_response
+        from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+
+        doc_type = request.args.get('doc_type', 'invoice')
+        branding = _get_tenant_branding(request.tenant_id)
+
+        sample_invoice = {
+            'invoice_number':    'PREVIEW-001',
+            'customer_name':     'Sample Customer',
+            'customer_id':       'preview',
+            'issue_date':        '2026-06-09',
+            'due_date':          '2026-06-23',
+            'payment_terms':     'Net 14',
+            'payment_mode':      'Bank Transfer',
+            'status':            'Draft',
+            'invoice_type':      'standard',
+            'is_gst_applicable': True,
+            'subtotal':          10000.00,
+            'cgst_amount':       900.00,
+            'sgst_amount':       900.00,
+            'igst_amount':       0.00,
+            'total_tax':         1800.00,
+            'total_amount':      11800.00,
+            'amount_paid':       0.00,
+            'balance_due':       11800.00,
+            'notes':             'Thank you for your business.',
+            'terms_conditions':  'Payment due within 14 days of invoice date.',
+            'items': [
+                {'name': 'Web Design',  'quantity': 1,  'rate': 5000.00, 'tax': 18, 'amount': 5000.00},
+                {'name': 'Hosting',     'quantity': 12, 'rate': 250.00,  'tax': 18, 'amount': 3000.00},
+                {'name': 'Maintenance', 'quantity': 2,  'rate': 1000.00, 'tax': 18, 'amount': 2000.00},
+            ],
+        }
+
+        from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode
+        pdf_bytes = build_invoice_pdf(sample_invoice, branding=branding, doc_type=doc_type,
+                                     gst_mode=get_org_gst_mode(request.tenant_id))
+
+        response = make_response(pdf_bytes)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = 'inline; filename=branding_preview.pdf'
+        return response
+
+    except Exception as e:
+        return jsonify({'error': f'Preview generation failed: {str(e)}'}), 500
