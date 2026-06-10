@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import bills_container, stock_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
@@ -174,6 +175,7 @@ def validate_bill_data(data, is_update=False):
     return errors
 
 @bills_blueprint.route('/bills', methods=['POST'])
+@require_permission('bills', 'create')
 @swag_from({
     'tags': ['Bills'],
     'parameters': [
@@ -299,6 +301,7 @@ def create_bill():
         return jsonify({"error": f"Failed to create bill: {str(e)}"}), 500
 
 @bills_blueprint.route('/bills', methods=['GET'])
+@require_permission('bills', 'view')
 @swag_from({
     'tags': ['Bills'],
     'parameters': [
@@ -519,6 +522,7 @@ def get_bills():
         return jsonify({"error": f"Failed to retrieve bills: {str(e)}"}), 500
 
 @bills_blueprint.route('/bills/<bill_id>', methods=['GET'])
+@require_permission('bills', 'view')
 @swag_from({
     'tags': ['Bills'],
     'parameters': [
@@ -564,12 +568,14 @@ def get_bill(bill_id):
 
 
 @bills_blueprint.route('/bills/<bill_id>/dependencies', methods=['GET'])
+@require_permission('bills', 'view')
 def get_bill_dependencies(bill_id):
     """Check if a bill has dependent records before archiving."""
     result = check_entity_dependencies('bill', bill_id, request.tenant_id)
     return jsonify(result), 200
 
 @bills_blueprint.route('/bills/<bill_id>', methods=['PUT'])
+@require_permission('bills', 'edit')
 @swag_from({
     'tags': ['Bills'],
     'parameters': [
@@ -671,6 +677,7 @@ def update_bill(bill_id):
         return jsonify({"error": f"Failed to update bill: {str(e)}"}), 500
 
 @bills_blueprint.route('/bills/<bill_id>', methods=['DELETE'])
+@require_permission('bills', 'delete')
 @swag_from({
     'tags': ['Bills'],
     'parameters': [
@@ -739,6 +746,7 @@ def delete_bill(bill_id):
 
 
 @bills_blueprint.route('/bills/<bill_id>/restore', methods=['POST'])
+@require_permission('bills', 'edit')
 def restore_bill(bill_id):
     """Restore an archived bill back to ACTIVE status."""
     items = list(bills_container.query_items(
@@ -763,6 +771,7 @@ def restore_bill(bill_id):
 
 @bills_blueprint.route('/bills/bulk-archive', methods=['POST'])
 @bills_blueprint.route('/bills/bulk', methods=['POST'])
+@require_permission('bills', 'edit')
 def bulk_archive_bills():
     """Lifecycle-aware bulk archive for bills."""
     payload = request.get_json() or {}
@@ -847,6 +856,7 @@ def bulk_archive_bills():
     return jsonify(result), 200
 
 @bills_blueprint.route('/bills/<bill_id>/record-payment', methods=['POST'])
+@require_permission('bills', 'edit')
 @swag_from({
     'tags': ['Bills'],
     'parameters': [
@@ -968,6 +978,7 @@ def record_payment(bill_id):
         return jsonify({"error": f"Failed to record payment: {str(e)}"}), 500
 
 @bills_blueprint.route('/bills/next-number', methods=['GET'])
+@require_permission('bills', 'view')
 @swag_from({
     'tags': ['Bills'],
     'responses': {

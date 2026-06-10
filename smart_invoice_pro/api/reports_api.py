@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import (
     invoices_container, expenses_container, bills_container,
     products_container, bank_accounts_container, customers_container
@@ -20,6 +21,7 @@ def parse_date(date_str):
 
 
 @reports_blueprint.route('/reports/profit-loss', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'summary': 'Get Profit & Loss Report',
     'description': 'Generate profit and loss statement for a date range',
@@ -167,6 +169,7 @@ def get_profit_loss():
 
 
 @reports_blueprint.route('/reports/balance-sheet', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'summary': 'Get Balance Sheet',
     'description': 'Generate balance sheet as of a specific date',
@@ -311,6 +314,7 @@ def get_balance_sheet():
 
 
 @reports_blueprint.route('/reports/ap-aging', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'summary': 'Get Accounts Payable Aging Report',
     'description': 'Generate A/P aging report showing unpaid bills by age brackets',
@@ -425,6 +429,7 @@ def get_ap_aging():
 
 
 @reports_blueprint.route('/reports/aging', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'summary': 'Get Accounts Receivable Aging Report',
     'description': 'Generate A/R aging report showing unpaid invoices by age brackets',
@@ -591,6 +596,7 @@ def get_ar_aging():
 
 
 @reports_blueprint.route('/reports/cash-flow', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'summary': 'Get Cash Flow Report',
     'description': 'Generate cash flow statement for a date range',
@@ -691,6 +697,7 @@ def get_cash_flow():
 
 
 @reports_blueprint.route('/reports/sales-summary', methods=['GET'])
+@require_permission('reports', 'view')
 def get_sales_summary():
     """Get Sales Summary Report — revenue by customer and by month"""
     try:
@@ -771,6 +778,7 @@ def get_sales_summary():
 
 
 @reports_blueprint.route('/reports/gst-tax-summary', methods=['GET'])
+@require_permission('reports', 'view')
 def get_gst_tax_summary():
     """GST Tax Summary — taxable value and tax amounts grouped by GST rate"""
     try:
@@ -862,6 +870,7 @@ def get_gst_tax_summary():
 
 
 @reports_blueprint.route('/reports/payments-received', methods=['GET'])
+@require_permission('reports', 'view')
 def get_payments_received():
     """Payments Received — customer payments from invoice payment history"""
     try:
@@ -945,6 +954,7 @@ def get_payments_received():
 
 
 @reports_blueprint.route('/reports/payments-made', methods=['GET'])
+@require_permission('reports', 'view')
 def get_payments_made():
     """Payments Made — vendor payments from bill payment history"""
     try:

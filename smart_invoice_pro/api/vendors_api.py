@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import vendors_container, bills_container
 from smart_invoice_pro.utils.validation_utils import (
     make_error_response, collect_errors,
@@ -168,6 +169,7 @@ def _is_archived(vendor):
     return str(vendor.get('status', '')).upper() == 'ARCHIVED'
 
 @vendors_blueprint.route('/vendors', methods=['POST'])
+@require_permission('vendors', 'create')
 @swag_from({
     'tags': ['Vendors'],
     'parameters': [
@@ -274,6 +276,7 @@ def create_vendor():
         return make_error_response(SERVER_ERROR, "Failed to create vendor", status=500)
 
 @vendors_blueprint.route('/vendors', methods=['GET'])
+@require_permission('vendors', 'view')
 @swag_from({
     'tags': ['Vendors'],
     'parameters': [
@@ -416,6 +419,7 @@ def get_vendors():
 
 @vendors_blueprint.route('/vendors/bulk', methods=['POST'])
 @vendors_blueprint.route('/vendors/bulk-archive', methods=['POST'])
+@require_permission('vendors', 'edit')
 def bulk_vendor_actions():
     payload = request.get_json() or {}
     action = str(payload.get('action', '')).strip().lower()
@@ -465,6 +469,7 @@ def bulk_vendor_actions():
     }), 200
 
 @vendors_blueprint.route('/vendors/<vendor_id>', methods=['GET'])
+@require_permission('vendors', 'view')
 @swag_from({
     'tags': ['Vendors'],
     'parameters': [
@@ -509,6 +514,7 @@ def get_vendor(vendor_id):
         return jsonify({"error": f"Failed to retrieve vendor: {str(e)}"}), 500
 
 @vendors_blueprint.route('/vendors/<vendor_id>', methods=['PUT'])
+@require_permission('vendors', 'edit')
 @swag_from({
     'tags': ['Vendors'],
     'parameters': [
@@ -623,6 +629,7 @@ def update_vendor(vendor_id):
         return make_error_response(SERVER_ERROR, "Failed to update vendor", status=500)
 
 @vendors_blueprint.route('/vendors/<vendor_id>', methods=['DELETE'])
+@require_permission('vendors', 'delete')
 @swag_from({
     'tags': ['Vendors'],
     'parameters': [
@@ -686,6 +693,7 @@ def delete_vendor(vendor_id):
 
 
 @vendors_blueprint.route('/vendors/<vendor_id>/restore', methods=['POST'])
+@require_permission('vendors', 'edit')
 def restore_vendor(vendor_id):
     """Restore an archived vendor back to ACTIVE status."""
     items = list(vendors_container.query_items(
@@ -709,6 +717,7 @@ def restore_vendor(vendor_id):
 
 
 @vendors_blueprint.route('/vendors/<vendor_id>/dependencies', methods=['GET'])
+@require_permission('vendors', 'view')
 def get_vendor_dependencies(vendor_id):
     vendor = _query_vendor(vendor_id, request.tenant_id)
     if not vendor:

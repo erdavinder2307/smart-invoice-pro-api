@@ -503,7 +503,11 @@ class TestOrganizationProfile:
             mock_users.query_items.return_value = [{"role": "Admin", "userid": USER_A}]
             mock_ctr.read_item.return_value = {"id": f"{TENANT_A}:organization_profile"}
             mock_ctr.upsert_item.return_value = {}
-            payload = {"organization_name": "Updated Co", "country": "India"}
+            payload = {
+                "organization_name": "Updated Co",
+                "country": "India",
+                "gst_registration_type": "unregistered",
+            }
             resp = client.put("/api/settings/organization-profile", json=payload, headers=headers_a)
             # Will be 200 if Admin, 403 if not
             assert resp.status_code in (200, 403)

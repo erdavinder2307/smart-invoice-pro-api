@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, make_response
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import quotes_container, invoices_container, sales_orders_container
 import uuid
 import base64
@@ -64,6 +65,7 @@ def validate_quote_data(data, is_update=False):
     return errors
 
 @quotes_blueprint.route('/quotes', methods=['POST'])
+@require_permission('quotes', 'create')
 @swag_from({
     'tags': ['Quotes'],
     'parameters': [
@@ -168,6 +170,7 @@ def create_quote():
         return jsonify({"error": f"Failed to create quote: {str(e)}"}), 500
 
 @quotes_blueprint.route('/quotes', methods=['GET'])
+@require_permission('quotes', 'view')
 @swag_from({
     'tags': ['Quotes'],
     'parameters': [
@@ -373,6 +376,7 @@ def get_quotes():
 
 
 @quotes_blueprint.route('/quotes/export', methods=['GET'])
+@require_permission('quotes', 'view')
 def export_quotes():
     """Export quotes as CSV for the authenticated tenant."""
     import csv
@@ -438,6 +442,7 @@ def export_quotes():
 
 @quotes_blueprint.route('/quotes/bulk', methods=['POST'])
 @quotes_blueprint.route('/quotes/bulk-archive', methods=['POST'])
+@require_permission('quotes', 'edit')
 def bulk_quote_actions():
     """Perform bulk actions on quotes."""
     data = request.get_json() or {}
@@ -542,6 +547,7 @@ def bulk_quote_actions():
     }), 200
 
 @quotes_blueprint.route('/quotes/<quote_id>', methods=['GET'])
+@require_permission('quotes', 'view')
 @swag_from({
     'tags': ['Quotes'],
     'parameters': [
@@ -586,6 +592,7 @@ def get_quote(quote_id):
         return jsonify({"error": f"Failed to fetch quote: {str(e)}"}), 500
 
 @quotes_blueprint.route('/quotes/<quote_id>', methods=['PUT'])
+@require_permission('quotes', 'edit')
 @swag_from({
     'tags': ['Quotes'],
     'parameters': [
@@ -665,6 +672,7 @@ def update_quote(quote_id):
         return jsonify({"error": f"Failed to update quote: {str(e)}"}), 500
 
 @quotes_blueprint.route('/quotes/<quote_id>', methods=['DELETE'])
+@require_permission('quotes', 'delete')
 @swag_from({
     'tags': ['Quotes'],
     'parameters': [
@@ -736,6 +744,7 @@ def delete_quote(quote_id):
 
 
 @quotes_blueprint.route('/quotes/<quote_id>/restore', methods=['POST'])
+@require_permission('quotes', 'edit')
 def restore_quote(quote_id):
     """Restore an archived quote back to ACTIVE status."""
     items = list(quotes_container.query_items(
@@ -758,6 +767,7 @@ def restore_quote(quote_id):
 
 
 @quotes_blueprint.route('/quotes/<quote_id>/dependencies', methods=['GET'])
+@require_permission('quotes', 'view')
 def get_quote_dependencies(quote_id):
     rows = list(quotes_container.query_items(
         query="SELECT * FROM c WHERE c.id = @id",
@@ -775,6 +785,7 @@ def get_quote_dependencies(quote_id):
     return jsonify(dependency), 200
 
 @quotes_blueprint.route('/quotes/<quote_id>/convert', methods=['POST'])
+@require_permission('quotes', 'edit')
 @swag_from({
     'tags': ['Quotes'],
     'parameters': [
@@ -973,6 +984,7 @@ def convert_quote(quote_id):
         return jsonify({"error": f"Failed to convert quote: {str(e)}"}), 500
 
 @quotes_blueprint.route('/quotes/next-number', methods=['GET'])
+@require_permission('quotes', 'view')
 @swag_from({
     'tags': ['Quotes'],
     'responses': {
@@ -1019,6 +1031,7 @@ def get_next_quote_number():
 
 
 @quotes_blueprint.route('/quotes/<quote_id>/pdf', methods=['GET'])
+@require_permission('quotes', 'view')
 def get_quote_pdf(quote_id):
     """Generate and return a PDF for a quote."""
     items = list(quotes_container.query_items(
@@ -1047,6 +1060,7 @@ def get_quote_pdf(quote_id):
 
 
 @quotes_blueprint.route('/quotes/<quote_id>/send-email', methods=['POST'])
+@require_permission('quotes', 'edit')
 def send_quote_email(quote_id):
     """Send a quote to the customer via Azure Communication Services."""
     import os

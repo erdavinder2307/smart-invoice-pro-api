@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, g, make_response
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import sales_orders_container, invoices_container
 from smart_invoice_pro.api.auth_middleware import token_required
 import uuid
@@ -65,6 +66,7 @@ def validate_sales_order_data(data, is_update=False):
     return errors
 
 @sales_orders_blueprint.route('/sales-orders', methods=['POST'])
+@require_permission('purchase_orders', 'create')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -173,6 +175,7 @@ def create_sales_order():
         return jsonify({"error": f"Failed to create sales order: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -283,6 +286,7 @@ def get_sales_orders():
         return jsonify({"error": f"Failed to retrieve sales orders: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -328,6 +332,7 @@ def get_sales_order(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/dependencies', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @token_required
 def get_sales_order_dependencies(so_id):
     try:
@@ -351,6 +356,7 @@ def get_sales_order_dependencies(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['PUT'])
+@require_permission('purchase_orders', 'edit')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -454,6 +460,7 @@ def update_sales_order(so_id):
         return jsonify({"error": f"Failed to update sales order: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>', methods=['DELETE'])
+@require_permission('purchase_orders', 'delete')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -526,6 +533,7 @@ def delete_sales_order(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/restore', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 @token_required
 def restore_sales_order(so_id):
     """Restore an archived sales order back to ACTIVE status."""
@@ -554,6 +562,7 @@ def restore_sales_order(so_id):
 
 @sales_orders_blueprint.route('/sales-orders/bulk-archive', methods=['POST'])
 @sales_orders_blueprint.route('/sales-orders/bulk', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 @token_required
 def bulk_archive_sales_orders():
     """Lifecycle-aware bulk archive for sales orders."""
@@ -639,6 +648,7 @@ def bulk_archive_sales_orders():
     return jsonify(result), 200
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/convert-invoice', methods=['POST'])
+@require_permission('invoices', 'create')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -771,6 +781,7 @@ def convert_so_to_invoice(so_id):
         return jsonify({"error": f"Failed to convert sales order to invoice: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/convert-po', methods=['POST'])
+@require_permission('purchase_orders', 'create')
 @swag_from({
     'tags': ['Sales Orders'],
     'parameters': [
@@ -869,6 +880,7 @@ def convert_so_to_po(so_id):
         return jsonify({"error": f"Failed to convert sales order to PO: {str(e)}"}), 500
 
 @sales_orders_blueprint.route('/sales-orders/next-number', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Sales Orders'],
     'responses': {
@@ -913,6 +925,7 @@ def get_next_so_number():
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/pdf', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @token_required
 def get_so_pdf(so_id):
     """Generate and return a PDF for a sales order."""
@@ -949,6 +962,7 @@ def get_so_pdf(so_id):
 
 
 @sales_orders_blueprint.route('/sales-orders/<so_id>/send-email', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 @token_required
 def send_so_email(so_id):
     """Send a sales order to the customer via Azure Communication Services."""

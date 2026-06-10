@@ -66,14 +66,30 @@ PERMISSION_MODULES = {
     'purchase_orders': ['view', 'create', 'edit', 'delete'],
     'bills':           ['view', 'create', 'edit', 'delete'],
     'expenses':        ['view', 'create', 'edit', 'delete'],
+    'banking':         ['view', 'create', 'edit'],
     'reports':         ['view'],
     'settings':        ['view', 'edit'],
+    'user_management': ['view', 'invite', 'edit', 'suspend'],
+    'roles':           ['view', 'edit'],
+    'audit_logs':      ['view'],
+    'automation':      ['view', 'edit'],
+    'integrations':    ['view', 'edit'],
 }
 
 # ── Default permissions for each system role ──────────────────────────────────
 def _all(actions): return {a: True for a in actions}
 def _none(actions): return {a: False for a in actions}
 def _some(actions, allowed): return {a: (a in allowed) for a in actions}
+
+def _new_modules_none():
+    return {
+        'banking':         _none(PERMISSION_MODULES['banking']),
+        'user_management': _none(PERMISSION_MODULES['user_management']),
+        'roles':           _none(PERMISSION_MODULES['roles']),
+        'audit_logs':      _none(PERMISSION_MODULES['audit_logs']),
+        'automation':      _none(PERMISSION_MODULES['automation']),
+        'integrations':    _none(PERMISSION_MODULES['integrations']),
+    }
 
 SYSTEM_ROLE_DEFAULTS = {
     'Admin': {m: _all(a) for m, a in PERMISSION_MODULES.items()},
@@ -86,8 +102,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit']),
         'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _some(PERMISSION_MODULES['banking'],      ['view']),
         'reports':         _all(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
     'Sales': {
         'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view', 'create', 'edit']),
@@ -98,8 +117,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _none(PERMISSION_MODULES['purchase_orders']),
         'bills':           _none(PERMISSION_MODULES['bills']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _none(PERMISSION_MODULES['banking']),
         'reports':         _none(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
     'Accountant': {
         'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view', 'create', 'edit']),
@@ -110,8 +132,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view']),
         'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _some(PERMISSION_MODULES['banking'],      ['view']),
         'reports':         _all(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
     'Purchaser': {
         'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view']),
@@ -122,8 +147,11 @@ SYSTEM_ROLE_DEFAULTS = {
         'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit']),
         'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
         'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'banking':         _none(PERMISSION_MODULES['banking']),
         'reports':         _none(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        **{k: v for k, v in _new_modules_none().items()
+           if k not in ('banking',)},
     },
 }
 

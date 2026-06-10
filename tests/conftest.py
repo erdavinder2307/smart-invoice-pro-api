@@ -211,6 +211,14 @@ def app():
             # that's OK — tests that need them will patch explicitly.
             pass
 
+    # RBAC: default test tokens act as Admin so existing endpoint tests keep working.
+    perm_patcher = patch(
+        "smart_invoice_pro.utils.permission_checker._get_user_permissions",
+        return_value=(True, {}),
+    )
+    perm_patcher.start()
+    patchers.append(perm_patcher)
+
     application = create_app()
     application.config["TESTING"] = True
 

@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, make_response
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import purchase_orders_container, bills_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
@@ -94,6 +95,7 @@ def validate_po_data(data, is_update=False):
     return errors
 
 @purchase_orders_blueprint.route('/purchase-orders', methods=['POST'])
+@require_permission('purchase_orders', 'create')
 @swag_from({
     'tags': ['Purchase Orders'],
     'parameters': [
@@ -181,6 +183,7 @@ def create_purchase_order():
         return jsonify({"error": f"Failed to create purchase order: {str(e)}"}), 500
 
 @purchase_orders_blueprint.route('/purchase-orders', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Purchase Orders'],
     'parameters': [
@@ -390,6 +393,7 @@ def get_purchase_orders():
 
 @purchase_orders_blueprint.route('/purchase-orders/bulk', methods=['POST'])
 @purchase_orders_blueprint.route('/purchase-orders/bulk-archive', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 def bulk_purchase_order_actions():
     """Perform bulk actions on purchase orders."""
     data = request.get_json() or {}
@@ -456,6 +460,7 @@ def bulk_purchase_order_actions():
     }), 200
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Purchase Orders'],
     'parameters': [
@@ -497,6 +502,7 @@ def get_purchase_order(po_id):
         return jsonify({"error": f"Failed to retrieve purchase order: {str(e)}"}), 500
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>', methods=['PUT'])
+@require_permission('purchase_orders', 'edit')
 @swag_from({
     'tags': ['Purchase Orders'],
     'parameters': [
@@ -597,6 +603,7 @@ def update_purchase_order(po_id):
         return jsonify({"error": f"Failed to update purchase order: {str(e)}"}), 500
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>', methods=['DELETE'])
+@require_permission('purchase_orders', 'delete')
 @swag_from({
     'tags': ['Purchase Orders'],
     'parameters': [
@@ -670,6 +677,7 @@ def delete_purchase_order(po_id):
 
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>/restore', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 def restore_purchase_order(po_id):
     """Restore an archived purchase order back to ACTIVE status."""
     items = list(purchase_orders_container.query_items(
@@ -693,12 +701,14 @@ def restore_purchase_order(po_id):
 
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>/dependencies', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 def get_purchase_order_dependencies(po_id):
     """Check if a purchase order has dependent records before archiving."""
     result = check_entity_dependencies('purchase_order', po_id, request.tenant_id)
     return jsonify(result), 200
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>/convert-bill', methods=['POST'])
+@require_permission('bills', 'create')
 @swag_from({
     'tags': ['Purchase Orders'],
     'parameters': [
@@ -821,6 +831,7 @@ def convert_po_to_bill(po_id):
         return jsonify({"error": f"Failed to convert purchase order to bill: {str(e)}"}), 500
 
 @purchase_orders_blueprint.route('/purchase-orders/next-number', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 @swag_from({
     'tags': ['Purchase Orders'],
     'responses': {
@@ -863,6 +874,7 @@ def get_next_po_number():
         return jsonify({"error": f"Failed to generate next PO number: {str(e)}"}), 500
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>/pdf', methods=['GET'])
+@require_permission('purchase_orders', 'view')
 def get_po_pdf(po_id):
     """Generate and return a PDF for a purchase order."""
     items = list(purchase_orders_container.query_items(
@@ -898,6 +910,7 @@ def get_po_pdf(po_id):
 
 
 @purchase_orders_blueprint.route('/purchase-orders/<po_id>/send-email', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 def send_po_email(po_id):
     """Send a purchase order to the vendor via Azure Communication Services."""
     import os

@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, make_response
 from flasgger import swag_from
+from smart_invoice_pro.utils.permission_checker import require_permission
 import uuid
 from datetime import datetime
 import os
@@ -78,6 +79,7 @@ def _validate_expense(data, is_update=False):
 # CREATE EXPENSE
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses', methods=['POST'])
+@require_permission('expenses', 'create')
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Create a new expense',
@@ -168,6 +170,7 @@ def create_expense():
 # GET ALL EXPENSES
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses', methods=['GET'])
+@require_permission('expenses', 'view')
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Get all expenses',
@@ -282,6 +285,7 @@ def get_expenses():
 # EXPORT EXPENSES AS CSV
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses/export', methods=['GET'])
+@require_permission('expenses', 'view')
 def export_expenses():
     """Export expenses for the current tenant as a CSV file."""
     import csv
@@ -354,6 +358,7 @@ def export_expenses():
 # GET EXPENSE BY ID
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses/<expense_id>', methods=['GET'])
+@require_permission('expenses', 'view')
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Get expense by ID',
@@ -390,6 +395,7 @@ def get_expense(expense_id):
 # UPDATE EXPENSE
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses/<expense_id>', methods=['PUT'])
+@require_permission('expenses', 'edit')
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Update an expense',
@@ -493,6 +499,7 @@ def update_expense(expense_id):
 # DELETE EXPENSE
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses/<expense_id>', methods=['DELETE'])
+@require_permission('expenses', 'delete')
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Delete an expense',
@@ -557,6 +564,7 @@ def delete_expense(expense_id):
 
 
 @expenses_blueprint.route('/expenses/<expense_id>/restore', methods=['POST'])
+@require_permission('expenses', 'edit')
 def restore_expense(expense_id):
     """Restore an archived expense back to ACTIVE status."""
     items = list(expenses_container.query_items(
@@ -581,6 +589,7 @@ def restore_expense(expense_id):
 
 @expenses_blueprint.route('/expenses/bulk-archive', methods=['POST'])
 @expenses_blueprint.route('/expenses/bulk', methods=['POST'])
+@require_permission('expenses', 'edit')
 def bulk_archive_expenses():
     """Lifecycle-aware bulk archive for expenses."""
     payload = request.get_json() or {}
@@ -656,6 +665,7 @@ def bulk_archive_expenses():
 
 
 @expenses_blueprint.route('/expenses/<expense_id>/dependencies', methods=['GET'])
+@require_permission('expenses', 'view')
 def get_expense_dependencies(expense_id):
     """Check if an expense has dependent records before archiving."""
     result = check_entity_dependencies('expense', expense_id, request.tenant_id)
@@ -665,6 +675,7 @@ def get_expense_dependencies(expense_id):
 # GET EXPENSE STATISTICS
 # ─────────────────────────────────────────────────────────────────────────────
 @expenses_blueprint.route('/expenses/stats/summary', methods=['GET'])
+@require_permission('expenses', 'view')
 @swag_from({
     'tags': ['Expenses'],
     'summary': 'Get expense statistics',

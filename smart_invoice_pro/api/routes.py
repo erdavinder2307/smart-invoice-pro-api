@@ -297,6 +297,8 @@ def login_user():
                 "user_id": user_id,
                 "tenant_id": tenant_id,
                 "username": items[0]['username'],
+                "role": items[0].get('role', ''),
+                "role_id": items[0].get('role_id', ''),
                 "is_super_admin": bool(items[0].get('is_super_admin', False)),
                 "session_id": token_record_id,
                 "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
@@ -436,6 +438,8 @@ def refresh_token():
             "user_id": record['user_id'],
             "tenant_id": record['tenant_id'],
             "username": user.get('username', ''),
+            "role": user.get('role', ''),
+            "role_id": user.get('role_id', ''),
             "session_id": new_token_record_id,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
         },

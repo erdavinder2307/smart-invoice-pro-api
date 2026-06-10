@@ -30,6 +30,7 @@ from smart_invoice_pro.api.tax_rates_api import (
 )
 from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, COMPOSITION
 from smart_invoice_pro.utils.stock_utils import validate_stock_out
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -238,6 +239,7 @@ def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction, credi
     return None, None
 
 @api_blueprint.route('/invoices', methods=['POST'])
+@require_permission('invoices', 'create')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -488,6 +490,7 @@ def create_invoice():
 
 @api_blueprint.route('/invoices/bulk', methods=['POST'])
 @api_blueprint.route('/invoices/bulk-archive', methods=['POST'])
+@require_permission('invoices', 'edit')
 def bulk_invoice_actions():
     """Bulk actions on invoices: archive/delete, mark_paid, send_email."""
     try:
@@ -571,6 +574,7 @@ def bulk_invoice_actions():
 
 
 @api_blueprint.route('/invoices', methods=['GET'])
+@require_permission('invoices', 'view')
 def list_invoices():
     """List invoices with search, filtering, sorting, pagination and summary meta."""
     try:
@@ -754,6 +758,7 @@ def list_invoices():
 
 
 @api_blueprint.route('/invoices/export', methods=['GET'])
+@require_permission('invoices', 'view')
 def export_invoices_csv():
     """Export invoices as a CSV file. Accepts same filter params as list endpoint."""
     import csv
@@ -904,6 +909,7 @@ def export_invoices_csv():
 #     return jsonify(items)
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['GET'])
+@require_permission('invoices', 'view')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -968,6 +974,7 @@ def get_invoice(invoice_id):
 
 
 @api_blueprint.route('/invoices/<invoice_id>/dependencies', methods=['GET'])
+@require_permission('invoices', 'view')
 def get_invoice_dependencies(invoice_id):
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(invoices_container.query_items(
@@ -986,6 +993,7 @@ def get_invoice_dependencies(invoice_id):
     return jsonify(dependencies), 200
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PUT'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1157,6 +1165,7 @@ def update_invoice(invoice_id):
     return jsonify(sanitize_item(item))
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['DELETE'])
+@require_permission('invoices', 'delete')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1226,6 +1235,7 @@ def delete_invoice(invoice_id):
 
 
 @api_blueprint.route('/invoices/<invoice_id>/restore', methods=['POST'])
+@require_permission('invoices', 'edit')
 def restore_invoice(invoice_id):
     """Restore an archived invoice back to its previous active status."""
     items = list(invoices_container.query_items(
@@ -1352,6 +1362,7 @@ def patch_invoice(invoice_id):
     return jsonify({'message': 'Invoice updated', 'invoice': sanitize_item(item)})
 
 @api_blueprint.route('/invoices/next-number', methods=['GET'])
+@require_permission('invoices', 'view')
 @swag_from({
     'tags': ['Invoices'],
     'responses': {
@@ -1529,6 +1540,7 @@ def get_invoice_by_portal_token(token):
 
 # ── Generate / regenerate a portal token for an existing invoice ─────────────
 @api_blueprint.route('/invoices/<invoice_id>/generate-portal-token', methods=['POST'])
+@require_permission('invoices', 'edit')
 def generate_portal_token(invoice_id):
     """Generate or regenerate a portal_token for an existing invoice."""
     try:
@@ -1555,6 +1567,7 @@ def generate_portal_token(invoice_id):
 
 # ── Record a payment against an invoice ──────────────────────────────────────
 @api_blueprint.route('/invoices/<invoice_id>/record-payment', methods=['POST'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1698,6 +1711,7 @@ def record_payment(invoice_id):
 
 # ── Void (cancel) an invoice ─────────────────────────────────────────────────
 @api_blueprint.route('/invoices/<invoice_id>/void', methods=['POST'])
+@require_permission('invoices', 'edit')
 def void_invoice(invoice_id):
     """Void an issued invoice: sets status to Cancelled with a mandatory reason."""
     data = request.get_json() or {}
@@ -1765,6 +1779,7 @@ def void_invoice(invoice_id):
 
 # ── Send invoice email to customer ───────────────────────────────────────────
 @api_blueprint.route('/invoices/<invoice_id>/send-email', methods=['POST'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [
@@ -1960,6 +1975,7 @@ def send_invoice_email(invoice_id):
 
 # ── GET /invoices/:id/pdf — stream PDF bytes for a specific invoice ───────────
 @api_blueprint.route('/invoices/<invoice_id>/pdf', methods=['GET'])
+@require_permission('invoices', 'view')
 def get_invoice_pdf(invoice_id):
     """Fetch an invoice and return it as a generated PDF file."""
     items = list(invoices_container.query_items(
@@ -1988,6 +2004,7 @@ def get_invoice_pdf(invoice_id):
 
 # ── POST /invoices/:id/send-reminder — send a payment reminder email ──────────
 @api_blueprint.route('/invoices/<invoice_id>/send-reminder', methods=['POST'])
+@require_permission('invoices', 'edit')
 def send_invoice_reminder(invoice_id):
     """Send a payment reminder email for an outstanding invoice."""
     import os
