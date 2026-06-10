@@ -39,12 +39,13 @@ from werkzeug.utils import secure_filename
 
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.org_tax_mode import derive_gst_mode
 
 org_profile_blueprint = Blueprint('org_profile', __name__)
 
 ORG_LOGO_UPLOAD_FOLDER = 'uploads/org_logos'
 ALLOWED_LOGO_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-MAX_LOGO_BYTES = 1 * 1024 * 1024  # 1 MB
+MAX_LOGO_BYTES = 10 * 1024 * 1024  # 10 MB
 
 os.makedirs(ORG_LOGO_UPLOAD_FOLDER, exist_ok=True)
 
@@ -127,6 +128,34 @@ def update_org_profile():
         existing = _get_profile(request.tenant_id)
         created_at = existing.get('created_at') or now
 
+        # ── GST registration type is now the single source of truth ──────────
+        from smart_invoice_pro.api.gst_api import validate_gstin_format
+        gst_registration_type = (
+            data.get('gst_registration_type')
+            or existing.get('gst_registration_type', 'regular')
+        ).strip().lower()
+
+        if gst_registration_type not in ('regular', 'composition', 'unregistered'):
+            gst_registration_type = 'regular'
+
+        gstin = (data.get('gstin') or '').strip()
+
+        # GSTIN required for Regular and Composition
+        if gst_registration_type in ('regular', 'composition') and country.lower() == 'india':
+            if not gstin:
+                return jsonify({
+                    'error': f'GSTIN is required for {gst_registration_type.title()} registration type.'
+                }), 400
+            if not validate_gstin_format(gstin):
+                return jsonify({
+                    'error': 'Invalid GSTIN format. Expected 15-character GSTIN (e.g. 22AAAAA0000A1Z5).'
+                }), 400
+
+        # Derive gst_mode from registration type (replaces legacy gst_enabled)
+        gst_mode = derive_gst_mode(gst_registration_type)
+        # gst_enabled is kept for backward compatibility but derived from mode
+        gst_enabled = gst_mode != 'NO_GST'
+
         address_in = data.get('address') or {}
         address = {
             "line1":   (address_in.get('line1')   or '').strip(),
@@ -145,13 +174,14 @@ def update_org_profile():
             "organization_name": organization_name,
             "industry":          (data.get('industry')    or '').strip(),
             "country":           country,
-            "gstin":             (data.get('gstin')        or '').strip(),
+            "gstin":             gstin,
             "website_url":       (data.get('website_url') or '').strip(),
             "logo_url":          (data.get('logo_url')    or existing.get('logo_url', '')).strip(),
             "address":           address,
             # ── GST settings ─────────────────────────────────────────────────
-            "gst_enabled":       bool(data.get('gst_enabled', existing.get('gst_enabled', True))),
-            "gst_registration_type": (data.get('gst_registration_type') or existing.get('gst_registration_type', 'regular')).strip(),
+            "gst_registration_type": gst_registration_type,
+            "gst_mode":              gst_mode,
+            "gst_enabled":           gst_enabled,
             # ── Preserve branding fields (managed by branding_api) ──────────
             "primary_color":              existing.get('primary_color',   ''),
             "secondary_color":            existing.get('secondary_color', ''),
@@ -183,11 +213,17 @@ def get_gst_config():
             seller_state = extract_state_from_gstin(gstin)
         if not seller_state:
             seller_state = (profile.get('address') or {}).get('state', '')
+        reg_type = profile.get('gst_registration_type', 'regular')
+        # Return gst_mode — derive on the fly for tenants not yet migrated
+        stored_mode = profile.get('gst_mode', '')
+        gst_mode = stored_mode if stored_mode else derive_gst_mode(reg_type, profile.get('gst_enabled'))
+
         return jsonify({
             'gst_enabled':            profile.get('gst_enabled', True),
             'gstin':                   gstin,
             'seller_state':           seller_state,
-            'gst_registration_type':  profile.get('gst_registration_type', 'regular'),
+            'gst_registration_type':  reg_type,
+            'gst_mode':               gst_mode,
         }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -221,7 +257,7 @@ def upload_org_logo():
 
         # Validate size
         if len(file_bytes) > MAX_LOGO_BYTES:
-            return jsonify({'error': 'Logo file must be smaller than 1 MB'}), 400
+            return jsonify({'error': 'Logo file must be smaller than 10 MB'}), 400
 
         # Save file safely
         safe_name = secure_filename(f"{request.tenant_id}_{uuid.uuid4().hex}_{logo_filename}")

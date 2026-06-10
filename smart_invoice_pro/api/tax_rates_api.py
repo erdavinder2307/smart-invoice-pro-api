@@ -34,6 +34,7 @@ from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import get_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.api.gst_api import extract_state_from_gstin, validate_gstin_format
+from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, FULL_GST
 
 tax_rates_blueprint = Blueprint('tax_rates', __name__)
 
@@ -242,8 +243,17 @@ def _get_customer_state(tenant_id: str, customer_id: str) -> tuple:
 
 @tax_rates_blueprint.route('/settings/taxes', methods=['GET'])
 def list_tax_rates():
-    """List all active tax rates for the current tenant. Seeds defaults on first call."""
+    """
+    List all active tax rates for the current tenant. Seeds defaults on first call.
+
+    Optional query param:
+      ?for_sales=true  — returns empty list when org cannot charge GST on sales
+                         (Composition or Unregistered). Used by invoice/quote forms.
+    """
     try:
+        for_sales = request.args.get('for_sales', '').lower() in ('true', '1', 'yes')
+        if for_sales and must_suppress_sales_tax(request.tenant_id):
+            return jsonify([]), 200
         rates = get_tax_rates_for_tenant(request.tenant_id)
         return jsonify(rates), 200
     except Exception as e:
@@ -407,7 +417,12 @@ def calculate_invoice_tax():
         items = data.get('items', [])
         customer_id = data.get('customer_id')
         place_of_supply_override = (data.get('place_of_supply') or '').strip()
-        is_gst_applicable = bool(data.get('is_gst_applicable', True))
+
+        # Org mode is the ceiling — Composition/Unregistered never charge on sales
+        if must_suppress_sales_tax(request.tenant_id):
+            is_gst_applicable = False
+        else:
+            is_gst_applicable = bool(data.get('is_gst_applicable', True))
 
         # Fetch seller state from org profile
         seller_state = _get_seller_state(request.tenant_id)
@@ -431,12 +446,14 @@ def calculate_invoice_tax():
             place_of_supply=place_of_supply,
         )
 
+        org_gst_mode = get_org_gst_mode(request.tenant_id)
         return jsonify({
             'success': True,
             'seller_state': seller_state,
             'customer_state': customer_state,
             'place_of_supply': place_of_supply,
             'gst_treatment': gst_treatment,
+            'org_gst_mode': org_gst_mode,
             **result,
         }), 200
     except Exception as e:

@@ -243,12 +243,22 @@ def login_user():
             "message": "Too many login attempts. Please try again in 15 minutes.",
         }), 429
 
-    query = "SELECT * FROM c WHERE c.username = @username"
+    login_input = data['username'].strip()
+
+    # Try matching by username first, then fall back to email
     items = list(users_container.query_items(
-        query=query,
-        parameters=[{"name": "@username", "value": data['username']}],
+        query="SELECT * FROM c WHERE c.username = @username",
+        parameters=[{"name": "@username", "value": login_input}],
         enable_cross_partition_query=True
     ))
+    if not items:
+        # Allow login with email address
+        items = list(users_container.query_items(
+            query="SELECT * FROM c WHERE c.email = @email",
+            parameters=[{"name": "@email", "value": login_input.lower()}],
+            enable_cross_partition_query=True
+        ))
+
     if items and check_password_hash(items[0]['password'], data['password']):
         jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
         tenant_id = items[0].get('tenant_id') or items[0].get('id')

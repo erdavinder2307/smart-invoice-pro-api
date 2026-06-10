@@ -5,10 +5,11 @@ import base64
 from flasgger import swag_from
 from datetime import datetime, timedelta
 from enum import Enum
-from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding, branding_for_document
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
+from smart_invoice_pro.utils.org_tax_mode import must_suppress_sales_tax, get_org_gst_mode
 
 quotes_blueprint = Blueprint('quotes', __name__)
 
@@ -149,7 +150,7 @@ def create_quote():
         'status': data['status'],
         'notes': data.get('notes', ''),
         'terms_conditions': data.get('terms_conditions', ''),
-        'is_gst_applicable': data.get('is_gst_applicable', False),
+        'is_gst_applicable': False if must_suppress_sales_tax(request.tenant_id) else bool(data.get('is_gst_applicable', False)),
         'subject': data.get('subject', ''),
         'salesperson': data.get('salesperson', ''),
         'items': data.get('items', []),
@@ -1033,8 +1034,9 @@ def get_quote_pdf(quote_id):
     quote = items[0]
     doc = {**quote, 'invoice_number': quote.get('quote_number', quote['id'])}
     try:
-        branding = _get_tenant_branding(request.tenant_id)
-        pdf_bytes = build_invoice_pdf(doc, branding=branding)
+        branding = branding_for_document(quote, request.tenant_id)
+        pdf_bytes = build_invoice_pdf(doc, branding=branding, doc_type='quote',
+                                     gst_mode=get_org_gst_mode(request.tenant_id))
         ref = quote.get('quote_number', 'quote').replace('/', '-')
         response = make_response(pdf_bytes)
         response.headers['Content-Type'] = 'application/pdf'
@@ -1084,44 +1086,24 @@ def send_quote_email(quote_id):
     personal_msg  = data.get('message', '')
 
     _branding = _get_tenant_branding(request.tenant_id)
-    _primary  = _branding.get('primary_color', '#2563EB')
 
-    item_rows_html = ''
-    for line in quote.get('items', []):
-        item_rows_html += (
-            f"<tr>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0'>{line.get('name', line.get('item_name', ''))}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>{float(line.get('quantity', 0)):.2f}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('rate', 0)):,.2f}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('amount', 0)):,.2f}</td>"
-            f"</tr>"
-        )
-
-    personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
-    html_content = f"""
-    <html><body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
-        <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
-            <h2 style='color:#fff;margin:0'>Quote {quote_number}</h2>
-        </div>
-        <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
-            <p>Dear {customer_name},</p>
-            {personal_msg_html}
-            <p>Please find your quotation details below:</p>
-            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
-                <thead><tr style='background:#F8FAFC'>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
-                </tr></thead>
-                <tbody>{item_rows_html}</tbody>
-            </table>
-            <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
-            <p style='color:#475569'><strong>Quote Date:</strong> {issue_date}&nbsp;|&nbsp;<strong>Valid Until:</strong> {expiry_date}</p>
-            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Solidev Books.</p>
-        </div>
-    </body></html>
-    """
+    from smart_invoice_pro.services.email_template_service import render_branded_email
+    html_content, _plain_content = render_branded_email(
+        doc_type='quote',
+        context={
+            'doc_number':    quote_number,
+            'customer_name': customer_name,
+            'issue_date':    issue_date,
+            'due_date':      expiry_date,
+            'total_amount':  total_amount,
+            'balance_due':   total_amount,
+            'subtotal':      float(quote.get('subtotal', 0)),
+            'total_tax':     float(quote.get('total_tax', 0)),
+            'items':         quote.get('items', []),
+            'message':       personal_msg,
+        },
+        branding=_branding,
+    )
 
     email_message = {
         "senderAddress": sender_address,
@@ -1135,7 +1117,8 @@ def send_quote_email(quote_id):
     if attach_pdf:
         try:
             doc = {**quote, 'invoice_number': quote_number}
-            pdf_bytes = build_invoice_pdf(doc, branding=_branding)
+            pdf_bytes = build_invoice_pdf(doc, branding=_branding, doc_type='quote',
+                                         gst_mode=get_org_gst_mode(request.tenant_id))
             email_message["attachments"] = [{
                 "name": f"quote_{quote_number}.pdf",
                 "contentType": "application/pdf",
@@ -1149,11 +1132,21 @@ def send_quote_email(quote_id):
         poller = client.begin_send(email_message)
         result = poller.result()
 
+        now = datetime.utcnow().isoformat()
         quote['email_status']  = 'sent'
-        quote['email_sent_at'] = datetime.utcnow().isoformat()
-        quote['updated_at']    = datetime.utcnow().isoformat()
+        quote['email_sent_at'] = now
+        quote['updated_at']    = now
         if quote.get('status') == 'Draft':
             quote['status'] = 'Sent'
+        if not quote.get('brand_snapshot'):
+            quote['brand_snapshot'] = {
+                'primary_color':     _branding.get('primary_color', ''),
+                'accent_color':      _branding.get('accent_color', ''),
+                'secondary_color':   _branding.get('secondary_color', ''),
+                'logo_url':          _branding.get('logo_url', ''),
+                'organization_name': _branding.get('organization_name', ''),
+                'snapshotted_at':    now,
+            }
         quotes_container.replace_item(item=quote['id'], body=quote)
 
         return jsonify({

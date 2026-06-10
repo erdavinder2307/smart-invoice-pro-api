@@ -8,7 +8,7 @@ import base64
 from flasgger import swag_from
 from datetime import datetime, timedelta
 from enum import Enum
-from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding
+from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding, branding_for_document
 
 purchase_orders_blueprint = Blueprint('purchase_orders', __name__)
 
@@ -886,8 +886,8 @@ def get_po_pdf(po_id):
         ]
     }
     try:
-        branding = _get_tenant_branding(request.tenant_id)
-        pdf_bytes = build_invoice_pdf(doc, branding=branding)
+        branding = branding_for_document(po, request.tenant_id)
+        pdf_bytes = build_invoice_pdf(doc, branding=branding, doc_type='purchase_order')
         ref = po.get('po_number', 'po').replace('/', '-')
         response = make_response(pdf_bytes)
         response.headers['Content-Type'] = 'application/pdf'
@@ -937,44 +937,24 @@ def send_po_email(po_id):
     personal_msg  = data.get('message', '')
 
     _branding = _get_tenant_branding(request.tenant_id)
-    _primary  = _branding.get('primary_color', '#2563EB')
 
-    item_rows_html = ''
-    for line in po.get('items', []):
-        item_rows_html += (
-            f"<tr>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0'>{line.get('item_name', line.get('name', ''))}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>{float(line.get('quantity', 0)):.2f}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('rate', 0)):,.2f}</td>"
-            f"<td style='padding:8px;border:1px solid #e0e0e0;text-align:right'>\u20b9{float(line.get('amount', 0)):,.2f}</td>"
-            f"</tr>"
-        )
-
-    personal_msg_html = f"<p style='color:#475569'>{personal_msg}</p>" if personal_msg else ''
-    html_content = f"""
-    <html><body style='font-family:Inter,Arial,sans-serif;color:#0F172A;max-width:640px;margin:auto'>
-        <div style='background:{_primary};padding:24px;border-radius:8px 8px 0 0'>
-            <h2 style='color:#fff;margin:0'>Purchase Order {po_number}</h2>
-        </div>
-        <div style='background:#fff;padding:24px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 8px 8px'>
-            <p>Dear {vendor_name},</p>
-            {personal_msg_html}
-            <p>Please find the purchase order details below:</p>
-            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
-                <thead><tr style='background:#F8FAFC'>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:left'>Item</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Qty</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Rate</th>
-                    <th style='padding:8px;border:1px solid #e0e0e0;text-align:right'>Amount</th>
-                </tr></thead>
-                <tbody>{item_rows_html}</tbody>
-            </table>
-            <p style='font-size:18px;font-weight:bold'>Total: \u20b9{total_amount:,.2f}</p>
-            <p style='color:#475569'><strong>Order Date:</strong> {order_date}</p>
-            <p style='color:#94A3B8;font-size:12px;margin-top:32px'>This is an automated email from Solidev Books.</p>
-        </div>
-    </body></html>
-    """
+    from smart_invoice_pro.services.email_template_service import render_branded_email
+    html_content, _plain_content = render_branded_email(
+        doc_type='purchase_order',
+        context={
+            'doc_number':    po_number,
+            'customer_name': vendor_name,
+            'issue_date':    order_date,
+            'due_date':      delivery_date,
+            'total_amount':  total_amount,
+            'balance_due':   total_amount,
+            'subtotal':      float(po.get('subtotal', 0)),
+            'total_tax':     float(po.get('total_tax', 0)),
+            'items':         [{**i, 'name': i.get('item_name', i.get('name', ''))} for i in po.get('items', [])],
+            'message':       personal_msg,
+        },
+        branding=_branding,
+    )
 
     email_message = {
         "senderAddress": sender_address,
@@ -993,7 +973,7 @@ def send_po_email(po_id):
                 'customer_name': vendor_name,
                 'items': [{**i, 'name': i.get('item_name', i.get('name', ''))} for i in po.get('items', [])]
             }
-            pdf_bytes = build_invoice_pdf(doc, branding=_branding)
+            pdf_bytes = build_invoice_pdf(doc, branding=_branding, doc_type='purchase_order')
             email_message["attachments"] = [{
                 "name": f"po_{po_number}.pdf",
                 "contentType": "application/pdf",
@@ -1006,6 +986,22 @@ def send_po_email(po_id):
         client = EmailClient.from_connection_string(connection_string)
         poller = client.begin_send(email_message)
         result = poller.result()
+
+        now = datetime.utcnow().isoformat()
+        po['email_status']  = 'sent'
+        po['email_sent_at'] = now
+        po['updated_at']    = now
+        if not po.get('brand_snapshot'):
+            po['brand_snapshot'] = {
+                'primary_color':     _branding.get('primary_color', ''),
+                'accent_color':      _branding.get('accent_color', ''),
+                'secondary_color':   _branding.get('secondary_color', ''),
+                'logo_url':          _branding.get('logo_url', ''),
+                'organization_name': _branding.get('organization_name', ''),
+                'snapshotted_at':    now,
+            }
+        purchase_orders_container.replace_item(item=po['id'], body=po)
+
         return jsonify({
             'message':    'Purchase order email sent successfully',
             'sent_to':    recipient_email,
