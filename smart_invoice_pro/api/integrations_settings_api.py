@@ -233,6 +233,12 @@ def test_email_connection():
     try:
         from azure.communication.email import EmailClient
 
+        # Validate recipient first — before any infrastructure checks
+        body = request.get_json(silent=True) or {}
+        recipient = str(body.get("to") or "").strip()
+        if not recipient or "@" not in recipient:
+            return jsonify({"error": "Provide a valid 'to' email address."}), 400
+
         connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
         if not connection_string:
             return jsonify({"error": "AZURE_EMAIL_CONNECTION_STRING is not configured."}), 503
@@ -241,12 +247,6 @@ def test_email_connection():
         email_cfg = doc.get("email", {})
         sender = email_cfg.get("sender_email") or os.getenv("AZURE_SENDER_EMAIL", "")
         sender_name = email_cfg.get("sender_name") or "Solidev Books"
-
-        # Recipient: use body-supplied address or fall back to sender
-        body = request.get_json(silent=True) or {}
-        recipient = str(body.get("to") or sender).strip()
-        if not recipient or "@" not in recipient:
-            return jsonify({"error": "Provide a valid 'to' email address."}), 400
 
         client = EmailClient.from_connection_string(connection_string)
         poller = client.begin_send({
