@@ -15,10 +15,13 @@ The function fires-and-forgets: it runs the HTTP calls in a background
 thread so that the originating request is never delayed or failed by a
 slow/unavailable webhook endpoint.
 
-Supported events (must match SUPPORTED_EVENTS in integrations_settings_api):
-  - invoice.created
-  - invoice.paid
-  - customer.created
+Each webhook endpoint has its own optional `secret` field. If set, that
+per-endpoint secret is used for HMAC-SHA256 signing; otherwise no signature
+header is sent. This decouples outbound webhook signing from the inbound
+payment webhook verification secret.
+
+Every delivery attempt (success or failure) is written to the
+`webhook_logs` Cosmos container so tenants have delivery visibility.
 """
 import hashlib
 import hmac
@@ -31,7 +34,7 @@ from datetime import datetime
 
 import requests
 
-from smart_invoice_pro.utils.cosmos_client import settings_container
+from smart_invoice_pro.utils.cosmos_client import settings_container, webhook_logs_container
 
 logger = logging.getLogger(__name__)
 
@@ -55,51 +58,65 @@ def _get_webhooks_for_tenant(tenant_id: str) -> list[dict]:
     return [wh for wh in items[0].get("webhooks", []) if wh.get("active")]
 
 
-def _get_webhook_secret(tenant_id: str) -> str | None:
-    """Return the stored payment webhook_secret (used for signing)."""
-    doc_id = f"{tenant_id}:integrations_settings"
-    items = list(settings_container.query_items(
-        query="SELECT c.payments.webhook_secret FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": doc_id}],
-        enable_cross_partition_query=True,
-    ))
-    if items:
-        return items[0].get("webhook_secret")
-    return None
-
-
 def _sign_payload(secret: str, body: bytes) -> str:
     """Return HMAC-SHA256 hex signature for the payload."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def _deliver(url: str, event: str, payload: dict, secret: str | None) -> None:
-    """Send one webhook HTTP POST (with retries)."""
+def _write_log(tenant_id: str, webhook_id: str, event: str,
+               url: str, status_code: int | None,
+               success: bool, error: str | None) -> None:
+    """Persist a delivery attempt to webhook_logs. Non-blocking best-effort."""
+    try:
+        webhook_logs_container.create_item(body={
+            "id":           str(uuid.uuid4()),
+            "tenant_id":    tenant_id,
+            "webhook_id":   webhook_id,
+            "event":        event,
+            "url":          url,
+            "status_code":  status_code,
+            "success":      success,
+            "error":        error,
+            "delivered_at": datetime.utcnow().isoformat(),
+        })
+    except Exception as log_exc:
+        logger.warning("[webhook] failed to write delivery log: %s", log_exc)
+
+
+def _deliver(tenant_id: str, webhook_id: str, url: str,
+             event: str, payload: dict, secret: str | None) -> None:
+    """Send one webhook HTTP POST (with retries) and log the outcome."""
     envelope = {
-        "id":           str(uuid.uuid4()),
-        "event":        event,
-        "created_at":   datetime.utcnow().isoformat(),
-        "data":         payload,
+        "id":         str(uuid.uuid4()),
+        "event":      event,
+        "created_at": datetime.utcnow().isoformat(),
+        "data":       payload,
     }
     body = json.dumps(envelope, ensure_ascii=False).encode()
     headers = {
-        "Content-Type":        "application/json",
+        "Content-Type":         "application/json",
         "X-SmartInvoice-Event": event,
     }
     if secret:
         headers["X-SmartInvoice-Signature"] = _sign_payload(secret, body)
 
+    last_exc: str | None = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = requests.post(url, data=body, headers=headers,
                                  timeout=_REQUEST_TIMEOUT)
             logger.info("[webhook] %s → %s  status=%s", event, url, resp.status_code)
+            _write_log(tenant_id, webhook_id, event, url,
+                       resp.status_code, resp.ok, None if resp.ok else f"HTTP {resp.status_code}")
             return
         except requests.RequestException as exc:
+            last_exc = str(exc)
             logger.warning("[webhook] attempt %d/%d failed for %s: %s",
                            attempt, _MAX_RETRIES, url, exc)
             if attempt < _MAX_RETRIES:
                 time.sleep(1)
+
+    _write_log(tenant_id, webhook_id, event, url, None, False, last_exc)
 
 
 def _fire(tenant_id: str, event: str, payload: dict) -> None:
@@ -108,10 +125,11 @@ def _fire(tenant_id: str, event: str, payload: dict) -> None:
         webhooks = _get_webhooks_for_tenant(tenant_id)
         if not webhooks:
             return
-        secret = _get_webhook_secret(tenant_id)
         for wh in webhooks:
             if event in wh.get("events", []):
-                _deliver(wh["url"], event, payload, secret)
+                # Use per-endpoint secret; fall back to None (no signature)
+                secret = wh.get("secret") or None
+                _deliver(tenant_id, wh.get("id", ""), wh["url"], event, payload, secret)
     except Exception as exc:
         logger.error("[webhook] dispatcher error: %s", exc)
 

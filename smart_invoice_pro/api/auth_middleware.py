@@ -117,7 +117,7 @@ def super_admin_required(f):
         except jwt.InvalidTokenError:
             return jsonify({"error": "Unauthorized"}), 401
 
-        if not payload.get("is_super_admin"):
+        if payload.get("is_super_admin") is not True:
             return jsonify({"error": "Forbidden — super admin access required"}), 403
 
         return f(*args, **kwargs)

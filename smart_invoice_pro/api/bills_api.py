@@ -11,7 +11,8 @@ from smart_invoice_pro.utils.bulk_archive_contracts import (
 )
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
-from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event, log_bulk_archive_summary
+import copy
 import uuid
 from flasgger import swag_from
 from datetime import date, datetime, timedelta
@@ -296,6 +297,12 @@ def create_bill():
             }
             stock_container.create_item(body=stock_transaction)
 
+        log_audit(
+            "bill", "create", item["id"], None, created_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=item.get("bill_number"),
+        )
         return jsonify(_sanitize_bill(_derive_bill_bucket(created_item))), 201
     except Exception as e:
         return jsonify({"error": f"Failed to create bill: {str(e)}"}), 500
@@ -653,7 +660,9 @@ def update_bill(bill_id):
 
         if _is_archived(bill):
             return jsonify({"error": "Bill not found"}), 404
-        
+
+        before_snapshot = copy.deepcopy(bill)
+
         # Update fields
         updatable_fields = [
             'bill_number', 'vendor_id', 'vendor_name', 'bill_date', 'due_date',
@@ -671,7 +680,12 @@ def update_bill(bill_id):
             item=bill['id'],
             body=bill
         )
-
+        log_audit(
+            "bill", "update", bill_id, before_snapshot, updated_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=updated_item.get("bill_number"),
+        )
         return jsonify(_sanitize_bill(_derive_bill_bucket(updated_item))), 200
     except Exception as e:
         return jsonify({"error": f"Failed to update bill: {str(e)}"}), 500
@@ -927,7 +941,9 @@ def record_payment(bill_id):
         bill = items[0]
         if _is_archived(bill):
             return jsonify({"error": "Archived bills cannot receive payments"}), 409
-        
+
+        before_snapshot = copy.deepcopy(bill)
+
         # Validate payment amount
         if amount > bill['balance_due']:
             return jsonify({"error": "Payment amount exceeds balance due"}), 400
@@ -966,7 +982,18 @@ def record_payment(bill_id):
             item=bill['id'],
             body=bill
         )
-        
+        log_audit_event({
+            "action": "PAYMENT_RECORDED",
+            "entity": "bill",
+            "entity_id": bill_id,
+            "entity_label": bill.get("bill_number"),
+            "before": before_snapshot,
+            "after": updated_bill,
+            "metadata": {"amount": amount, "payment_method": data.get("payment_method", "")},
+            "user_id": getattr(request, "user_id", None),
+            "tenant_id": request.tenant_id,
+        })
+
         return jsonify({
             "message": "Payment recorded successfully",
             "payment_status": updated_bill['payment_status'],

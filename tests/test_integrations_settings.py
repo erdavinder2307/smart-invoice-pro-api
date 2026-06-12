@@ -1,6 +1,8 @@
 """
 Tests for Integrations Settings API.
 GET/PUT /api/settings/integrations
+POST    /api/settings/integrations/test-email
+GET     /api/settings/integrations/webhook-logs
 """
 import pytest
 from unittest.mock import patch, MagicMock
@@ -11,17 +13,20 @@ STORED_DOC = {
     "id": f"{TENANT_A}:integrations_settings",
     "type": "integrations_settings",
     "tenant_id": TENANT_A,
-    "payments": {
-        "provider": "zoho",
+    "email": {
+        "provider": "azure",
+        "sender_email": "bills@example.com",
+        "sender_name": "Example Corp",
         "enabled": True,
-        "api_key": "sk_live_abc123secret",
-        "webhook_secret": "whsec_xyz789secret",
-        "status": "connected",
     },
-    "banking": {"enabled": False, "provider": None},
-    "email": {"provider": "azure", "sender_email": "test@example.com", "enabled": True},
     "webhooks": [
-        {"id": "wh-1", "url": "https://example.com/hook", "events": ["invoice.created"], "active": True},
+        {
+            "id": "wh-1",
+            "url": "https://example.com/hook",
+            "events": ["invoice.created"],
+            "active": True,
+            "secret": "mysecret123",
+        },
     ],
 }
 
@@ -35,19 +40,22 @@ class TestGetIntegrationsSettings:
             resp = client.get("/api/settings/integrations", headers=headers_a)
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["payments"]["status"] == "disconnected"
+        assert "payments" not in data
+        assert "banking" not in data
+        assert "email" in data
+        assert "webhooks" in data
+        assert data["email"]["provider"] == "azure"
 
     def test_secrets_are_masked(self, client, headers_a):
+        """Webhook signing secrets must be masked in GET response."""
         with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
             mock_ctr.query_items.return_value = [STORED_DOC.copy()]
             resp = client.get("/api/settings/integrations", headers=headers_a)
         assert resp.status_code == 200
         data = resp.get_json()
-        # API key should be masked — starts with dots, ends with last 4
-        assert "••••" in (data["payments"]["api_key"] or "")
-        assert "••••" in (data["payments"]["webhook_secret"] or "")
-        # But original secrets not exposed
-        assert "abc123secret" not in (data["payments"]["api_key"] or "")
+        webhook = data["webhooks"][0]
+        assert "\u2022\u2022\u2022\u2022" in (webhook.get("secret") or "")
+        assert "mysecret123" not in (webhook.get("secret") or "")
 
     def test_strips_cosmos_internal_fields(self, client, headers_a):
         stored = {**STORED_DOC, "_rid": "x", "_self": "y", "_etag": "z", "_ts": 1}
@@ -59,60 +67,29 @@ class TestGetIntegrationsSettings:
         assert "_rid" not in data
         assert "_ts" not in data
 
+    def test_returns_sender_name(self, client, headers_a):
+        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_DOC.copy()]
+            resp = client.get("/api/settings/integrations", headers=headers_a)
+        assert resp.status_code == 200
+        assert resp.get_json()["email"]["sender_name"] == "Example Corp"
+
 
 class TestSaveIntegrationsSettings:
     """PUT /api/settings/integrations"""
 
-    def test_update_payments_enabled(self, client, headers_a):
-        import copy
-        stored = copy.deepcopy(STORED_DOC)
-        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
-            mock_ctr.query_items.return_value = [stored]
-            resp = client.put("/api/settings/integrations",
-                              json={"payments": {"enabled": False}}, headers=headers_a)
-        assert resp.status_code == 200
-        data = resp.get_json()["settings"]
-        assert data["payments"]["status"] == "disconnected"
-
-    def test_masked_secret_not_overwritten(self, client, headers_a):
-        """Sending masked placeholder back should NOT overwrite the real secret."""
+    def test_update_email_sender_name(self, client, headers_a):
         import copy
         stored = copy.deepcopy(STORED_DOC)
         with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
             mock_ctr.query_items.return_value = [stored]
             resp = client.put("/api/settings/integrations", json={
-                "payments": {"api_key": "••••••••••cret"}
-            }, headers=headers_a)
-        assert resp.status_code == 200
-        # The actual stored value should remain unchanged
-        upserted = mock_ctr.upsert_item.call_args[1]["body"]
-        assert upserted["payments"]["api_key"] == "sk_live_abc123secret"
-
-    def test_real_secret_update(self, client, headers_a):
-        """Sending a real (non-masked) value should update the secret."""
-        import copy
-        stored = copy.deepcopy(STORED_DOC)
-        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
-            mock_ctr.query_items.return_value = [stored]
-            resp = client.put("/api/settings/integrations", json={
-                "payments": {"api_key": "new_secret_key_12345"}
-            }, headers=headers_a)
-        assert resp.status_code == 200
-        upserted = mock_ctr.upsert_item.call_args[1]["body"]
-        assert upserted["payments"]["api_key"] == "new_secret_key_12345"
-
-    def test_update_banking(self, client, headers_a):
-        import copy
-        stored = copy.deepcopy(STORED_DOC)
-        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
-            mock_ctr.query_items.return_value = [stored]
-            resp = client.put("/api/settings/integrations", json={
-                "banking": {"enabled": True, "provider": "icici"}
+                "email": {"sender_email": "new@example.com", "sender_name": "New Corp", "enabled": True}
             }, headers=headers_a)
         assert resp.status_code == 200
         data = resp.get_json()["settings"]
-        assert data["banking"]["enabled"] is True
-        assert data["banking"]["provider"] == "icici"
+        assert data["email"]["sender_email"] == "new@example.com"
+        assert data["email"]["sender_name"] == "New Corp"
 
     def test_update_email(self, client, headers_a):
         import copy
@@ -120,11 +97,41 @@ class TestSaveIntegrationsSettings:
         with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
             mock_ctr.query_items.return_value = [stored]
             resp = client.put("/api/settings/integrations", json={
-                "email": {"sender_email": "new@example.com"}
+                "email": {"sender_email": "updated@example.com"}
             }, headers=headers_a)
         assert resp.status_code == 200
         data = resp.get_json()["settings"]
-        assert data["email"]["sender_email"] == "new@example.com"
+        assert data["email"]["sender_email"] == "updated@example.com"
+
+    def test_masked_secret_not_overwritten(self, client, headers_a):
+        """Sending a masked placeholder back must NOT overwrite the real webhook secret."""
+        import copy
+        stored = copy.deepcopy(STORED_DOC)
+        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [stored]
+            resp = client.put("/api/settings/integrations", json={
+                "webhooks": [{"id": "wh-1", "url": "https://example.com/hook",
+                               "events": ["invoice.created"], "active": True,
+                               "secret": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022ret"}]
+            }, headers=headers_a)
+        assert resp.status_code == 200
+        upserted = mock_ctr.upsert_item.call_args[1]["body"]
+        assert upserted["webhooks"][0]["secret"] == "mysecret123"
+
+    def test_real_webhook_secret_update(self, client, headers_a):
+        """Sending a real (non-masked) webhook secret value should update it."""
+        import copy
+        stored = copy.deepcopy(STORED_DOC)
+        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [stored]
+            resp = client.put("/api/settings/integrations", json={
+                "webhooks": [{"id": "wh-1", "url": "https://example.com/hook",
+                               "events": ["invoice.created"], "active": True,
+                               "secret": "brand_new_secret_xyz"}]
+            }, headers=headers_a)
+        assert resp.status_code == 200
+        upserted = mock_ctr.upsert_item.call_args[1]["body"]
+        assert upserted["webhooks"][0]["secret"] == "brand_new_secret_xyz"
 
     def test_add_webhook(self, client, headers_a):
         import copy
@@ -140,10 +147,10 @@ class TestSaveIntegrationsSettings:
         data = resp.get_json()["settings"]
         assert len(data["webhooks"]) == 1
         assert data["webhooks"][0]["url"] == "https://hooks.example.com/new"
-        # Auto-assigned UUID
         assert data["webhooks"][0]["id"]
 
     def test_invalid_webhook_url(self, client, headers_a):
+        """Non-https webhook URL must be rejected with 400."""
         import copy
         stored = copy.deepcopy(STORED_DOC)
         with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
@@ -152,7 +159,7 @@ class TestSaveIntegrationsSettings:
                 "webhooks": [{"url": "ftp://bad.com", "events": ["invoice.created"]}]
             }, headers=headers_a)
         assert resp.status_code == 400
-        assert "invalid webhook url" in resp.get_json()["error"].lower()
+        assert "https" in resp.get_json()["error"].lower()
 
     def test_unsupported_webhook_event(self, client, headers_a):
         import copy
@@ -170,16 +177,73 @@ class TestSaveIntegrationsSettings:
                           data="", content_type="application/json", headers=headers_a)
         assert resp.status_code == 400
 
-    def test_payments_status_derived_correctly(self, client, headers_a):
-        """enabled=True + api_key → connected; enabled=True + no key → pending."""
+    def test_payments_and_banking_fields_ignored(self, client, headers_a):
+        """Sending legacy payments/banking fields should not cause errors."""
         import copy
         stored = copy.deepcopy(STORED_DOC)
-        stored["payments"]["api_key"] = None
         with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
             mock_ctr.query_items.return_value = [stored]
             resp = client.put("/api/settings/integrations", json={
-                "payments": {"enabled": True}
+                "payments": {"enabled": True, "api_key": "sk_test_123"},
+                "banking": {"enabled": True, "provider": "icici"},
+                "email": {"sender_email": "ok@example.com"},
             }, headers=headers_a)
         assert resp.status_code == 200
-        upserted = mock_ctr.upsert_item.call_args[1]["body"]
-        assert upserted["payments"]["status"] == "pending"
+        data = resp.get_json()["settings"]
+        assert "payments" not in data
+        assert "banking" not in data
+
+
+class TestTestEmailEndpoint:
+    """POST /api/settings/integrations/test-email"""
+
+    def test_missing_to_field_returns_400(self, client, headers_a):
+        resp = client.post("/api/settings/integrations/test-email",
+                           json={}, headers=headers_a)
+        assert resp.status_code == 400
+
+    def test_endpoint_exists_and_handles_request(self, client, headers_a):
+        """Endpoint must exist and return a non-404 response (200 or 500 depending on ACS config)."""
+        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
+            mock_ctr.query_items.return_value = [STORED_DOC.copy()]
+            # Mock the Azure EmailClient used inside the handler
+            with patch("azure.communication.email.EmailClient") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client_cls.from_connection_string.return_value = mock_client
+                mock_client.begin_send.return_value = MagicMock(result=MagicMock(return_value={}))
+                resp = client.post("/api/settings/integrations/test-email",
+                                   json={"to": "recipient@example.com"},
+                                   headers=headers_a)
+        assert resp.status_code != 404
+
+
+class TestWebhookLogsEndpoint:
+    """GET /api/settings/integrations/webhook-logs"""
+
+    def test_returns_logs(self, client, headers_a):
+        # get_webhook_logs does a local re-import, so patch at the cosmos_client source
+        sample_log = {
+            "id": "log-1",
+            "tenant_id": TENANT_A,
+            "event": "invoice.created",
+            "url": "https://example.com/hook",
+            "success": True,
+            "status_code": 200,
+            "delivered_at": "2024-01-01T00:00:00",
+        }
+        mock_ctr = MagicMock()
+        mock_ctr.query_items.return_value = [sample_log]
+        with patch("smart_invoice_pro.utils.cosmos_client.webhook_logs_container", mock_ctr):
+            resp = client.get("/api/settings/integrations/webhook-logs", headers=headers_a)
+        assert resp.status_code == 200
+        logs = resp.get_json()
+        assert isinstance(logs, list)
+        assert logs[0]["event"] == "invoice.created"
+
+    def test_returns_empty_list_when_no_logs(self, client, headers_a):
+        mock_ctr = MagicMock()
+        mock_ctr.query_items.return_value = []
+        with patch("smart_invoice_pro.utils.cosmos_client.webhook_logs_container", mock_ctr):
+            resp = client.get("/api/settings/integrations/webhook-logs", headers=headers_a)
+        assert resp.status_code == 200
+        assert resp.get_json() == []

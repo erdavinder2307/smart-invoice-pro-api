@@ -319,29 +319,14 @@ def _fetch_user_by_id(user_id: str):
 def _check_permission(user_id: str, tenant_id: str, module: str, action: str) -> bool:
     """
     Returns True if the user has permission for module+action.
-    Admin always passes. Falls back to role name if no role_id set.
+    Admin always passes (role string, Admin role document, or super-admin).
     """
-    user = _fetch_user_by_id(user_id)
-    if not user:
-        return False
+    from smart_invoice_pro.utils.rbac_resolver import resolve_user_permissions
 
-    # Admin shortcut (works even before role docs are seeded)
-    if user.get('role') == 'Admin':
+    is_admin, permissions = resolve_user_permissions(user_id, tenant_id)
+    if is_admin:
         return True
-
-    # Try role_id first, then role name
-    role_id = user.get('role_id')
-    if role_id:
-        role_doc = _get_role_by_id(role_id, tenant_id)
-    else:
-        role_name = user.get('role', 'Sales')
-        role_doc = _get_role_by_name(role_name, tenant_id)
-
-    if not role_doc:
-        return False
-
-    perms = role_doc.get('permissions', {})
-    return bool(perms.get(module, {}).get(action, False))
+    return bool(permissions.get(module, {}).get(action, False))
 
 
 # ── permission_required decorator ─────────────────────────────────────────────
@@ -375,29 +360,28 @@ def permission_required(module: str, action: str):
 def get_my_permissions():
     """Return the full permission map for the current authenticated user."""
     try:
+        from smart_invoice_pro.utils.rbac_resolver import (
+            fetch_account_user,
+            resolve_user_permissions,
+        )
+
         user_id = request.user_id
         tenant_id = request.tenant_id
-        user = _fetch_user_by_id(user_id)
+        user = fetch_account_user(user_id)
         if not user:
             return jsonify({'error': 'User not found'}), 404
 
-        # Admin → synthesise full permissions
-        if user.get('role') == 'Admin':
+        is_admin, perms = resolve_user_permissions(user_id, tenant_id)
+        if is_admin:
             full_perms = {m: _all(a) for m, a in PERMISSION_MODULES.items()}
             return jsonify({
                 'user_id':  user_id,
-                'role':     'Admin',
+                'role':     user.get('role') or 'Admin',
                 'is_admin': True,
                 'permissions': full_perms,
             }), 200
 
         role_id = user.get('role_id')
-        if role_id:
-            role_doc = _get_role_by_id(role_id, tenant_id)
-        else:
-            role_doc = _get_role_by_name(user.get('role', 'Sales'), tenant_id)
-
-        perms = role_doc.get('permissions', {}) if role_doc else {}
         return jsonify({
             'user_id':     user_id,
             'role':        user.get('role', 'Sales'),
@@ -784,6 +768,11 @@ def update_settings_user(target_user_id):
 
         before_snapshot = copy.deepcopy(user)
         data = request.get_json(silent=True) or {}
+
+        from smart_invoice_pro.utils.user_field_guards import reject_protected_user_fields
+        protected_error = reject_protected_user_fields(data)
+        if protected_error:
+            return jsonify({'error': protected_error}), 400
 
         if 'name' in data:
             user['name'] = (data['name'] or '').strip()

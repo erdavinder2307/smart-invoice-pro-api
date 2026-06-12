@@ -19,7 +19,8 @@ from smart_invoice_pro.utils.bulk_archive_contracts import (
 )
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
-from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event, log_bulk_archive_summary
+import copy
 
 sales_orders_blueprint = Blueprint('sales_orders', __name__)
 
@@ -170,6 +171,12 @@ def create_sales_order():
     
     try:
         created_item = sales_orders_container.create_item(body=item)
+        log_audit(
+            "sales_order", "create", item["id"], None, created_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=item.get("so_number"),
+        )
         return jsonify(created_item), 201
     except Exception as e:
         return jsonify({"error": f"Failed to create sales order: {str(e)}"}), 500
@@ -436,6 +443,8 @@ def update_sales_order(so_id):
         if _is_archived(so):
             return jsonify({"error": "Sales Order not found"}), 404
 
+        before_snapshot = copy.deepcopy(so)
+
         # Update fields
         updatable_fields = [
             'so_number', 'customer_id', 'customer_name', 'customer_email', 'customer_phone',
@@ -454,7 +463,12 @@ def update_sales_order(so_id):
             item=so['id'],
             body=so
         )
-        
+        log_audit(
+            "sales_order", "update", so_id, before_snapshot, updated_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=updated_item.get("so_number"),
+        )
         return jsonify(updated_item), 200
     except Exception as e:
         return jsonify({"error": f"Failed to update sales order: {str(e)}"}), 500
@@ -723,7 +737,9 @@ def convert_so_to_invoice(so_id):
         # Check if already invoiced
         if so.get('status') == 'Invoiced' or so.get('converted_to_invoice_id'):
             return jsonify({"error": "Sales Order has already been invoiced"}), 400
-        
+
+        before_convert = copy.deepcopy(so)
+
         # Create invoice from sales order
         now = datetime.utcnow().isoformat()
         invoice = {
@@ -770,7 +786,23 @@ def convert_so_to_invoice(so_id):
             item=so['id'],
             body=so
         )
-        
+        log_audit_event({
+            "action": "CONVERTED",
+            "entity": "sales_order",
+            "entity_id": so_id,
+            "entity_label": so.get("so_number"),
+            "before": before_convert,
+            "after": so,
+            "metadata": {
+                "workflow": "sales_order_to_invoice",
+                "target_entity": "invoice",
+                "target_entity_id": created_invoice["id"],
+                "target_entity_label": created_invoice.get("invoice_number"),
+            },
+            "user_id": getattr(request, "user_id", None),
+            "tenant_id": request.tenant_id,
+        })
+
         return jsonify({
             "message": "Sales Order converted to invoice successfully",
             "invoice_id": created_invoice['id'],

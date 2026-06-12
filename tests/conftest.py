@@ -120,10 +120,15 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.dashboard_api.stock_container",
     # Webhook dispatcher (prevent real HTTP calls)
     "smart_invoice_pro.utils.webhook_dispatcher.settings_container",
+    "smart_invoice_pro.utils.webhook_dispatcher.webhook_logs_container",
+    # Integrations settings (webhook logs endpoint)
+    "smart_invoice_pro.api.integrations_settings_api.webhook_logs_container",
     # Notifications
     "smart_invoice_pro.utils.notifications.notifications_container",
     # Audit logger
     "smart_invoice_pro.utils.audit_logger.audit_logs_container",
+    "smart_invoice_pro.utils.audit_retention.audit_logs_archive_container",
+    "smart_invoice_pro.utils.audit_retention.audit_logs_container",
     # Domain events
     "smart_invoice_pro.utils.domain_events.domain_events_container",
     # Settings pages
@@ -139,6 +144,7 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.notifications_api.notifications_container",
     # Audit logs API
     "smart_invoice_pro.api.audit_logs_api.audit_logs_container",
+    "smart_invoice_pro.api.audit_logs_api.domain_events_container",
     # Quotes
     "smart_invoice_pro.api.quotes_api.quotes_container",
     "smart_invoice_pro.api.quotes_api.get_container",

@@ -13,6 +13,7 @@ from smart_invoice_pro.utils.audit_logger import log_audit_event
 from smart_invoice_pro.utils.cosmos_client import get_container
 from smart_invoice_pro.utils.domain_events import record_domain_event
 from smart_invoice_pro.utils.notifications import create_notification
+import copy
 import uuid
 from datetime import datetime
 import csv
@@ -42,6 +43,22 @@ def _require_actor():
     if not user_id or not tenant_id:
         return None, None, (jsonify({'error': 'Unauthorized'}), 401)
     return user_id, tenant_id, None
+
+
+def _audit_banking(action, entity, entity_id, *, user_id, tenant_id, before=None, after=None,
+                   metadata=None, entity_label=None):
+    log_audit_event({
+        "action": action,
+        "entity": entity,
+        "entity_id": entity_id,
+        "entity_label": entity_label,
+        "category": "banking",
+        "before": before,
+        "after": after,
+        "metadata": metadata or {},
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+    })
 
 
 def _tenant_legacy_clause(tenant_id):
@@ -287,22 +304,24 @@ def create_statement_import_batch():
     except Exception as exc:
         return jsonify({'error': str(exc)}), 500
 
-    log_audit_event(
-        {
-            'action': 'BANK_IMPORT_BATCH_CREATED',
-            'entity': 'bank_import_batch',
-            'entity_id': batch_doc['id'],
-            'after': {
-                'filename': batch_doc.get('filename'),
-                'row_count': batch_doc.get('row_count'),
-                'status': batch_doc.get('status'),
-            },
-            'metadata': {
-                'job_id': job_doc.get('id'),
-                'workflow_mode': batch_doc.get('workflow_mode'),
-                'job_status': job_doc.get('status'),
-            },
-        }
+    _audit_banking(
+        "BANK_IMPORT_BATCH_CREATED",
+        "bank_import_batch",
+        batch_doc["id"],
+        user_id=user_id,
+        tenant_id=tenant_id,
+        entity_label=batch_doc.get("filename"),
+        after={
+            "filename": batch_doc.get("filename"),
+            "row_count": batch_doc.get("row_count"),
+            "status": batch_doc.get("status"),
+        },
+        metadata={
+            "job_id": job_doc.get("id"),
+            "workflow_mode": batch_doc.get("workflow_mode"),
+            "job_status": job_doc.get("status"),
+            "bank_account_id": bank_account_id,
+        },
     )
     record_domain_event(
         'BANK_IMPORT_BATCH_CREATED',
@@ -368,6 +387,14 @@ def delete_statement_import_batch(batch_id):
 
     if not deleted:
         return jsonify({'error': 'Import batch not found'}), 404
+    _audit_banking(
+        "BANK_IMPORT_BATCH_DELETED",
+        "bank_import_batch",
+        batch_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        metadata={"batch_id": batch_id},
+    )
     return jsonify({'deleted': True, 'batch_id': batch_id}), 200
 
 
@@ -409,14 +436,15 @@ def update_statement_import_row(batch_id, row_id):
     if not updated_doc:
         return jsonify({'error': 'Import row not found'}), 404
 
-    log_audit_event(
-        {
-            'action': 'BANK_IMPORT_ROW_UPDATED',
-            'entity': 'bank_import_row',
-            'entity_id': row_id,
-            'after': updated_doc,
-            'metadata': {'batch_id': batch_id},
-        }
+    _audit_banking(
+        "BANK_IMPORT_ROW_UPDATED",
+        "bank_import_row",
+        row_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        after=updated_doc,
+        metadata={"batch_id": batch_id},
+        entity_label=updated_doc.get("description"),
     )
     return jsonify(updated_doc), 200
 
@@ -436,16 +464,18 @@ def approve_statement_import_batch(batch_id):
     created_txns = [_persist_approved_bank_transaction(row, user_id, tenant_id) for row in approved_rows]
     batch_doc = mark_batch_approved(tenant_id=tenant_id, batch_id=batch_id, approved_row_count=len(created_txns))
 
-    log_audit_event(
-        {
-            'action': 'BANK_IMPORT_BATCH_APPROVED',
-            'entity': 'bank_import_batch',
-            'entity_id': batch_id,
-            'after': {
-                'approved_row_count': len(created_txns),
-                'status': batch_doc.get('status'),
-            },
-        }
+    _audit_banking(
+        "BANK_IMPORT_BATCH_APPROVED",
+        "bank_import_batch",
+        batch_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        entity_label=batch_doc.get("filename"),
+        after={
+            "approved_row_count": len(created_txns),
+            "status": batch_doc.get("status"),
+        },
+        metadata={"transactions_created": len(created_txns)},
     )
     record_domain_event(
         'BANK_IMPORT_BATCH_APPROVED',
@@ -532,6 +562,16 @@ def upload_statement():
         bank_txns_container.create_item(body=doc)
         saved.append(doc)
 
+    _audit_banking(
+        "BANK_STATEMENT_IMPORTED",
+        "bank_account",
+        bank_account_id or "legacy-upload",
+        user_id=user_id,
+        tenant_id=tenant_id,
+        after={"imported_count": len(saved)},
+        metadata={"filename": file.filename, "format": ext},
+    )
+
     return jsonify({
         'imported': len(saved),
         'skipped': skipped,
@@ -601,6 +641,7 @@ def match_transaction(txn_id):
                 'match_id': txn.get('match_id'),
             }), 409
 
+        before_snapshot = copy.deepcopy(txn)
         now = datetime.utcnow().isoformat() + 'Z'
         txn['match_status'] = 'matched'
         txn['match_type']   = match_type
@@ -609,6 +650,17 @@ def match_transaction(txn_id):
         txn['updated_at']   = now
 
         bank_txns_container.replace_item(item=txn_id, body=txn)
+        _audit_banking(
+            "RECONCILIATION_MATCHED",
+            "bank_transaction",
+            txn_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            before=before_snapshot,
+            after=txn,
+            entity_label=txn.get("description"),
+            metadata={"match_type": match_type, "match_id": match_id},
+        )
         return jsonify(txn), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -633,12 +685,23 @@ def unmatch_transaction(txn_id):
             return jsonify({'error': 'Transaction not found'}), 404
 
         txn = items[0]
+        before_snapshot = copy.deepcopy(txn)
         txn['match_status'] = 'unmatched'
         txn['match_type']   = None
         txn['match_id']     = None
         txn['updated_at']   = datetime.utcnow().isoformat() + 'Z'
 
         bank_txns_container.replace_item(item=txn_id, body=txn)
+        _audit_banking(
+            "RECONCILIATION_UNMATCHED",
+            "bank_transaction",
+            txn_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            before=before_snapshot,
+            after=txn,
+            entity_label=txn.get("description"),
+        )
         return jsonify(txn), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -666,6 +729,7 @@ def create_expense_from_txn(txn_id):
             return jsonify({'error': 'Transaction not found'}), 404
 
         txn = items[0]
+        before_snapshot = copy.deepcopy(txn)
         now = datetime.utcnow().isoformat() + 'Z'
 
         expense_id = str(uuid.uuid4())
@@ -690,6 +754,17 @@ def create_expense_from_txn(txn_id):
         txn['match_id']     = expense_id
         txn['updated_at']   = now
         bank_txns_container.replace_item(item=txn_id, body=txn)
+        _audit_banking(
+            "RECONCILIATION_OVERRIDE",
+            "bank_transaction",
+            txn_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            before=before_snapshot,
+            after=txn,
+            entity_label=txn.get("description"),
+            metadata={"expense_id": expense_id, "category": expense.get("category")},
+        )
 
         return jsonify({'expense': expense, 'transaction': txn}), 201
     except Exception as e:
@@ -725,6 +800,14 @@ def run_auto_match():
                 bank_txns_container.replace_item(item=txn['id'], body=txn)
                 matched_count += 1
 
+        _audit_banking(
+            "BANK_AUTO_MATCH_RUN",
+            "bank_account",
+            request.args.get("bank_account_id") or "all",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            metadata={"processed": len(unmatched), "newly_matched": matched_count},
+        )
         return jsonify({
             'processed': len(unmatched),
             'newly_matched': matched_count,
@@ -751,7 +834,17 @@ def delete_transaction(txn_id):
         if not items:
             return jsonify({'error': 'Transaction not found'}), 404
 
+        txn = items[0]
         bank_txns_container.delete_item(item=txn_id, partition_key=user_id)
+        _audit_banking(
+            "BANK_TRANSACTION_DELETED",
+            "bank_transaction",
+            txn_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            before=txn,
+            entity_label=txn.get("description"),
+        )
         return jsonify({'message': 'Transaction deleted'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -934,6 +1027,18 @@ def run_ai_match():
                 'applied': will_apply,
             })
 
+        _audit_banking(
+            "BANK_AI_MATCH_RUN",
+            "bank_account",
+            body.get("bank_account_id") or "all",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            metadata={
+                "processed": len(unmatched),
+                "newly_matched": matched_count,
+                "confidence_threshold": confidence_threshold,
+            },
+        )
         return jsonify({
             'processed': len(unmatched),
             'newly_matched': matched_count,

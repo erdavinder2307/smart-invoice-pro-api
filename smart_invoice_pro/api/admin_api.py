@@ -18,7 +18,12 @@ from smart_invoice_pro.utils.cosmos_client import (
     feature_flags_container,
     audit_logs_container,
 )
-from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.audit_logger import get_audit_write_stats, log_audit_event
+from smart_invoice_pro.utils.activity_enrichment import enrich_admin_audit_entries
+from smart_invoice_pro.utils.audit_export import audit_rows_to_csv
+from smart_invoice_pro.utils.audit_query import parse_audit_filters, parse_pagination
+from smart_invoice_pro.utils.audit_retention import archive_expired_audit_logs, retention_days
+from smart_invoice_pro.utils.tenant_service import create_tenant_doc, VALID_TENANT_PLANS
 
 admin_blueprint = Blueprint("admin", __name__)
 
@@ -53,6 +58,20 @@ def _admin_tenant_id():
     return getattr(request, "tenant_id", None)
 
 
+def _log_platform_audit(entity_type: str, action: str, entity_id, before, after):
+    """Write an audit record tagged as a platform-admin action."""
+    log_audit_event({
+        "entity": entity_type,
+        "action": action,
+        "entity_id": entity_id,
+        "before": before,
+        "after": after,
+        "user_id": _admin_user_id(),
+        "tenant_id": _admin_tenant_id(),
+        "metadata": {"source": "platform_admin"},
+    })
+
+
 def _clean_audit_entry(entry: dict) -> dict:
     safe = _sanitize_doc(entry)
     before = safe.get("before")
@@ -72,6 +91,44 @@ def _clean_audit_entry(entry: dict) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 # TENANT MANAGEMENT
 # ═════════════════════════════════════════════════════════════════════════════
+
+@admin_blueprint.route("/admin/tenants", methods=["POST"])
+@super_admin_required
+def create_tenant():
+    """Provision a new tenant organization."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    plan = (data.get("plan") or "trial").strip().lower()
+    if plan not in VALID_TENANT_PLANS:
+        return jsonify({
+            "error": f"Invalid plan. Must be one of: {', '.join(sorted(VALID_TENANT_PLANS))}"
+        }), 400
+
+    status = (data.get("status") or "active").strip().lower()
+    if status not in VALID_TENANT_STATUSES:
+        return jsonify({
+            "error": f"Invalid status. Must be one of: {', '.join(sorted(VALID_TENANT_STATUSES))}"
+        }), 400
+
+    try:
+        tenant = create_tenant_doc(
+            name=name,
+            plan=plan,
+            status=status,
+            owner_user_id=(data.get("owner_user_id") or "").strip() or None,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "already exists" in message.lower():
+            return jsonify({"error": message}), 409
+        return jsonify({"error": message}), 400
+
+    _log_platform_audit("tenant", "create", tenant["id"], None, tenant)
+    return jsonify(_sanitize_doc(tenant)), 201
+
 
 @admin_blueprint.route("/admin/tenants", methods=["GET"])
 @super_admin_required
@@ -141,11 +198,7 @@ def update_tenant_status(tenant_id):
     tenant["updated_at"] = datetime.utcnow().isoformat()
     tenants_container.replace_item(item=tenant["id"], body=tenant)
 
-    log_audit(
-        entity_type="tenant", action="update_status", entity_id=tenant_id,
-        before=before, after=tenant,
-        user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
-    )
+    _log_platform_audit("tenant", "update_status", tenant_id, before, tenant)
     return jsonify(_sanitize_doc(tenant)), 200
 
 
@@ -168,11 +221,7 @@ def delete_tenant(tenant_id):
     tenant["updated_at"] = datetime.utcnow().isoformat()
     tenants_container.replace_item(item=tenant["id"], body=tenant)
 
-    log_audit(
-        entity_type="tenant", action="soft_delete", entity_id=tenant_id,
-        before=before, after=tenant,
-        user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
-    )
+    _log_platform_audit("tenant", "soft_delete", tenant_id, before, tenant)
     return jsonify({"message": "Tenant deleted", "id": tenant_id}), 200
 
 
@@ -234,11 +283,7 @@ def update_user_status(user_id):
     user["updated_at"] = datetime.utcnow().isoformat()
     users_container.replace_item(item=user["id"], body=user)
 
-    log_audit(
-        entity_type="user", action="update_status", entity_id=user_id,
-        before=before, after=user,
-        user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
-    )
+    _log_platform_audit("user", "update_status", user_id, before, user)
     return jsonify(_sanitize_user(user)), 200
 
 
@@ -264,10 +309,8 @@ def reset_user_password(user_id):
     user["updated_at"] = datetime.utcnow().isoformat()
     users_container.replace_item(item=user["id"], body=user)
 
-    log_audit(
-        entity_type="user", action="reset_password", entity_id=user_id,
-        before=None, after={"password_changed": True},
-        user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
+    _log_platform_audit(
+        "user", "reset_password", user_id, None, {"password_changed": True},
     )
     return jsonify({"message": "Password reset successfully", "user_id": user_id}), 200
 
@@ -316,11 +359,7 @@ def create_feature_flags(tenant_id):
     }
     feature_flags_container.create_item(body=doc)
 
-    log_audit(
-        entity_type="feature_flags", action="create", entity_id=tenant_id,
-        before=None, after=doc,
-        user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
-    )
+    _log_platform_audit("feature_flags", "create", tenant_id, None, doc)
     return jsonify(_sanitize_doc(doc)), 201
 
 
@@ -347,11 +386,7 @@ def update_feature_flags(tenant_id):
     doc["updated_at"] = datetime.utcnow().isoformat()
     feature_flags_container.replace_item(item=doc["id"], body=doc)
 
-    log_audit(
-        entity_type="feature_flags", action="update", entity_id=tenant_id,
-        before=before, after=doc,
-        user_id=_admin_user_id(), tenant_id=_admin_tenant_id(),
-    )
+    _log_platform_audit("feature_flags", "update", tenant_id, before, doc)
     return jsonify(_sanitize_doc(doc)), 200
 
 
@@ -359,49 +394,9 @@ def update_feature_flags(tenant_id):
 # AUDIT LOGS (CROSS-TENANT)
 # ═════════════════════════════════════════════════════════════════════════════
 
-@admin_blueprint.route("/admin/audit-logs", methods=["GET"])
-@super_admin_required
-def list_audit_logs_admin():
-    """List audit logs across all tenants (super admin only)."""
-    tenant_id = (request.args.get("tenant_id") or "").strip()
-    user_id = (request.args.get("user_id") or "").strip()
-    entity = ((request.args.get("entity") or request.args.get("entity_type") or "").strip().lower())
-    action = (request.args.get("action") or "").strip().upper()
-    start_date = (request.args.get("start_date") or request.args.get("from_date") or "").strip()
-    end_date = (request.args.get("end_date") or request.args.get("to_date") or "").strip()
-    search = (request.args.get("search") or "").strip().lower()
-
-    try:
-        page = max(0, int(request.args.get("page", 0)))
-        limit = min(200, max(1, int(request.args.get("limit", 50))))
-    except ValueError:
-        page, limit = 0, 50
-
-    conditions = ["1=1"]
-    params = []
-
-    if tenant_id:
-        conditions.append("c.tenant_id = @tenant_id")
-        params.append({"name": "@tenant_id", "value": tenant_id})
-    if user_id:
-        conditions.append("c.user_id = @user_id")
-        params.append({"name": "@user_id", "value": user_id})
-    if entity:
-        conditions.append("(c.entity = @entity OR c.entity_type = @entity)")
-        params.append({"name": "@entity", "value": entity})
-    if action:
-        conditions.append("UPPER(c.action) = @action")
-        params.append({"name": "@action", "value": action})
-    if start_date:
-        conditions.append("(c.created_at >= @start_date OR c.timestamp >= @start_date)")
-        params.append({"name": "@start_date", "value": start_date})
-    if end_date:
-        conditions.append("(c.created_at <= @end_date OR c.timestamp <= @end_date)")
-        params.append({"name": "@end_date", "value": end_date + "T23:59:59"})
-    if search:
-        conditions.append("(CONTAINS(LOWER(c.entity_id), @search) OR CONTAINS(LOWER(c.user_id), @search) OR CONTAINS(LOWER(c.user_email), @search))")
-        params.append({"name": "@search", "value": search})
-
+def _fetch_admin_audit_rows(*, page=0, limit=50):
+    scoped_tenant = (request.args.get("tenant_id") or "").strip() or None
+    conditions, params = parse_audit_filters(tenant_id=scoped_tenant)
     where_sql = " AND ".join(conditions)
     offset = page * limit
 
@@ -427,14 +422,58 @@ def list_audit_logs_admin():
             enable_cross_partition_query=True,
         )
     )
+    return total, items
+
+
+@admin_blueprint.route("/admin/audit-logs", methods=["GET"])
+@super_admin_required
+def list_audit_logs_admin():
+    """List audit logs across all tenants (super admin only)."""
+    page, limit = parse_pagination()
+    total, items = _fetch_admin_audit_rows(page=page, limit=limit)
+    logs = enrich_admin_audit_entries([_clean_audit_entry(x) for x in items])
 
     return jsonify({
-        "logs": [_clean_audit_entry(x) for x in items],
+        "logs": logs,
         "total": total,
         "page": page,
         "limit": limit,
         "pages": max(1, -(-total // limit)),
     }), 200
+
+
+@admin_blueprint.route("/admin/audit-logs/export", methods=["GET"])
+@super_admin_required
+def export_audit_logs_admin():
+    """CSV export of cross-tenant audit logs."""
+    from flask import make_response
+
+    _, items = _fetch_admin_audit_rows(page=0, limit=10_000)
+    logs = enrich_admin_audit_entries([_clean_audit_entry(x) for x in items])
+    csv_data = audit_rows_to_csv(logs, include_tenant=True)
+    response = make_response(csv_data)
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = "attachment; filename=platform-audit-export.csv"
+    return response
+
+
+@admin_blueprint.route("/admin/audit-stats", methods=["GET"])
+@super_admin_required
+def audit_stats_admin():
+    """Audit write health and retention configuration."""
+    return jsonify({
+        "write_stats": get_audit_write_stats(),
+        "retention_days": retention_days(),
+    }), 200
+
+
+@admin_blueprint.route("/admin/audit-retention/run", methods=["POST"])
+@super_admin_required
+def run_audit_retention_admin():
+    """Archive expired audit logs (manual trigger for ops)."""
+    tenant_id = (request.get_json(silent=True) or {}).get("tenant_id")
+    result = archive_expired_audit_logs(tenant_id=tenant_id or None)
+    return jsonify(result), 200
 
 
 # ═════════════════════════════════════════════════════════════════════════════

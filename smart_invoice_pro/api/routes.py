@@ -175,6 +175,17 @@ def register_user():
         'created_at': datetime.datetime.utcnow().isoformat()
     }
     users_container.create_item(body=user)
+
+    from smart_invoice_pro.utils.tenant_service import ensure_tenant_exists
+    try:
+        ensure_tenant_exists(
+            tenant_id,
+            name=(data.get('organization_name') or data.get('name') or username).strip(),
+            owner_user_id=user_id,
+        )
+    except Exception:
+        pass
+
     return jsonify({
         "message": "User registered successfully!",
         "user": {
@@ -351,6 +362,28 @@ def login_user():
         }), 200
     else:
         _record_failed_login()
+        attempted_user = items[0] if items else None
+        log_audit_event({
+            "action": "LOGIN_FAILED",
+            "entity": "auth",
+            "entity_id": attempted_user.get("id") if attempted_user else None,
+            "before": None,
+            "after": {
+                "login": "failed",
+                "username_attempt": login_input,
+            },
+            "metadata": {"event": "login_failed"},
+            "tenant_id": (
+                attempted_user.get("tenant_id") or attempted_user.get("id")
+                if attempted_user else "unknown"
+            ),
+            "user_id": attempted_user.get("id") if attempted_user else None,
+            "user_email": (
+                (attempted_user.get("email") or attempted_user.get("username"))
+                if attempted_user else login_input
+            ),
+            "ip_address": _get_client_ip(),
+        })
         return jsonify({"message": "Invalid username or password."}), 401
  
 @auth_blueprint.route('/auth/refresh', methods=['POST'])
@@ -440,6 +473,7 @@ def refresh_token():
             "username": user.get('username', ''),
             "role": user.get('role', ''),
             "role_id": user.get('role_id', ''),
+            "is_super_admin": bool(user.get('is_super_admin', False)),
             "session_id": new_token_record_id,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
         },

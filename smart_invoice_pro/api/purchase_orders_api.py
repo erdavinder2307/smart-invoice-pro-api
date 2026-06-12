@@ -10,6 +10,8 @@ from flasgger import swag_from
 from datetime import datetime, timedelta
 from enum import Enum
 from smart_invoice_pro.api.invoice_generation import build_invoice_pdf, _get_tenant_branding, branding_for_document
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
+import copy
 
 purchase_orders_blueprint = Blueprint('purchase_orders', __name__)
 
@@ -178,6 +180,12 @@ def create_purchase_order():
     
     try:
         created_item = purchase_orders_container.create_item(body=item)
+        log_audit(
+            "purchase_order", "create", item["id"], None, created_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=item.get("po_number"),
+        )
         return jsonify(created_item), 201
     except Exception as e:
         return jsonify({"error": f"Failed to create purchase order: {str(e)}"}), 500
@@ -576,7 +584,9 @@ def update_purchase_order(po_id):
         po = items[0]
         if _is_archived(po):
             return jsonify({"error": "Purchase Order not found"}), 404
-        
+
+        before_snapshot = copy.deepcopy(po)
+
         # Update fields
         updatable_fields = [
             'po_number', 'vendor_id', 'vendor_name', 'order_date', 'delivery_date',
@@ -597,7 +607,12 @@ def update_purchase_order(po_id):
             item=po['id'],
             body=po
         )
-        
+        log_audit(
+            "purchase_order", "update", po_id, before_snapshot, updated_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=updated_item.get("po_number"),
+        )
         return jsonify(_compute_po_financials(updated_item)), 200
     except Exception as e:
         return jsonify({"error": f"Failed to update purchase order: {str(e)}"}), 500
@@ -779,7 +794,9 @@ def convert_po_to_bill(po_id):
         # Check if already billed
         if po.get('status') == 'Billed' or po.get('converted_to_bill_id'):
             return jsonify({"error": "Purchase Order has already been billed"}), 400
-        
+
+        before_convert = copy.deepcopy(po)
+
         if not bill_number:
             bill_number = f"BILL-{datetime.utcnow().strftime('%Y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
 
@@ -820,7 +837,23 @@ def convert_po_to_bill(po_id):
             item=po['id'],
             body=po
         )
-        
+        log_audit_event({
+            "action": "CONVERTED",
+            "entity": "purchase_order",
+            "entity_id": po_id,
+            "entity_label": po.get("po_number"),
+            "before": before_convert,
+            "after": po,
+            "metadata": {
+                "workflow": "purchase_order_to_bill",
+                "target_entity": "bill",
+                "target_entity_id": created_bill["id"],
+                "target_entity_label": created_bill.get("bill_number"),
+            },
+            "user_id": getattr(request, "user_id", None),
+            "tenant_id": request.tenant_id,
+        })
+
         return jsonify({
             "message": "Purchase Order converted to bill successfully",
             "bill_id": created_bill['id'],

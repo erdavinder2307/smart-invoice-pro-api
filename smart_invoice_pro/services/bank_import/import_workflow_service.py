@@ -8,12 +8,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from smart_invoice_pro.utils.audit_logger import log_audit_event
 from smart_invoice_pro.utils.cosmos_client import (
     bank_import_artifacts_container,
     bank_import_batches_container,
     bank_import_jobs_container,
     bank_import_rows_container,
 )
+from smart_invoice_pro.utils.domain_events import record_domain_event
 
 try:
     from azure.storage.blob import BlobServiceClient, ContentSettings
@@ -454,6 +456,28 @@ def _run_import_job(*, batch_doc, job_doc, file_profile, file_bytes, pdf_passwor
             }
         )
         _replace_job(job_doc)
+        log_audit_event({
+            "action": "BANK_IMPORT_COMPLETED",
+            "entity": "bank_import_batch",
+            "entity_id": batch_doc["id"],
+            "entity_label": filename,
+            "category": "banking",
+            "after": {
+                "row_count": batch_doc.get("row_count"),
+                "status": batch_doc.get("status"),
+            },
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "metadata": {"job_id": job_doc.get("id")},
+        })
+        record_domain_event(
+            "BANK_IMPORT_COMPLETED",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            entity_type="bank_import_batch",
+            entity_id=batch_doc["id"],
+            payload={"row_count": batch_doc.get("row_count", 0), "job_id": job_doc.get("id")},
+        )
         return batch_doc, job_doc, row_docs
     except Exception as exc:
         batch_doc.update(
@@ -475,6 +499,25 @@ def _run_import_job(*, batch_doc, job_doc, file_profile, file_bytes, pdf_passwor
             }
         )
         _replace_job(job_doc)
+        log_audit_event({
+            "action": "BANK_IMPORT_FAILED",
+            "entity": "bank_import_batch",
+            "entity_id": batch_doc["id"],
+            "entity_label": filename,
+            "category": "banking",
+            "after": {"status": "failed", "error": str(exc)},
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "metadata": {"job_id": job_doc.get("id")},
+        })
+        record_domain_event(
+            "BANK_IMPORT_FAILED",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            entity_type="bank_import_batch",
+            entity_id=batch_doc["id"],
+            payload={"error": str(exc), "job_id": job_doc.get("id")},
+        )
         return batch_doc, job_doc, []
 
 
