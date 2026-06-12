@@ -26,6 +26,8 @@ from flask import Blueprint, request, jsonify
 
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.audit_logger import log_audit
+import copy
 
 invoice_preferences_blueprint = Blueprint('invoice_preferences', __name__)
 
@@ -253,6 +255,7 @@ def update_invoice_preferences():
 
         # ── Merge onto existing ───────────────────────────────────────────────
         existing = _get_prefs(request.tenant_id)
+        before_snapshot = copy.deepcopy(existing)
         now = datetime.utcnow().isoformat()
 
         existing['invoice_prefix']               = prefix.strip()
@@ -269,6 +272,12 @@ def update_invoice_preferences():
             existing['created_at'] = now
 
         settings_container.upsert_item(existing)
+        log_audit(
+            "invoice_preferences", "update", existing["id"], before_snapshot, existing,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label="Invoice preferences",
+        )
         return jsonify(_safe_prefs(existing)), 200
 
     except Exception as e:

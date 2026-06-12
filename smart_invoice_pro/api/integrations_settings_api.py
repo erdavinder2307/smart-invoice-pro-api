@@ -1,7 +1,9 @@
 """
 Integrations Settings API
-GET /api/settings/integrations  — fetch integration config for the current tenant
-PUT /api/settings/integrations  — save integration config
+GET  /api/settings/integrations               — fetch integration config for the current tenant
+PUT  /api/settings/integrations               — save integration config
+POST /api/settings/integrations/test-email    — send a test email via Azure ACS
+GET  /api/settings/integrations/webhook-logs  — recent webhook delivery log (last 50)
 
 Schema stored in `settings` container:
 {
@@ -9,55 +11,59 @@ Schema stored in `settings` container:
     "type":       "integrations_settings",
     "tenant_id":  "<tenant_id>",
 
-    "payments": {
-        "provider":        "zoho",
-        "enabled":         false,
-        "api_key":         "<stored-encrypted>",
-        "webhook_secret":  "<stored-encrypted>",
-        "status":          "disconnected"
-    },
-    "banking": {
-        "enabled":  false,
-        "provider": null
-    },
     "email": {
-        "provider":      "azure",
-        "sender_email":  "<from env: AZURE_SENDER_EMAIL>",
-        "enabled":       true
+        "provider":     "azure",
+        "sender_email": "<from env: AZURE_SENDER_EMAIL>",
+        "sender_name":  "Solidev Books",
+        "enabled":      true
     },
     "webhooks": [
         {
             "id":     "<uuid>",
             "url":    "https://...",
-            "events": ["invoice.created", "payment.received"],
-            "active": true
+            "events": ["invoice.created"],
+            "active": true,
+            "secret": "<per-endpoint HMAC secret — stored masked>"
         }
     ],
     "created_at": "...",
     "updated_at": "..."
 }
 
-Security note:
-  - API keys and webhook secrets are stored as-is in Cosmos DB (which encrypts
-    at rest).  They are NEVER returned to the frontend in plain text — the GET
-    endpoint replaces them with masked placeholders (e.g. "••••••••••ab1c").
+Security notes:
+  - Per-webhook secrets are stored as-is in Cosmos DB (which encrypts at rest).
+    They are NEVER returned to the frontend in plain text — the GET endpoint
+    replaces them with masked placeholders (e.g. "••••••••••ab1c").
   - To update a secret the client must send the full new value explicitly.
     Sending the masked placeholder value is detected and the field is left
     unchanged.
+  - All webhook URLs must use https://.
 """
 import os
 import uuid
 from datetime import datetime
 from flask import Blueprint, request, jsonify
-from smart_invoice_pro.utils.cosmos_client import settings_container
+from smart_invoice_pro.utils.cosmos_client import settings_container, webhook_logs_container
 
 integrations_blueprint = Blueprint('integrations', __name__)
 
 # ── Supported webhook events ───────────────────────────────────────────────────
 SUPPORTED_EVENTS = {
+    # Invoice lifecycle
     "invoice.created",
+    "invoice.updated",
     "invoice.paid",
+    "invoice.voided",
+    # Quote lifecycle
+    "quote.created",
+    "quote.accepted",
+    "quote.converted",
+    # Customer
     "customer.created",
+    "customer.updated",
+    # Banking
+    "bank_import.completed",
+    "reconciliation.completed",
 }
 
 # ── Masks ──────────────────────────────────────────────────────────────────────
@@ -85,20 +91,10 @@ def _default_doc(tenant_id: str) -> dict:
         "id":        f"{tenant_id}:integrations_settings",
         "type":      "integrations_settings",
         "tenant_id": tenant_id,
-        "payments": {
-            "provider":       "zoho",
-            "enabled":        False,
-            "api_key":        None,
-            "webhook_secret": None,
-            "status":         "disconnected",
-        },
-        "banking": {
-            "enabled":  False,
-            "provider": None,
-        },
         "email": {
             "provider":     "azure",
             "sender_email": os.getenv("AZURE_SENDER_EMAIL", ""),
+            "sender_name":  "Solidev Books",
             "enabled":      True,
         },
         "webhooks": [],
@@ -130,10 +126,10 @@ def _safe_doc(doc: dict) -> dict:
         if key.startswith("_"):
             del safe[key]
 
-    # Mask payment secrets
-    if isinstance(safe.get("payments"), dict):
-        safe["payments"]["api_key"] = _mask_secret(safe["payments"].get("api_key"))
-        safe["payments"]["webhook_secret"] = _mask_secret(safe["payments"].get("webhook_secret"))
+    # Mask per-webhook secrets
+    for wh in safe.get("webhooks", []):
+        if wh.get("secret"):
+            wh["secret"] = _mask_secret(wh["secret"])
 
     return safe
 
@@ -160,59 +156,20 @@ def save_integrations_settings():
     try:
         doc = _get_doc(request.tenant_id)
 
-        # ── Payments ──────────────────────────────────────────────────────────
-        if "payments" in data:
-            p_in  = data["payments"]
-            p_doc = doc.setdefault("payments", {
-                "provider": "zoho", "enabled": False,
-                "api_key": None, "webhook_secret": None, "status": "disconnected"
-            })
-
-            if "enabled" in p_in:
-                p_doc["enabled"] = bool(p_in["enabled"])
-
-            if "provider" in p_in:
-                p_doc["provider"] = str(p_in["provider"])
-
-            # Only update secrets when the client sends a real (non-masked) value
-            if "api_key" in p_in and not _is_masked(p_in["api_key"]):
-                p_doc["api_key"] = p_in["api_key"] or None
-
-            if "webhook_secret" in p_in and not _is_masked(p_in["webhook_secret"]):
-                p_doc["webhook_secret"] = p_in["webhook_secret"] or None
-
-            # Derive status from whether we have credentials + enabled
-            has_creds = bool(p_doc.get("api_key"))
-            if p_doc["enabled"] and has_creds:
-                p_doc["status"] = "connected"
-            elif p_doc["enabled"] and not has_creds:
-                p_doc["status"] = "pending"
-            else:
-                p_doc["status"] = "disconnected"
-
-        # ── Banking ───────────────────────────────────────────────────────────
-        if "banking" in data:
-            b_in  = data["banking"]
-            b_doc = doc.setdefault("banking", {"enabled": False, "provider": None})
-
-            if "enabled" in b_in:
-                b_doc["enabled"] = bool(b_in["enabled"])
-            if "provider" in b_in:
-                b_doc["provider"] = b_in["provider"] or None
-
         # ── Email ─────────────────────────────────────────────────────────────
         if "email" in data:
             e_in  = data["email"]
             e_doc = doc.setdefault("email", {
-                "provider": "azure", "sender_email": "", "enabled": True
+                "provider": "azure", "sender_email": "",
+                "sender_name": "Solidev Books", "enabled": True,
             })
 
             if "enabled" in e_in:
                 e_doc["enabled"] = bool(e_in["enabled"])
-            # sender_email is admin-configurable but validated as a string
             if "sender_email" in e_in:
-                val = str(e_in["sender_email"]).strip()
-                e_doc["sender_email"] = val
+                e_doc["sender_email"] = str(e_in["sender_email"]).strip()
+            if "sender_name" in e_in:
+                e_doc["sender_name"] = str(e_in["sender_name"]).strip()
 
         # ── Webhooks ──────────────────────────────────────────────────────────
         if "webhooks" in data:
@@ -223,8 +180,8 @@ def save_integrations_settings():
             validated = []
             for wh in incoming:
                 url = str(wh.get("url", "")).strip()
-                if not url.startswith(("https://", "http://")):
-                    return jsonify({"error": f"Invalid webhook URL: {url!r}"}), 400
+                if not url.startswith("https://"):
+                    return jsonify({"error": f"Webhook URL must use https://. Got: {url!r}"}), 400
 
                 events = wh.get("events", [])
                 if not isinstance(events, list):
@@ -235,11 +192,25 @@ def save_integrations_settings():
                             "error": f"Unsupported event: {ev!r}. Supported: {sorted(SUPPORTED_EVENTS)}"
                         }), 400
 
+                # Resolve per-endpoint secret — keep existing if client sends masked value
+                wh_id = wh.get("id") or str(uuid.uuid4())
+                existing_secret = None
+                for existing_wh in doc.get("webhooks", []):
+                    if existing_wh.get("id") == wh_id:
+                        existing_secret = existing_wh.get("secret")
+                        break
+                new_secret_raw = wh.get("secret")
+                if not new_secret_raw or _is_masked(new_secret_raw):
+                    resolved_secret = existing_secret
+                else:
+                    resolved_secret = new_secret_raw
+
                 validated.append({
-                    "id":     wh.get("id") or str(uuid.uuid4()),
+                    "id":     wh_id,
                     "url":    url,
                     "events": events,
                     "active": bool(wh.get("active", True)),
+                    "secret": resolved_secret,
                 })
             doc["webhooks"] = validated
 
@@ -251,5 +222,68 @@ def save_integrations_settings():
             "settings": _safe_doc(doc),
         }), 200
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── POST /settings/integrations/test-email ────────────────────────────────────
+@integrations_blueprint.route('/settings/integrations/test-email', methods=['POST'])
+def test_email_connection():
+    """Send a test email to the authenticated user's address via Azure ACS."""
+    try:
+        from azure.communication.email import EmailClient
+
+        connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
+        if not connection_string:
+            return jsonify({"error": "AZURE_EMAIL_CONNECTION_STRING is not configured."}), 503
+
+        doc = _get_doc(request.tenant_id)
+        email_cfg = doc.get("email", {})
+        sender = email_cfg.get("sender_email") or os.getenv("AZURE_SENDER_EMAIL", "")
+        sender_name = email_cfg.get("sender_name") or "Solidev Books"
+
+        # Recipient: use body-supplied address or fall back to sender
+        body = request.get_json(silent=True) or {}
+        recipient = str(body.get("to") or sender).strip()
+        if not recipient or "@" not in recipient:
+            return jsonify({"error": "Provide a valid 'to' email address."}), 400
+
+        client = EmailClient.from_connection_string(connection_string)
+        poller = client.begin_send({
+            "senderAddress": sender,
+            "recipients": {"to": [{"address": recipient}]},
+            "content": {
+                "subject": f"Test Email from {sender_name} (Solidev Books)",
+                "html": (
+                    "<p>This is a test email sent from <strong>Solidev Books</strong>.</p>"
+                    "<p>If you received this, your email integration is working correctly.</p>"
+                ),
+            },
+        })
+        poller.result()  # wait for delivery confirmation
+        return jsonify({"message": "Test email sent successfully.", "recipient": recipient}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Test email failed: {str(e)}"}), 500
+
+
+# ── GET /settings/integrations/webhook-logs ───────────────────────────────────
+@integrations_blueprint.route('/settings/integrations/webhook-logs', methods=['GET'])
+def get_webhook_logs():
+    """Return the 50 most recent webhook delivery log entries for this tenant."""
+    try:
+        from smart_invoice_pro.utils.cosmos_client import webhook_logs_container
+        items = list(webhook_logs_container.query_items(
+            query=(
+                "SELECT TOP 50 * FROM c WHERE c.tenant_id = @tid "
+                "ORDER BY c.delivered_at DESC"
+            ),
+            parameters=[{"name": "@tid", "value": request.tenant_id}],
+            enable_cross_partition_query=True,
+        ))
+        # Strip Cosmos internal fields
+        safe = [{k: v for k, v in item.items() if not k.startswith("_")}
+                for item in items]
+        return jsonify(safe), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500

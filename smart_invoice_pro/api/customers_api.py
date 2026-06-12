@@ -835,7 +835,11 @@ def update_customer(customer_id):
     customers_container.upsert_item(body=item)
     log_audit("customer", "update", customer_id, before_snapshot, item,
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
-    
+    dispatch_webhook_event(
+        tenant_id=request.tenant_id,
+        event="customer.updated",
+        payload={"customer_id": item["id"], "name": item.get("name")},
+    )
     # Remove password from response for security
     response_item = sanitize_item(item)
     return jsonify(response_item)

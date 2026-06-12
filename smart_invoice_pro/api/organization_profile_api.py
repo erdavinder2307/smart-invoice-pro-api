@@ -40,6 +40,8 @@ from werkzeug.utils import secure_filename
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.utils.org_tax_mode import derive_gst_mode
+from smart_invoice_pro.utils.audit_logger import log_audit
+import copy
 
 org_profile_blueprint = Blueprint('org_profile', __name__)
 
@@ -126,6 +128,7 @@ def update_org_profile():
 
         now = datetime.utcnow().isoformat()
         existing = _get_profile(request.tenant_id)
+        before_snapshot = copy.deepcopy(existing) if existing else None
         created_at = existing.get('created_at') or now
 
         # ── GST registration type is now the single source of truth ──────────
@@ -193,6 +196,12 @@ def update_org_profile():
         }
 
         settings_container.upsert_item(doc)
+        log_audit(
+            "organization_profile", "update", doc["id"], before_snapshot, doc,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=organization_name,
+        )
         return jsonify(_safe(doc)), 200
 
     except Exception as e:

@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, make_response
 from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import quotes_container, invoices_container, sales_orders_container
+from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 import uuid
 import base64
 from flasgger import swag_from
@@ -11,6 +12,8 @@ from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.org_tax_mode import must_suppress_sales_tax, get_org_gst_mode
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
+import copy
 
 quotes_blueprint = Blueprint('quotes', __name__)
 
@@ -165,6 +168,19 @@ def create_quote():
     
     try:
         created_item = quotes_container.create_item(body=item)
+        log_audit(
+            "quote", "create", created_item["id"], None, created_item,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=created_item.get("quote_number"),
+        )
+        dispatch_webhook_event(
+            tenant_id=request.tenant_id,
+            event="quote.created",
+            payload={"quote_id": created_item["id"],
+                     "quote_number": created_item.get("quote_number"),
+                     "total_amount": created_item.get("total_amount")},
+        )
         return jsonify(created_item), 201
     except Exception as e:
         return jsonify({"error": f"Failed to create quote: {str(e)}"}), 500
@@ -489,6 +505,13 @@ def bulk_quote_actions():
                 quote['status'] = 'Accepted'
                 quote['updated_at'] = now
                 quotes_container.replace_item(item=quote['id'], body=quote)
+                dispatch_webhook_event(
+                    tenant_id=request.tenant_id,
+                    event="quote.accepted",
+                    payload={"quote_id": quote["id"],
+                             "quote_number": quote.get("quote_number"),
+                             "total_amount": quote.get("total_amount")},
+                )
                 processed.append({"id": quote_id, "action": action})
                 continue
 
@@ -653,7 +676,9 @@ def update_quote(quote_id):
             return jsonify({"error": "Forbidden"}), 403
         if _is_archived(existing_quote):
             return jsonify({"error": "Quote not found"}), 404
-        
+
+        before_snapshot = copy.deepcopy(existing_quote)
+
         # Update fields
         for key, value in data.items():
             if key != 'id' and key != 'created_at':
@@ -666,7 +691,12 @@ def update_quote(quote_id):
             item=existing_quote['id'],
             body=existing_quote
         )
-        
+        log_audit(
+            "quote", "update", quote_id, before_snapshot, existing_quote,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=existing_quote.get("quote_number"),
+        )
         return jsonify(updated_item), 200
     except Exception as e:
         return jsonify({"error": f"Failed to update quote: {str(e)}"}), 500
@@ -867,7 +897,9 @@ def convert_quote(quote_id):
                 return jsonify({"error": "Quote has expired"}), 400
         except:
             pass
-        
+
+        before_convert = copy.deepcopy(quote)
+
         if convert_to == 'invoice':
             # Create invoice from quote
             invoice_number = data.get('invoice_number')
@@ -919,7 +951,31 @@ def convert_quote(quote_id):
                 item=quote['id'],
                 body=quote
             )
-            
+            log_audit_event({
+                "action": "CONVERTED",
+                "entity": "quote",
+                "entity_id": quote_id,
+                "entity_label": quote.get("quote_number"),
+                "before": before_convert,
+                "after": quote,
+                "metadata": {
+                    "workflow": "quote_to_invoice",
+                    "target_entity": "invoice",
+                    "target_entity_id": created_invoice["id"],
+                    "target_entity_label": invoice_number,
+                },
+                "user_id": getattr(request, "user_id", None),
+                "tenant_id": request.tenant_id,
+            })
+            dispatch_webhook_event(
+                tenant_id=request.tenant_id,
+                event="quote.converted",
+                payload={"quote_id": quote_id,
+                         "quote_number": quote.get("quote_number"),
+                         "invoice_id": created_invoice["id"],
+                         "invoice_number": invoice_number},
+            )
+
             return jsonify({
                 "message": "Quote converted to invoice successfully",
                 "invoice_id": created_invoice['id'],
@@ -973,7 +1029,23 @@ def convert_quote(quote_id):
                 item=quote['id'],
                 body=quote
             )
-            
+            log_audit_event({
+                "action": "CONVERTED",
+                "entity": "quote",
+                "entity_id": quote_id,
+                "entity_label": quote.get("quote_number"),
+                "before": before_convert,
+                "after": quote,
+                "metadata": {
+                    "workflow": "quote_to_sales_order",
+                    "target_entity": "sales_order",
+                    "target_entity_id": created_so["id"],
+                    "target_entity_label": created_so.get("so_number"),
+                },
+                "user_id": getattr(request, "user_id", None),
+                "tenant_id": request.tenant_id,
+            })
+
             return jsonify({
                 "message": "Quote converted to sales order successfully",
                 "sales_order_id": created_so['id'],

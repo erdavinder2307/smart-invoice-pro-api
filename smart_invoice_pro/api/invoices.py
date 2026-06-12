@@ -3,7 +3,7 @@ from smart_invoice_pro.utils.cosmos_client import invoices_container, customers_
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
-from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity, LIFECYCLE_ARCHIVED
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
@@ -1162,6 +1162,12 @@ def update_invoice(invoice_id):
     invoices_container.replace_item(item=item['id'], body=item)
     log_audit("invoice", "update", invoice_id, before_snapshot, item,
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
+    dispatch_webhook_event(
+        tenant_id=request.tenant_id,
+        event="invoice.updated",
+        payload={"invoice_id": item["id"], "invoice_number": item.get("invoice_number"),
+                 "status": item.get("status")},
+    )
     return jsonify(sanitize_item(item))
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['DELETE'])
@@ -1359,6 +1365,12 @@ def patch_invoice(invoice_id):
     invoices_container.replace_item(item=item['id'], body=item)
     log_audit("invoice", "update", invoice_id, before_snapshot, item,
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
+    dispatch_webhook_event(
+        tenant_id=request.tenant_id,
+        event="invoice.updated",
+        payload={"invoice_id": item["id"], "invoice_number": item.get("invoice_number"),
+                 "status": item.get("status")},
+    )
     return jsonify({'message': 'Invoice updated', 'invoice': sanitize_item(item)})
 
 @api_blueprint.route('/invoices/next-number', methods=['GET'])
@@ -1677,8 +1689,21 @@ def record_payment(invoice_id):
         inv['updated_at']      = datetime.utcnow().isoformat()
 
         invoices_container.replace_item(item=inv['id'], body=inv)
-        log_audit("payment", "update", invoice_id, before_payment_snapshot, inv,
-                  user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
+        log_audit_event({
+            "action": "PAYMENT_RECORDED",
+            "entity": "invoice",
+            "entity_id": invoice_id,
+            "entity_label": inv.get("invoice_number"),
+            "before": before_payment_snapshot,
+            "after": inv,
+            "metadata": {
+                "amount": amount,
+                "payment_mode": data.get("payment_mode"),
+                "payment_date": data.get("payment_date"),
+            },
+            "user_id": getattr(request, "user_id", None),
+            "tenant_id": request.tenant_id,
+        })
 
         if inv['status'] == 'Paid':
             dispatch_webhook_event(
@@ -1767,6 +1792,12 @@ def void_invoice(invoice_id):
         except Exception:
             pass  # Non-critical: void already succeeded
 
+        dispatch_webhook_event(
+            tenant_id=request.tenant_id,
+            event="invoice.voided",
+            payload={"invoice_id": invoice_id, "reason": reason},
+        )
+
         return jsonify({
             'message':    'Invoice voided successfully',
             'invoice_id': invoice_id,
@@ -1842,6 +1873,7 @@ def send_invoice_email(invoice_id):
         if _is_archived(inv):
             return jsonify({'error': 'Archived invoices cannot be emailed'}), 409
 
+        before_send_snapshot = copy.deepcopy(inv)
         recipient_email = data.get('recipient_email') or inv.get('customer_email', '').strip()
         if not recipient_email:
             return jsonify({'error': 'No recipient email address found on this invoice'}), 400
@@ -1951,6 +1983,20 @@ def send_invoice_email(invoice_id):
             }
 
         invoices_container.replace_item(item=inv['id'], body=inv)
+        log_audit_event({
+            "action": "INVOICE_SENT",
+            "entity": "invoice",
+            "entity_id": invoice_id,
+            "entity_label": inv.get("invoice_number"),
+            "before": before_send_snapshot,
+            "after": inv,
+            "metadata": {
+                "recipient_email": recipient_email,
+                "pdf_attached": attach_pdf and "attachments" in email_message,
+            },
+            "user_id": getattr(request, "user_id", None),
+            "tenant_id": request.tenant_id,
+        })
 
         return jsonify({
             'message':        'Invoice email sent successfully',

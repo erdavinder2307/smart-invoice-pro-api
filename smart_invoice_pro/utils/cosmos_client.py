@@ -36,6 +36,7 @@ settings_container = get_container("settings", "/tenant_id")
 refresh_tokens_container = get_container("refresh_tokens", "/user_id")
 notifications_container = get_container("notifications", "/tenant_id")
 audit_logs_container = get_container("audit_logs", "/tenant_id")
+audit_logs_archive_container = get_container("audit_logs_archive", "/tenant_id")
 domain_events_container = get_container("domain_events", "/tenant_id")
 tenants_container = get_container("tenants", "/id")
 feature_flags_container = get_container("feature_flags", "/tenant_id")
@@ -45,4 +46,5 @@ bank_import_batches_container = get_container("bank_import_batches", "/tenant_id
 bank_import_jobs_container = get_container("bank_import_jobs", "/tenant_id")
 bank_import_rows_container = get_container("bank_import_rows", "/tenant_id")
 bank_import_artifacts_container = get_container("bank_import_artifacts", "/tenant_id")
+webhook_logs_container = get_container("webhook_logs", "/tenant_id")
 

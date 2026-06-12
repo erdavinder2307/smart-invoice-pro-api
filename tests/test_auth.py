@@ -248,7 +248,12 @@ class TestRefreshToken:
             }
         ]
         mock_users.query_items.return_value = [
-            {"id": USER_A, "username": "admin1", "role": "Admin"}
+            {
+                "id": USER_A,
+                "username": "admin1",
+                "role": "Admin",
+                "is_super_admin": True,
+            }
         ]
         resp = client.post(
             "/api/auth/refresh",
@@ -258,6 +263,12 @@ class TestRefreshToken:
         data = resp.get_json()
         assert "access_token" in data
         assert "refresh_token" in data
+
+        import jwt
+        import os
+        secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+        payload = jwt.decode(data["access_token"], secret, algorithms=["HS256"])
+        assert payload["is_super_admin"] is True
 
     @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
     def test_refresh_expired_token(self, mock_refresh, client):

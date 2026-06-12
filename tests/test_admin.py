@@ -94,6 +94,40 @@ class TestAdminAuth:
 # TENANT MANAGEMENT TESTS
 # ═════════════════════════════════════════════════════════════════════════════
 
+class TestCreateTenant:
+    def test_create_tenant_success(self, client):
+        with patch("smart_invoice_pro.api.admin_api.create_tenant_doc") as mock_create, \
+             patch("smart_invoice_pro.api.admin_api.log_audit_event"):
+            mock_create.return_value = {
+                **SAMPLE_TENANT,
+                "id": "tenant-new",
+                "name": "New Org",
+            }
+            resp = client.post(
+                "/api/admin/tenants",
+                headers=super_admin_headers(),
+                json={"name": "New Org", "plan": "trial"},
+            )
+        assert resp.status_code == 201
+        assert resp.get_json()["name"] == "New Org"
+
+    def test_create_tenant_requires_name(self, client):
+        resp = client.post(
+            "/api/admin/tenants",
+            headers=super_admin_headers(),
+            json={"plan": "trial"},
+        )
+        assert resp.status_code == 400
+
+    def test_create_tenant_rejects_invalid_plan(self, client):
+        resp = client.post(
+            "/api/admin/tenants",
+            headers=super_admin_headers(),
+            json={"name": "Org", "plan": "invalid"},
+        )
+        assert resp.status_code == 400
+
+
 class TestListTenants:
     def test_list_tenants_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr:
@@ -136,7 +170,7 @@ class TestGetTenant:
 class TestUpdateTenantStatus:
     def test_update_status_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit") as mock_audit:
+             patch("smart_invoice_pro.api.admin_api.log_audit_event") as mock_audit:
             mock_ctr.query_items.return_value = [dict(SAMPLE_TENANT)]
             mock_ctr.replace_item.return_value = {}
             resp = client.patch(
@@ -148,8 +182,11 @@ class TestUpdateTenantStatus:
             assert resp.get_json()["status"] == "inactive"
             mock_ctr.replace_item.assert_called_once()
             mock_audit.assert_called_once()
-            audit_kwargs = mock_audit.call_args
-            assert audit_kwargs.kwargs.get("user_id") or audit_kwargs[1].get("user_id")
+            payload = mock_audit.call_args[0][0]
+            assert payload["entity"] == "tenant"
+            assert payload["action"] == "update_status"
+            assert payload["user_id"]
+            assert payload["metadata"]["source"] == "platform_admin"
 
     def test_update_status_invalid(self, client):
         with patch("smart_invoice_pro.api.admin_api.tenants_container"):
@@ -172,7 +209,7 @@ class TestUpdateTenantStatus:
 
     def test_update_status_suspended(self, client):
         with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit"):
+             patch("smart_invoice_pro.api.admin_api.log_audit_event"):
             mock_ctr.query_items.return_value = [dict(SAMPLE_TENANT)]
             mock_ctr.replace_item.return_value = {}
             resp = client.patch(
@@ -187,7 +224,7 @@ class TestUpdateTenantStatus:
 class TestDeleteTenant:
     def test_soft_delete_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit") as mock_audit:
+             patch("smart_invoice_pro.api.admin_api.log_audit_event") as mock_audit:
             mock_ctr.query_items.return_value = [dict(SAMPLE_TENANT)]
             mock_ctr.replace_item.return_value = {}
             resp = client.delete("/api/admin/tenants/tenant-001", headers=super_admin_headers())
@@ -238,7 +275,7 @@ class TestListUsers:
 class TestUpdateUserStatus:
     def test_update_user_status_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.users_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit"):
+             patch("smart_invoice_pro.api.admin_api.log_audit_event"):
             mock_ctr.query_items.return_value = [dict(SAMPLE_USER)]
             mock_ctr.replace_item.return_value = {}
             resp = client.patch(
@@ -273,7 +310,7 @@ class TestUpdateUserStatus:
 class TestResetPassword:
     def test_reset_password_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.users_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit") as mock_audit:
+             patch("smart_invoice_pro.api.admin_api.log_audit_event") as mock_audit:
             mock_ctr.query_items.return_value = [dict(SAMPLE_USER)]
             mock_ctr.replace_item.return_value = {}
             resp = client.post(
@@ -351,7 +388,7 @@ class TestGetFeatureFlags:
 class TestCreateFeatureFlags:
     def test_create_flags_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.feature_flags_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit"):
+             patch("smart_invoice_pro.api.admin_api.log_audit_event"):
             mock_ctr.query_items.return_value = []  # no existing
             mock_ctr.create_item.return_value = {}
             resp = client.post(
@@ -385,7 +422,7 @@ class TestCreateFeatureFlags:
 class TestUpdateFeatureFlags:
     def test_update_flags_success(self, client):
         with patch("smart_invoice_pro.api.admin_api.feature_flags_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit"):
+             patch("smart_invoice_pro.api.admin_api.log_audit_event"):
             existing = {**SAMPLE_FLAGS_DOC, "flags": dict(SAMPLE_FLAGS_DOC["flags"])}
             mock_ctr.query_items.return_value = [existing]
             mock_ctr.replace_item.return_value = {}
@@ -466,16 +503,11 @@ class TestAdminSecurityEdgeCases:
         assert resp.status_code == 403
 
     def test_is_super_admin_string_returns_403(self, client):
-        """is_super_admin='true' (string, not bool) should be rejected... but truthy in Python.
-        This verifies the decorator uses bool() truthiness — string 'true' IS truthy so it passes.
-        If we want strict boolean, we'd change the decorator. For now, this documents behavior."""
+        """is_super_admin must be boolean True — string 'true' is rejected."""
         token = make_token(is_super_admin="true")
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr:
-            mock_ctr.query_items.side_effect = [[0], []]
-            resp = client.get("/api/admin/tenants", headers=headers)
-            # Truthy string passes — this is acceptable; the claim is set server-side
-            assert resp.status_code == 200
+        resp = client.get("/api/admin/tenants", headers=headers)
+        assert resp.status_code == 403
 
     def test_response_does_not_leak_cosmos_fields(self, client):
         """Cosmos internal fields must not appear in responses."""
@@ -497,7 +529,7 @@ class TestAdminSecurityEdgeCases:
     def test_audit_log_on_tenant_status_change(self, client):
         """Verify audit log is written with correct before/after on status change."""
         with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr, \
-             patch("smart_invoice_pro.api.admin_api.log_audit") as mock_audit:
+             patch("smart_invoice_pro.api.admin_api.log_audit_event") as mock_audit:
             original = dict(SAMPLE_TENANT)
             mock_ctr.query_items.return_value = [original]
             mock_ctr.replace_item.return_value = {}
@@ -507,8 +539,9 @@ class TestAdminSecurityEdgeCases:
                 headers=super_admin_headers(),
             )
             mock_audit.assert_called_once()
-            kwargs = mock_audit.call_args[1] if mock_audit.call_args[1] else {}
-            args = mock_audit.call_args[0] if mock_audit.call_args[0] else ()
-            # entity_type should be "tenant"
-            if args:
-                assert args[0] == "tenant"  # positional
+            payload = mock_audit.call_args[0][0]
+            assert payload["entity"] == "tenant"
+            assert payload["action"] == "update_status"
+            assert payload["before"]["status"] == "active"
+            assert payload["after"]["status"] == "inactive"
+            assert payload["metadata"]["source"] == "platform_admin"

@@ -18,6 +18,8 @@ from smart_invoice_pro.utils.bulk_archive_contracts import (
 )
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.audit_logger import log_audit
+import copy
 from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 from smart_invoice_pro.utils.validation_utils import (
     make_error_response, collect_errors,
@@ -162,6 +164,12 @@ def create_expense():
         }
 
         expenses_container.create_item(body=expense)
+        log_audit(
+            "expense", "create", expense["id"], None, expense,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=f"{expense['vendor_name']} ({expense['amount']})",
+        )
         return jsonify(expense), 201
     except Exception as e:
         return make_error_response(SERVER_ERROR, "Failed to create expense", status=500)
@@ -458,6 +466,8 @@ def update_expense(expense_id):
         if _is_archived(expense):
             return make_error_response(NOT_FOUND_ERROR, "Expense not found", status=404)
 
+        before_snapshot = copy.deepcopy(expense)
+
         # Update only provided fields
         for field in ('vendor_name', 'date', 'category', 'currency', 'notes'):
             if field in data:
@@ -491,6 +501,12 @@ def update_expense(expense_id):
                 pass  # Continue without updating receipt on error
 
         expenses_container.replace_item(item=expense['id'], body=expense)
+        log_audit(
+            "expense", "update", expense_id, before_snapshot, expense,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=f"{expense.get('vendor_name', '')} ({expense.get('amount', '')})",
+        )
         return jsonify(expense), 200
     except Exception:
         return make_error_response(SERVER_ERROR, "Failed to update expense", status=500)

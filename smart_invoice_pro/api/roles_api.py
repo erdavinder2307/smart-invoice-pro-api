@@ -10,8 +10,9 @@ Approval workflow
 """
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import users_container, invoices_container, purchase_orders_container
-from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
 from datetime import datetime
+import copy
 from functools import wraps
 
 roles_blueprint = Blueprint('roles', __name__)
@@ -219,11 +220,24 @@ def submit_invoice_for_approval(invoice_id):
     if inv.get('status') not in ('Draft',):
         return jsonify({'error': f'Only Draft invoices can be submitted. Current status: {inv["status"]}'}), 400
 
+    before = copy.deepcopy(inv)
     inv['status'] = 'Pending Approval'
     inv['submitted_by'] = uid
     inv['submitted_at'] = datetime.utcnow().isoformat()
     inv['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.upsert_item(body=inv)
+    log_audit_event({
+        "action": "APPROVAL_SUBMITTED",
+        "entity": "invoice",
+        "entity_id": invoice_id,
+        "entity_label": inv.get("invoice_number"),
+        "category": "workflow",
+        "before": before,
+        "after": inv,
+        "metadata": {"workflow": "invoice_approval"},
+        "user_id": uid,
+        "tenant_id": inv.get("tenant_id") or request.tenant_id,
+    })
     return jsonify({'id': invoice_id, 'status': 'Pending Approval'}), 200
 
 
@@ -240,11 +254,24 @@ def approve_invoice(invoice_id):
     if inv.get('status') != 'Pending Approval':
         return jsonify({'error': f'Invoice is not pending approval. Status: {inv["status"]}'}), 400
 
+    before = copy.deepcopy(inv)
     inv['status'] = 'Issued'
     inv['approved_by'] = uid
     inv['approved_at'] = datetime.utcnow().isoformat()
     inv['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.upsert_item(body=inv)
+    log_audit_event({
+        "action": "APPROVAL_COMPLETED",
+        "entity": "invoice",
+        "entity_id": invoice_id,
+        "entity_label": inv.get("invoice_number"),
+        "category": "workflow",
+        "before": before,
+        "after": inv,
+        "metadata": {"workflow": "invoice_approval", "approved_by": uid},
+        "user_id": uid,
+        "tenant_id": inv.get("tenant_id") or request.tenant_id,
+    })
     return jsonify({'id': invoice_id, 'status': 'Issued', 'approved_by': uid}), 200
 
 
@@ -262,12 +289,25 @@ def reject_invoice(invoice_id):
     if inv.get('status') != 'Pending Approval':
         return jsonify({'error': f'Invoice is not pending approval. Status: {inv["status"]}'}), 400
 
+    before = copy.deepcopy(inv)
     inv['status'] = 'Draft'
     inv['rejected_by'] = uid
     inv['rejected_at'] = datetime.utcnow().isoformat()
     inv['rejection_reason'] = data.get('reason', '')
     inv['updated_at'] = datetime.utcnow().isoformat()
     invoices_container.upsert_item(body=inv)
+    log_audit_event({
+        "action": "APPROVAL_REJECTED",
+        "entity": "invoice",
+        "entity_id": invoice_id,
+        "entity_label": inv.get("invoice_number"),
+        "category": "workflow",
+        "before": before,
+        "after": inv,
+        "metadata": {"workflow": "invoice_approval", "reason": data.get("reason", "")},
+        "user_id": uid,
+        "tenant_id": inv.get("tenant_id") or request.tenant_id,
+    })
     return jsonify({'id': invoice_id, 'status': 'Draft'}), 200
 
 
@@ -292,11 +332,24 @@ def submit_po_for_approval(po_id):
     if po.get('status') not in ('Draft',):
         return jsonify({'error': f'Only Draft POs can be submitted. Current status: {po["status"]}'}), 400
 
+    before = copy.deepcopy(po)
     po['status'] = 'Pending Approval'
     po['submitted_by'] = uid
     po['submitted_at'] = datetime.utcnow().isoformat()
     po['updated_at'] = datetime.utcnow().isoformat()
     purchase_orders_container.upsert_item(body=po)
+    log_audit_event({
+        "action": "APPROVAL_SUBMITTED",
+        "entity": "purchase_order",
+        "entity_id": po_id,
+        "entity_label": po.get("po_number"),
+        "category": "workflow",
+        "before": before,
+        "after": po,
+        "metadata": {"workflow": "purchase_order_approval"},
+        "user_id": uid,
+        "tenant_id": po.get("tenant_id") or request.tenant_id,
+    })
     return jsonify({'id': po_id, 'status': 'Pending Approval'}), 200
 
 
@@ -313,11 +366,24 @@ def approve_po(po_id):
     if po.get('status') != 'Pending Approval':
         return jsonify({'error': f'PO is not pending approval. Status: {po["status"]}'}), 400
 
+    before = copy.deepcopy(po)
     po['status'] = 'Sent'
     po['approved_by'] = uid
     po['approved_at'] = datetime.utcnow().isoformat()
     po['updated_at'] = datetime.utcnow().isoformat()
     purchase_orders_container.upsert_item(body=po)
+    log_audit_event({
+        "action": "APPROVAL_COMPLETED",
+        "entity": "purchase_order",
+        "entity_id": po_id,
+        "entity_label": po.get("po_number"),
+        "category": "workflow",
+        "before": before,
+        "after": po,
+        "metadata": {"workflow": "purchase_order_approval", "approved_by": uid},
+        "user_id": uid,
+        "tenant_id": po.get("tenant_id") or request.tenant_id,
+    })
     return jsonify({'id': po_id, 'status': 'Sent', 'approved_by': uid}), 200
 
 
@@ -335,10 +401,23 @@ def reject_po(po_id):
     if po.get('status') != 'Pending Approval':
         return jsonify({'error': f'PO is not pending approval. Status: {po["status"]}'}), 400
 
+    before = copy.deepcopy(po)
     po['status'] = 'Draft'
     po['rejected_by'] = uid
     po['rejected_at'] = datetime.utcnow().isoformat()
     po['rejection_reason'] = data.get('reason', '')
     po['updated_at'] = datetime.utcnow().isoformat()
     purchase_orders_container.upsert_item(body=po)
+    log_audit_event({
+        "action": "APPROVAL_REJECTED",
+        "entity": "purchase_order",
+        "entity_id": po_id,
+        "entity_label": po.get("po_number"),
+        "category": "workflow",
+        "before": before,
+        "after": po,
+        "metadata": {"workflow": "purchase_order_approval", "reason": data.get("reason", "")},
+        "user_id": uid,
+        "tenant_id": po.get("tenant_id") or request.tenant_id,
+    })
     return jsonify({'id': po_id, 'status': 'Draft'}), 200

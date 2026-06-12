@@ -75,7 +75,28 @@ def _patches():
     return (
         patch("smart_invoice_pro.api.roles_permissions_api.users_container"),
         patch("smart_invoice_pro.api.roles_permissions_api._get_roles_container"),
-        patch("smart_invoice_pro.api.roles_api.users_container"),  # for @require_role
+        patch("smart_invoice_pro.api.roles_api.users_container"),
+    )
+
+
+def _rbac_patches():
+    """Extended patches for endpoints that use rbac_resolver (e.g. GET /permissions)."""
+    shared_users = MagicMock()
+    return (
+        patch(
+            "smart_invoice_pro.api.roles_permissions_api.users_container",
+            shared_users,
+        ),
+        patch("smart_invoice_pro.api.roles_permissions_api._get_roles_container"),
+        patch(
+            "smart_invoice_pro.api.roles_api.users_container",
+            shared_users,
+        ),
+        patch(
+            "smart_invoice_pro.utils.rbac_resolver.users_container",
+            shared_users,
+        ),
+        patch("smart_invoice_pro.utils.rbac_resolver.get_container"),
     )
 
 
@@ -83,8 +104,8 @@ class TestGetMyPermissions:
     """GET /api/settings/permissions"""
 
     def test_admin_gets_full_permissions(self, client, headers_a):
-        p1, p2, p3 = _patches()
-        with p1 as mock_users, p2 as mock_roles_fn, p3 as mock_role_users:
+        p1, p2, p3, p4, p5 = _rbac_patches()
+        with p1 as mock_users, p2 as mock_roles_fn, p3, p4, p5:
             mock_users.query_items.return_value = [ADMIN_USER]
             resp = client.get("/api/settings/permissions", headers=headers_a)
         assert resp.status_code == 200
@@ -95,26 +116,36 @@ class TestGetMyPermissions:
         assert all(data["permissions"]["invoices"].values())
 
     def test_non_admin_gets_role_permissions(self, client, headers_b):
-        p1, p2, p3 = _patches()
+        p1, p2, p3, p4, p5 = _rbac_patches()
         mock_rctr = _mock_roles_ctr()
-        with p1 as mock_users, p2 as mock_roles_fn, p3 as mock_role_users:
+        with p1 as mock_users, p2 as mock_roles_fn, p3, p4, p5 as mock_get_container:
             mock_users.query_items.return_value = [SALES_USER]
             mock_roles_fn.return_value = mock_rctr
-            # _get_role_by_name queries roles container twice:
-            # 1st: _get_or_seed_roles, 2nd: by name
-            mock_rctr.query_items.side_effect = [
-                [SALES_ROLE_DOC],  # _get_or_seed_roles
-                [SALES_ROLE_DOC],  # query by name
-            ]
+            mock_get_container.return_value = mock_rctr
+            mock_rctr.query_items.return_value = [SALES_ROLE_DOC]
             resp = client.get("/api/settings/permissions", headers=headers_b)
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["is_admin"] is False
         assert data["role"] == "Sales"
 
+    def test_admin_via_role_id_with_stale_role_string(self, client, headers_a):
+        """Admin role_id assigned but user.role not synced — still is_admin."""
+        p1, p2, p3, p4, p5 = _rbac_patches()
+        mock_rctr = _mock_roles_ctr()
+        stale_admin = {**ADMIN_USER, "role": "Sales"}
+        with p1 as mock_users, p2 as mock_roles_fn, p3, p4, p5 as mock_get_container:
+            mock_users.query_items.return_value = [stale_admin]
+            mock_roles_fn.return_value = mock_rctr
+            mock_get_container.return_value = mock_rctr
+            mock_rctr.query_items.return_value = [ADMIN_ROLE_DOC]
+            resp = client.get("/api/settings/permissions", headers=headers_a)
+        assert resp.status_code == 200
+        assert resp.get_json()["is_admin"] is True
+
     def test_user_not_found(self, client, headers_a):
-        p1, p2, p3 = _patches()
-        with p1 as mock_users, p2, p3:
+        p1, p2, p3, p4, p5 = _rbac_patches()
+        with p1 as mock_users, p2, p3, p4, p5:
             mock_users.query_items.return_value = []
             resp = client.get("/api/settings/permissions", headers=headers_a)
         assert resp.status_code == 404
@@ -387,6 +418,23 @@ class TestInviteUser:
                 "password": "securepass123",
             }, headers=headers_a)
         assert resp.status_code == 409
+
+
+class TestUpdateSettingsUser:
+    """PUT /api/settings/users/<id> (Admin only)"""
+
+    def test_rejects_protected_is_super_admin_field(self, client, headers_a):
+        p1, p2, p3 = _patches()
+        with p1 as mock_users, p2, p3 as mock_role_users:
+            mock_role_users.query_items.return_value = [ADMIN_USER]
+            mock_users.query_items.return_value = [SALES_USER]
+            resp = client.put(
+                f"/api/settings/users/{USER_B}",
+                json={"is_super_admin": True},
+                headers=headers_a,
+            )
+        assert resp.status_code == 400
+        assert "is_super_admin" in resp.get_json()["error"]
 
 
 class TestDeactivateUser:

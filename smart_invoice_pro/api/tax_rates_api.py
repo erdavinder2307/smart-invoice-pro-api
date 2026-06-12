@@ -35,6 +35,8 @@ from smart_invoice_pro.utils.cosmos_client import get_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.api.gst_api import extract_state_from_gstin, validate_gstin_format
 from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, FULL_GST
+from smart_invoice_pro.utils.audit_logger import log_audit
+import copy
 
 tax_rates_blueprint = Blueprint('tax_rates', __name__)
 
@@ -308,6 +310,12 @@ def create_tax_rate():
             'updated_at': now,
         }
         _get_tax_rates_container().create_item(body=doc)
+        log_audit(
+            "tax_rate", "create", doc["id"], None, doc,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=doc.get("name"),
+        )
         return jsonify(doc), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -331,6 +339,7 @@ def update_tax_rate(rate_id):
             return jsonify({'error': 'Tax rate not found'}), 404
 
         existing = items[0]
+        before_snapshot = copy.deepcopy(existing)
         data = request.get_json(silent=True) or {}
 
         name = (data.get('name') or existing['name']).strip()
@@ -368,6 +377,12 @@ def update_tax_rate(rate_id):
             'updated_at': datetime.utcnow().isoformat(),
         })
         container.upsert_item(existing)
+        log_audit(
+            "tax_rate", "update", rate_id, before_snapshot, existing,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=existing.get("name"),
+        )
         return jsonify(existing), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -391,9 +406,16 @@ def delete_tax_rate(rate_id):
             return jsonify({'error': 'Tax rate not found'}), 404
 
         existing = items[0]
+        before_snapshot = copy.deepcopy(existing)
         existing['is_active'] = False
         existing['updated_at'] = datetime.utcnow().isoformat()
         container.upsert_item(existing)
+        log_audit(
+            "tax_rate", "delete", rate_id, before_snapshot, existing,
+            user_id=getattr(request, "user_id", None),
+            tenant_id=request.tenant_id,
+            entity_label=existing.get("name"),
+        )
         return jsonify({'success': True}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500

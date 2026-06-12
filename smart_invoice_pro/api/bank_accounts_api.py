@@ -1,5 +1,7 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import bank_accounts_container
+from smart_invoice_pro.utils.audit_logger import log_audit_event
+import copy
 import uuid
 from flasgger import swag_from
 from datetime import datetime
@@ -167,7 +169,17 @@ def create_bank_account():
         
         # Store in Cosmos DB
         bank_accounts_container.create_item(body=bank_account)
-        
+        log_audit_event({
+            "action": "BANK_ACCOUNT_CREATED",
+            "entity": "bank_account",
+            "entity_id": bank_account["id"],
+            "entity_label": f"{bank_account['bank_name']} — {bank_account['account_name']}",
+            "category": "banking",
+            "after": bank_account,
+            "user_id": user_id,
+            "tenant_id": getattr(request, "tenant_id", None),
+        })
+
         return jsonify(bank_account), 201
     except Exception as e:
         return jsonify({'message': f'Error creating bank account: {str(e)}'}), 500
@@ -273,6 +285,7 @@ def update_bank_account(account_id):
             return jsonify({'message': 'Bank account not found or access denied'}), 404
 
         account = items[0]
+        before_snapshot = copy.deepcopy(account)
         data = request.get_json() or {}
 
         updatable = ['bank_name', 'account_name', 'account_type']
@@ -282,6 +295,17 @@ def update_bank_account(account_id):
 
         account['updated_at'] = datetime.utcnow().isoformat() + 'Z'
         bank_accounts_container.replace_item(item=account['id'], body=account)
+        log_audit_event({
+            "action": "BANK_ACCOUNT_UPDATED",
+            "entity": "bank_account",
+            "entity_id": account_id,
+            "entity_label": f"{account.get('bank_name', '')} — {account.get('account_name', '')}",
+            "category": "banking",
+            "before": before_snapshot,
+            "after": account,
+            "user_id": user_id,
+            "tenant_id": getattr(request, "tenant_id", None),
+        })
 
         return jsonify(account), 200
     except Exception as e:
@@ -309,6 +333,16 @@ def delete_bank_account(account_id):
 
         account = items[0]
         bank_accounts_container.delete_item(item=account['id'], partition_key=account['id'])
+        log_audit_event({
+            "action": "BANK_ACCOUNT_DELETED",
+            "entity": "bank_account",
+            "entity_id": account_id,
+            "entity_label": f"{account.get('bank_name', '')} — {account.get('account_name', '')}",
+            "category": "banking",
+            "before": account,
+            "user_id": user_id,
+            "tenant_id": getattr(request, "tenant_id", None),
+        })
 
         return jsonify({'message': 'Bank account deleted successfully'}), 200
     except Exception as e:
