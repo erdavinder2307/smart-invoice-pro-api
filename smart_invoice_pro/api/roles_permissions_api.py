@@ -51,6 +51,7 @@ from werkzeug.security import generate_password_hash
 
 from smart_invoice_pro.utils.cosmos_client import users_container, get_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
 from smart_invoice_pro.utils.audit_logger import log_audit
 import copy
 
@@ -409,6 +410,7 @@ def list_roles():
 
 @roles_permissions_blueprint.route('/settings/roles', methods=['POST'])
 @require_role('Admin')
+@forbid_demo_settings_mutation("Custom roles cannot be created in the Interactive Workspace.")
 def create_role():
     """Create a new custom role (Admin only)."""
     try:
@@ -658,6 +660,7 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
 
 @roles_permissions_blueprint.route('/settings/users', methods=['POST'])
 @require_role('Admin')
+@forbid_demo_settings_mutation("User invitations are disabled in the Interactive Workspace.")
 def invite_user():
     """
     Invite a new user to the tenant (Admin only).

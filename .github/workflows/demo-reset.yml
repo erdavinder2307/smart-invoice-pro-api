@@ -1,9 +1,9 @@
 name: Demo Tenant Nightly Reset
 
 on:
-  schedule:
-    # 02:30 UTC daily (~08:00 IST) — restore public demo data
-    - cron: '30 2 * * *'
+    schedule:
+    # Every 12 hours — restore Interactive Workspace baseline data
+    - cron: '0 */12 * * *'
   workflow_dispatch:
 
 jobs:

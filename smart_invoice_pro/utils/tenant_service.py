@@ -14,6 +14,8 @@ from smart_invoice_pro.utils.cosmos_client import tenants_container
 VALID_TENANT_PLANS = frozenset({"trial", "starter", "pro", "enterprise"})
 DEFAULT_TENANT_PLAN = "trial"
 VALID_TENANT_STATUSES = frozenset({"active", "inactive", "suspended"})
+VALID_TENANT_TYPES = frozenset({"PRODUCTION", "DEMO", "INTERNAL"})
+DEFAULT_TENANT_TYPE = "PRODUCTION"
 
 
 def _now_iso() -> str:
@@ -36,6 +38,7 @@ def create_tenant_doc(
     plan: str | None = None,
     status: str = "active",
     owner_user_id: str | None = None,
+    tenant_type: str | None = None,
 ) -> dict:
     """Create a tenant document. Raises ValueError on invalid input."""
     clean_name = (name or "").strip()
@@ -54,6 +57,12 @@ def create_tenant_doc(
             f"Invalid status. Must be one of: {', '.join(sorted(VALID_TENANT_STATUSES))}"
         )
 
+    clean_type = (tenant_type or DEFAULT_TENANT_TYPE).strip().upper()
+    if clean_type not in VALID_TENANT_TYPES:
+        raise ValueError(
+            f"Invalid tenant_type. Must be one of: {', '.join(sorted(VALID_TENANT_TYPES))}"
+        )
+
     tid = tenant_id or str(uuid.uuid4())
     if get_tenant_by_id(tid):
         raise ValueError("Tenant already exists")
@@ -64,6 +73,7 @@ def create_tenant_doc(
         "name": clean_name,
         "status": clean_status,
         "plan": clean_plan,
+        "tenant_type": clean_type,
         "created_at": now,
         "updated_at": now,
     }

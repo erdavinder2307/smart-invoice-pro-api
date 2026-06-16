@@ -23,6 +23,7 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify
 
 from smart_invoice_pro.utils.cosmos_client import settings_container
+from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.api.organization_profile_api import _get_profile, _safe
 from smart_invoice_pro.utils.audit_logger import log_audit
@@ -79,6 +80,7 @@ def get_branding():
 # ── PUT /api/settings/branding ────────────────────────────────────────────────
 @branding_blueprint.route('/settings/branding', methods=['PUT'])
 @require_role('Admin')
+@forbid_demo_settings_mutation()
 def update_branding():
     """Update branding settings for the current tenant (Admin only)."""
     try:

@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
 from smart_invoice_pro.utils.cosmos_client import vendors_container, bills_container
 from smart_invoice_pro.utils.validation_utils import (
     make_error_response, collect_errors,
@@ -170,6 +171,7 @@ def _is_archived(vendor):
 
 @vendors_blueprint.route('/vendors', methods=['POST'])
 @require_permission('vendors', 'create')
+@enforce_demo_create_limit('vendors')
 @swag_from({
     'tags': ['Vendors'],
     'parameters': [

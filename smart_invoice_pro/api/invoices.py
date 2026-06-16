@@ -31,6 +31,7 @@ from smart_invoice_pro.api.tax_rates_api import (
 from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, COMPOSITION
 from smart_invoice_pro.utils.stock_utils import validate_stock_out
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -240,6 +241,7 @@ def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction, credi
 
 @api_blueprint.route('/invoices', methods=['POST'])
 @require_permission('invoices', 'create')
+@enforce_demo_create_limit('invoices')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [

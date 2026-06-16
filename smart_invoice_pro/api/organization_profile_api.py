@@ -39,6 +39,11 @@ from werkzeug.utils import secure_filename
 
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.demo_guard import (
+    forbid_demo_settings_mutation,
+    request_is_demo_mode,
+    DEMO_MAX_UPLOAD_BYTES,
+)
 from smart_invoice_pro.utils.org_tax_mode import derive_gst_mode
 from smart_invoice_pro.utils.audit_logger import log_audit
 import copy
@@ -113,6 +118,7 @@ def get_org_profile():
 # ── PUT /api/settings/organization-profile ────────────────────────────────────
 @org_profile_blueprint.route('/settings/organization-profile', methods=['PUT'])
 @require_role('Admin')
+@forbid_demo_settings_mutation()
 def update_org_profile():
     """Create or update the organization profile for the current tenant (Admin only)."""
     try:
@@ -241,6 +247,7 @@ def get_gst_config():
 # ── POST /api/settings/upload-logo ───────────────────────────────────────────
 @org_profile_blueprint.route('/settings/upload-logo', methods=['POST'])
 @require_role('Admin')
+@forbid_demo_settings_mutation("Logo uploads are disabled in the Interactive Workspace.")
 def upload_org_logo():
     """Upload the organization logo. Accepts { logo_filename, logo_base64 } (Admin only)."""
     try:
@@ -264,9 +271,15 @@ def upload_org_logo():
         except Exception:
             return jsonify({'error': 'Invalid base64 encoding'}), 400
 
-        # Validate size
-        if len(file_bytes) > MAX_LOGO_BYTES:
-            return jsonify({'error': 'Logo file must be smaller than 10 MB'}), 400
+        max_bytes = DEMO_MAX_UPLOAD_BYTES if request_is_demo_mode() else MAX_LOGO_BYTES
+        if len(file_bytes) > max_bytes:
+            return jsonify({
+                'error': (
+                    'Logo file must be smaller than 5 MB in the Interactive Workspace.'
+                    if request_is_demo_mode()
+                    else 'Logo file must be smaller than 10 MB'
+                ),
+            }), 400
 
         # Save file safely
         safe_name = secure_filename(f"{request.tenant_id}_{uuid.uuid4().hex}_{logo_filename}")

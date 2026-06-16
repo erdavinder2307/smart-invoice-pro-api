@@ -79,11 +79,24 @@ _DEMO_WINDOW_SECONDS = 3600
 
 PUBLIC_DEMO_ROLES = ("Sales", "Manager", "Accountant", "Purchaser")
 
-_DEMO_ROLE_DESCRIPTIONS = {
-    "Sales": "Quotes, customers, invoices, and collections",
-    "Manager": "Cross-team overview, approvals, and dashboards",
-    "Accountant": "Bills, expenses, reports, and banking",
-    "Purchaser": "Vendors, purchase orders, and payables",
+# Internal role keys → public persona labels (marketing-facing)
+_DEMO_ROLE_PUBLIC_META = {
+    "Manager": {
+        "title": "Business Owner",
+        "description": "Dashboard, reports, banking, and full operational overview",
+    },
+    "Accountant": {
+        "title": "Finance Manager",
+        "description": "Banking, reconciliation, invoices, bills, and reports",
+    },
+    "Sales": {
+        "title": "Sales Manager",
+        "description": "Quotes, customers, sales orders, and invoices",
+    },
+    "Purchaser": {
+        "title": "Accounts Executive",
+        "description": "Invoices, payments, customers, and vendor payables",
+    },
 }
 
 
@@ -479,14 +492,14 @@ def demo_roles():
     if not _demo_enabled():
         return jsonify({"error": "Demo is not enabled."}), 404
 
-    roles = [
-        {
+    roles = []
+    for role in PUBLIC_DEMO_ROLES:
+        meta = _DEMO_ROLE_PUBLIC_META.get(role, {})
+        roles.append({
             "role": role,
-            "title": role,
-            "description": _DEMO_ROLE_DESCRIPTIONS.get(role, ""),
-        }
-        for role in PUBLIC_DEMO_ROLES
-    ]
+            "title": meta.get("title", role),
+            "description": meta.get("description", ""),
+        })
     return jsonify({"roles": roles}), 200
 
 
@@ -618,9 +631,11 @@ def refresh_token():
         return jsonify({"error": "User not found"}), 401
 
     user = user_items[0]
+    is_demo = bool(record.get("is_demo") or user.get("is_demo_user"))
     # Rotate refresh token — preserve device metadata, update last_active_at
     new_refresh_value = secrets.token_urlsafe(48)
-    new_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    refresh_hours = 4 if is_demo else 24 * 30
+    new_expires = datetime.datetime.utcnow() + datetime.timedelta(hours=refresh_hours)
     new_token_record_id = str(uuid.uuid4())
     now_iso = datetime.datetime.utcnow().isoformat()
     # Delete old record
@@ -647,6 +662,7 @@ def refresh_token():
         "device_type": record.get('device_type', 'Desktop'),
         "device_name": record.get('device_name', ''),
         "ip_address": record.get('ip_address', ''),
+        "is_demo": is_demo,
     })
 
     new_access_token = jwt.encode(
@@ -658,8 +674,9 @@ def refresh_token():
             "role": user.get('role', ''),
             "role_id": user.get('role_id', ''),
             "is_super_admin": bool(user.get('is_super_admin', False)),
+            "is_demo": is_demo,
             "session_id": new_token_record_id,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
         },
         jwt_secret,
         algorithm="HS256"
