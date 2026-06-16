@@ -19,6 +19,7 @@ from datetime import datetime
 import csv
 import io
 import re
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 bank_reconciliation_blueprint = Blueprint('bank_reconciliation', __name__)
 
@@ -250,6 +251,7 @@ def _persist_approved_bank_transaction(row_doc, user_id, tenant_id):
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches', methods=['POST'])
+@require_permission('banking', 'edit')
 def create_statement_import_batch():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -348,6 +350,7 @@ def create_statement_import_batch():
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches', methods=['GET'])
+@require_permission('banking', 'view')
 def list_statement_import_batches():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -361,6 +364,7 @@ def list_statement_import_batches():
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>', methods=['GET'])
+@require_permission('banking', 'view')
 def get_statement_import_batch(batch_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -373,6 +377,7 @@ def get_statement_import_batch(batch_id):
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>', methods=['DELETE'])
+@require_permission('banking', 'edit')
 def delete_statement_import_batch(batch_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -399,6 +404,7 @@ def delete_statement_import_batch(batch_id):
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-jobs/<job_id>', methods=['GET'])
+@require_permission('banking', 'view')
 def get_statement_import_job(job_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -411,6 +417,7 @@ def get_statement_import_job(job_id):
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>/rows', methods=['GET'])
+@require_permission('banking', 'view')
 def get_statement_import_rows(batch_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -422,6 +429,7 @@ def get_statement_import_rows(batch_id):
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>/rows/<row_id>', methods=['PATCH'])
+@require_permission('banking', 'edit')
 def update_statement_import_row(batch_id, row_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -450,6 +458,7 @@ def update_statement_import_row(batch_id, row_id):
 
 
 @bank_reconciliation_blueprint.route('/reconciliation/import-batches/<batch_id>/approve', methods=['POST'])
+@require_permission('banking', 'edit')
 def approve_statement_import_batch(batch_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -503,6 +512,7 @@ def approve_statement_import_batch(batch_id):
 # Accepts: multipart/form-data with 'file' (CSV or QIF) + 'bank_account_id'
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/upload', methods=['POST'])
+@require_permission('banking', 'edit')
 def upload_statement():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -584,6 +594,7 @@ def upload_statement():
 # GET /api/reconciliation/transactions?bank_account_id=&status=
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/transactions', methods=['GET'])
+@require_permission('banking', 'view')
 def list_transactions():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -614,6 +625,7 @@ def list_transactions():
 # Body: { match_type: 'invoice'|'expense', match_id: '<id>' }
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/match', methods=['POST'])
+@require_permission('banking', 'edit')
 def match_transaction(txn_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -671,6 +683,7 @@ def match_transaction(txn_id):
 # POST /api/reconciliation/<txn_id>/unmatch
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/unmatch', methods=['POST'])
+@require_permission('banking', 'edit')
 def unmatch_transaction(txn_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -713,6 +726,7 @@ def unmatch_transaction(txn_id):
 # Body: { category, vendor_name, notes }
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/create-expense', methods=['POST'])
+@require_permission('banking', 'edit')
 def create_expense_from_txn(txn_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -776,6 +790,7 @@ def create_expense_from_txn(txn_id):
 # POST /api/reconciliation/auto-match
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/auto-match', methods=['POST'])
+@require_permission('banking', 'edit')
 def run_auto_match():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -821,6 +836,7 @@ def run_auto_match():
 # DELETE /api/reconciliation/<txn_id>
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>', methods=['DELETE'])
+@require_permission('banking', 'edit')
 def delete_transaction(txn_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -855,6 +871,7 @@ def delete_transaction(txn_id):
 # GET /api/reconciliation/matchable?type=invoice|expense&q=<search>
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/matchable', methods=['GET'])
+@require_permission('banking', 'view')
 def get_matchable():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -901,6 +918,7 @@ def get_matchable():
 # Does NOT apply the match — the user confirms via the manual-match flow.
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/<txn_id>/ai-suggest', methods=['POST'])
+@require_permission('banking', 'edit')
 def ai_suggest_match(txn_id):
     user_id, tenant_id, error_response = _require_actor()
     if error_response:
@@ -955,6 +973,7 @@ def ai_suggest_match(txn_id):
 # matches whose confidence meets the threshold.
 # ─────────────────────────────────────────────────────────────────────────────
 @bank_reconciliation_blueprint.route('/reconciliation/ai-match', methods=['POST'])
+@require_permission('banking', 'edit')
 def run_ai_match():
     user_id, tenant_id, error_response = _require_actor()
     if error_response:

@@ -4,6 +4,8 @@ from flasgger import swag_from
 from datetime import datetime
 import uuid
 
+from smart_invoice_pro.utils.permission_checker import require_permission
+
 stock_blueprint = Blueprint('stock', __name__)
 
 
@@ -38,10 +40,12 @@ def _compute_current_stock(product_id, tenant_id):
 
 # Add a test route to verify the blueprint is working
 @stock_blueprint.route('/stock/test', methods=['GET'])
+@require_permission('products', 'view')
 def test_stock_api():
     return jsonify({'message': 'Stock API is working!', 'timestamp': datetime.utcnow().isoformat()})
 
 @stock_blueprint.route('/stock/add', methods=['POST'])
+@require_permission('products', 'edit')
 @swag_from({
     'tags': ['Stock'],
     'parameters': [
@@ -106,6 +110,7 @@ def add_stock():
     return jsonify(response), 201
 
 @stock_blueprint.route('/stock/reduce', methods=['POST'])
+@require_permission('products', 'edit')
 @swag_from({
     'tags': ['Stock'],
     'parameters': [
@@ -176,6 +181,7 @@ def reduce_stock():
     return jsonify(response), 201
 
 @stock_blueprint.route('/stock/<product_id>', methods=['GET', 'OPTIONS'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Stock'],
     'parameters': [
@@ -234,6 +240,7 @@ def get_current_stock(product_id):
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 @stock_blueprint.route('/stock/ledger/<product_id>', methods=['GET', 'OPTIONS'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Stock'],
     'parameters': [
@@ -305,6 +312,7 @@ def get_stock_ledger(product_id):
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 @stock_blueprint.route('/stock/adjust', methods=['POST', 'OPTIONS'])
+@require_permission('products', 'edit')
 @swag_from({
     'tags': ['Stock'],
     'parameters': [
@@ -421,6 +429,7 @@ def adjust_stock():
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 @stock_blueprint.route('/stock/recent-adjustments', methods=['GET', 'OPTIONS'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Stock'],
     'responses': {

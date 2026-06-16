@@ -10,6 +10,8 @@ from smart_invoice_pro.utils.cosmos_client import (
     stock_container,
 )
 
+from smart_invoice_pro.utils.permission_checker import require_permission
+
 dashboard_blueprint = Blueprint('dashboard', __name__)
 
 _SUMMARY_CACHE = {}
@@ -218,6 +220,7 @@ def _summary_cache_set(key, payload):
     }
 
 @dashboard_blueprint.route('/dashboard/summary', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'tags': ['Dashboard'],
     'responses': {
@@ -379,6 +382,7 @@ def dashboard_summary():
         return jsonify({'error': f'Error fetching dashboard summary: {str(e)}'}), 500
 
 @dashboard_blueprint.route('/dashboard/low-stock', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'tags': ['Dashboard'],
     'parameters': [
@@ -436,6 +440,7 @@ def dashboard_low_stock():
         return jsonify({'error': f'Error fetching low stock products: {str(e)}'}), 500
 
 @dashboard_blueprint.route('/dashboard/monthly-revenue', methods=['GET'])
+@require_permission('reports', 'view')
 @swag_from({
     'tags': ['Dashboard'],
     'responses': {
@@ -498,6 +503,7 @@ def dashboard_monthly_revenue():
 
 
 @dashboard_blueprint.route('/dashboard/recent-invoices', methods=['GET'])
+@require_permission('reports', 'view')
 def dashboard_recent_invoices():
     """Return the 10 most recent invoices for the dashboard activity feed."""
     try:

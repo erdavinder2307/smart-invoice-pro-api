@@ -44,6 +44,7 @@ import uuid
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import settings_container, webhook_logs_container
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 integrations_blueprint = Blueprint('integrations', __name__)
 
@@ -136,6 +137,7 @@ def _safe_doc(doc: dict) -> dict:
 
 # ── GET ────────────────────────────────────────────────────────────────────────
 @integrations_blueprint.route('/settings/integrations', methods=['GET'])
+@require_permission('integrations', 'view')
 def get_integrations_settings():
     """Fetch integration settings for the current tenant (secrets masked)."""
     try:
@@ -147,6 +149,7 @@ def get_integrations_settings():
 
 # ── PUT ────────────────────────────────────────────────────────────────────────
 @integrations_blueprint.route('/settings/integrations', methods=['PUT'])
+@require_permission('integrations', 'edit')
 def save_integrations_settings():
     """Save integration settings for the current tenant."""
     data = request.get_json(silent=True)
@@ -228,6 +231,7 @@ def save_integrations_settings():
 
 # ── POST /settings/integrations/test-email ────────────────────────────────────
 @integrations_blueprint.route('/settings/integrations/test-email', methods=['POST'])
+@require_permission('integrations', 'edit')
 def test_email_connection():
     """Send a test email to the authenticated user's address via Azure ACS."""
     try:
@@ -269,6 +273,7 @@ def test_email_connection():
 
 # ── GET /settings/integrations/webhook-logs ───────────────────────────────────
 @integrations_blueprint.route('/settings/integrations/webhook-logs', methods=['GET'])
+@require_permission('integrations', 'view')
 def get_webhook_logs():
     """Return the 50 most recent webhook delivery log entries for this tenant."""
     try:

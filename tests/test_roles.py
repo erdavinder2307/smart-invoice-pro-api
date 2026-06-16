@@ -15,6 +15,7 @@ ADMIN_USER = {
     "username": "admin_user",
     "email": "admin@example.com",
     "role": "Admin",
+    "tenant_id": TENANT_A,
     "created_at": "2024-01-01T00:00:00",
 }
 
@@ -23,6 +24,7 @@ SALES_USER = {
     "username": "sales_user",
     "email": "sales@example.com",
     "role": "Sales",
+    "tenant_id": TENANT_A,
     "created_at": "2024-01-01T00:00:00",
 }
 
@@ -101,9 +103,7 @@ class TestListUsers:
     def test_admin_can_list(self, client, headers_a):
         p1, p2, p3 = _patch_roles_containers()
         with p1 as mock_users, p2, p3:
-            # require_role calls query_items to find user + read_all_items to list
-            mock_users.query_items.return_value = [ADMIN_USER]
-            mock_users.read_all_items.return_value = [ADMIN_USER, SALES_USER]
+            mock_users.query_items.return_value = [ADMIN_USER, SALES_USER]
             resp = client.get("/api/users", headers=headers_a)
         assert resp.status_code == 200
         data = resp.get_json()

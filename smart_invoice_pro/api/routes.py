@@ -73,6 +73,92 @@ _LOGIN_RATE_LIMIT = {}
 _LOGIN_MAX_ATTEMPTS = 10
 _LOGIN_WINDOW_SECONDS = 900
 
+_DEMO_RATE_LIMIT = {}
+_DEMO_MAX_ATTEMPTS = 30
+_DEMO_WINDOW_SECONDS = 3600
+
+PUBLIC_DEMO_ROLES = ("Sales", "Manager", "Accountant", "Purchaser")
+
+_DEMO_ROLE_DESCRIPTIONS = {
+    "Sales": "Quotes, customers, invoices, and collections",
+    "Manager": "Cross-team overview, approvals, and dashboards",
+    "Accountant": "Bills, expenses, reports, and banking",
+    "Purchaser": "Vendors, purchase orders, and payables",
+}
+
+
+def _demo_enabled() -> bool:
+    return os.getenv("DEMO_ENABLED", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _demo_tenant_id() -> str | None:
+    value = (os.getenv("DEMO_TENANT_ID") or "").strip()
+    return value or None
+
+
+def _demo_rate_limit_exceeded() -> bool:
+    ip = _get_client_ip() or "unknown"
+    now = datetime.datetime.utcnow()
+    bucket = _DEMO_RATE_LIMIT.get(ip)
+    if not bucket or (now - bucket["window_start"]).total_seconds() > _DEMO_WINDOW_SECONDS:
+        _DEMO_RATE_LIMIT[ip] = {"count": 0, "window_start": now}
+        bucket = _DEMO_RATE_LIMIT[ip]
+    if bucket["count"] >= _DEMO_MAX_ATTEMPTS:
+        return True
+    bucket["count"] += 1
+    return False
+
+
+def _issue_auth_tokens(user_doc: dict):
+    """Create refresh token record + JWT access token for an authenticated user."""
+    jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+    tenant_id = user_doc.get("tenant_id") or user_doc.get("id")
+    user_id = user_doc["id"]
+    is_demo = bool(user_doc.get("is_demo_user"))
+
+    refresh_token_value = secrets.token_urlsafe(48)
+    refresh_token_expires = datetime.datetime.utcnow() + datetime.timedelta(
+        hours=4 if is_demo else 24 * 30
+    )
+    now_iso = datetime.datetime.utcnow().isoformat()
+    token_record_id = str(uuid.uuid4())
+    raw_ua = request.headers.get("User-Agent", "")
+    device_info = _parse_device_info(raw_ua)
+    client_ip = _get_client_ip()
+    refresh_token_record = {
+        "id": token_record_id,
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "token": refresh_token_value,
+        "expires_at": refresh_token_expires.isoformat(),
+        "created_at": now_iso,
+        "last_active_at": now_iso,
+        "raw_user_agent": raw_ua,
+        "browser": device_info["browser"],
+        "browser_version": device_info["browser_version"],
+        "os": device_info["os"],
+        "device_type": device_info["device_type"],
+        "device_name": device_info["device_name"],
+        "ip_address": client_ip,
+        "is_demo": is_demo,
+    }
+    refresh_tokens_container.create_item(body=refresh_token_record)
+
+    token_payload = {
+        "id": user_id,
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "username": user_doc.get("username", ""),
+        "role": user_doc.get("role", ""),
+        "role_id": user_doc.get("role_id", ""),
+        "is_super_admin": bool(user_doc.get("is_super_admin", False)),
+        "is_demo": is_demo,
+        "session_id": token_record_id,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+    }
+    access_token = jwt.encode(token_payload, jwt_secret, algorithm="HS256")
+    return access_token, refresh_token_value, tenant_id, user_id
+
 
 def _login_rate_limit_exceeded():
     """Simple per-IP login attempt limiter (10 failures per 15 minutes)."""
@@ -385,7 +471,105 @@ def login_user():
             "ip_address": _get_client_ip(),
         })
         return jsonify({"message": "Invalid username or password."}), 401
- 
+
+
+@auth_blueprint.route('/auth/demo-roles', methods=['GET'])
+def demo_roles():
+    """Public list of demo personas (no credentials)."""
+    if not _demo_enabled():
+        return jsonify({"error": "Demo is not enabled."}), 404
+
+    roles = [
+        {
+            "role": role,
+            "title": role,
+            "description": _DEMO_ROLE_DESCRIPTIONS.get(role, ""),
+        }
+        for role in PUBLIC_DEMO_ROLES
+    ]
+    return jsonify({"roles": roles}), 200
+
+
+@auth_blueprint.route('/auth/demo-login', methods=['POST'])
+def demo_login():
+    """
+    Passwordless demo entry for a fixed demo tenant persona.
+    Requires DEMO_ENABLED=true and DEMO_TENANT_ID on the server.
+    """
+    if not _demo_enabled():
+        return jsonify({"error": "Demo is not enabled."}), 404
+
+    demo_tenant_id = _demo_tenant_id()
+    if not demo_tenant_id:
+        return jsonify({"error": "Demo tenant is not configured."}), 503
+
+    if _demo_rate_limit_exceeded():
+        return jsonify({
+            "message": "Too many demo sessions. Please try again later.",
+        }), 429
+
+    data = validate_json_request()
+    if isinstance(data, tuple):
+        return data
+
+    role = (data.get("role") or "").strip()
+    if role not in PUBLIC_DEMO_ROLES:
+        return jsonify({
+            "error": "Invalid demo role.",
+            "allowed_roles": list(PUBLIC_DEMO_ROLES),
+        }), 400
+
+    username = f"demo-{role.lower()}"
+    items = list(users_container.query_items(
+        query=(
+            "SELECT * FROM c WHERE c.tenant_id = @tid "
+            "AND c.username = @username AND c.is_demo_user = true"
+        ),
+        parameters=[
+            {"name": "@tid", "value": demo_tenant_id},
+            {"name": "@username", "value": username},
+        ],
+        enable_cross_partition_query=True,
+    ))
+
+    if not items or not items[0].get("is_active", True):
+        return jsonify({
+            "error": "Demo persona is not available. Try again later.",
+        }), 503
+
+    user_doc = items[0]
+    access_token, refresh_token_value, tenant_id, user_id = _issue_auth_tokens(user_doc)
+
+    log_audit_event({
+        "action": "DEMO_LOGIN",
+        "entity": "auth",
+        "entity_id": user_id,
+        "before": None,
+        "after": {"login": "success", "role": role, "demo": True},
+        "metadata": {"event": "demo_login", "role": role},
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "user_email": user_doc.get("email") or username,
+        "ip_address": _get_client_ip(),
+    })
+
+    return jsonify({
+        "message": "Demo session started.",
+        "user": {
+            "id": user_id,
+            "tenant_id": tenant_id,
+            "username": user_doc.get("username", username),
+            "name": user_doc.get("name", f"Demo {role}"),
+            "role": user_doc.get("role", role),
+            "is_super_admin": False,
+            "is_demo": True,
+        },
+        "token": access_token,
+        "access_token": access_token,
+        "refresh_token": refresh_token_value,
+    }), 200
+
+
 @auth_blueprint.route('/auth/refresh', methods=['POST'])
 def refresh_token():
     """
@@ -545,6 +729,27 @@ def delete_account():
 
     user_id = request.user_id
     tenant_id = request.tenant_id
+
+    # Demo personas must not delete the shared demo tenant.
+    try:
+        token = request.headers.get("Authorization", "").split(" ", 1)[-1]
+        payload = jwt.decode(
+            token,
+            os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key")),
+            algorithms=["HS256"],
+        )
+        if payload.get("is_demo"):
+            return jsonify({"error": "Demo accounts cannot delete data."}), 403
+    except Exception:
+        pass
+
+    user_items = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @uid",
+        parameters=[{"name": "@uid", "value": user_id}],
+        enable_cross_partition_query=True,
+    ))
+    if user_items and user_items[0].get("is_demo_user"):
+        return jsonify({"error": "Demo accounts cannot delete data."}), 403
 
     def _bulk_delete(container, partition_key_field):
         """Query all items for this tenant and delete each one."""

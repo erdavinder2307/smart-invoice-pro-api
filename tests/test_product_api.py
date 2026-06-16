@@ -21,10 +21,16 @@ def _auth_headers(tenant_id="tenant-1", user_id="user-1"):
 
 @pytest.fixture
 def client():
+    perm_patcher = patch(
+        "smart_invoice_pro.utils.permission_checker._get_user_permissions",
+        return_value=(True, {}),
+    )
+    perm_patcher.start()
     app = create_app()
     app.config['TESTING'] = True
     with app.test_client() as client:
         yield client
+    perm_patcher.stop()
 
 @patch('smart_invoice_pro.api.product_api.products_container')
 def test_create_product_success(mock_container, client):

@@ -12,8 +12,15 @@ EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/refresh",
+    "/api/auth/demo-login",
+    "/api/auth/demo-roles",
     "/api/ping",
+    "/api/payments/webhook",
 }
+
+
+def _is_cron_path(path: str) -> bool:
+    return path.startswith("/api/cron/")
 
 
 def _unauthorized(message):
@@ -91,6 +98,10 @@ def should_skip_auth(path, method):
 def enforce_api_auth():
     if should_skip_auth(request.path, request.method):
         return None
+
+    if _is_cron_path(request.path):
+        from smart_invoice_pro.utils.cron_auth import enforce_cron_secret
+        return enforce_cron_secret()
 
     _, error_response = authenticate_request_context()
     if error_response:

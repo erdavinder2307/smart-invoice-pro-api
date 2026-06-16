@@ -94,7 +94,14 @@ def get_my_role():
 @require_role('Admin')
 def list_users():
     """List all users with their roles."""
-    items = list(users_container.read_all_items())
+    tenant_id = getattr(request, 'tenant_id', None)
+    if not tenant_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+    items = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tid",
+        parameters=[{"name": "@tid", "value": tenant_id}],
+        enable_cross_partition_query=True,
+    ))
     safe = [
         {
             'id': u.get('id'),
@@ -123,10 +130,12 @@ def update_user_role(target_user_id):
     if not user:
         return jsonify({'error': 'User not found'}), 404
 
-    # Prevent removing the last Admin
+    # Prevent removing the last Admin in this tenant
     if user.get('role') == 'Admin' and new_role != 'Admin':
+        tenant_id = getattr(request, 'tenant_id', None)
         admins = list(users_container.query_items(
-            query="SELECT * FROM c WHERE c.role = 'Admin'",
+            query="SELECT * FROM c WHERE c.role = 'Admin' AND c.tenant_id = @tid",
+            parameters=[{"name": "@tid", "value": tenant_id}],
             enable_cross_partition_query=True
         ))
         if len(admins) <= 1:
@@ -155,15 +164,33 @@ def get_pending_approvals():
     if not uid:
         return jsonify({'error': 'Unauthorized'}), 401
 
+    tenant_id = getattr(request, 'tenant_id', None)
+    if not tenant_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
     try:
-        inv_query = "SELECT * FROM c WHERE c.status = 'Pending Approval'"
-        invoices = list(invoices_container.query_items(query=inv_query, enable_cross_partition_query=True))
+        inv_query = (
+            "SELECT * FROM c WHERE c.status = 'Pending Approval' "
+            "AND c.tenant_id = @tid"
+        )
+        invoices = list(invoices_container.query_items(
+            query=inv_query,
+            parameters=[{"name": "@tid", "value": tenant_id}],
+            enable_cross_partition_query=True,
+        ))
     except Exception:
         invoices = []
 
     try:
-        po_query = "SELECT * FROM c WHERE c.status = 'Pending Approval'"
-        pos = list(purchase_orders_container.query_items(query=po_query, enable_cross_partition_query=True))
+        po_query = (
+            "SELECT * FROM c WHERE c.status = 'Pending Approval' "
+            "AND c.tenant_id = @tid"
+        )
+        pos = list(purchase_orders_container.query_items(
+            query=po_query,
+            parameters=[{"name": "@tid", "value": tenant_id}],
+            enable_cross_partition_query=True,
+        ))
     except Exception:
         pos = []
 

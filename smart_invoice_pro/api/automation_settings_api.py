@@ -23,6 +23,8 @@ from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from datetime import datetime
 
+from smart_invoice_pro.utils.permission_checker import require_permission
+
 automation_blueprint = Blueprint('automation', __name__)
 
 VALID_TYPES = {'before_due', 'on_due', 'after_due'}
@@ -89,6 +91,7 @@ def _validate_reminders(reminders: list) -> tuple[list | None, str | None]:
 
 # ── GET ────────────────────────────────────────────────────────────────────────
 @automation_blueprint.route('/settings/automation', methods=['GET'])
+@require_permission('automation', 'view')
 def get_automation_settings():
     """Fetch automation / reminder settings for the current tenant."""
     try:
@@ -101,6 +104,7 @@ def get_automation_settings():
 
 # ── PUT ────────────────────────────────────────────────────────────────────────
 @automation_blueprint.route('/settings/automation', methods=['PUT'])
+@require_permission('automation', 'edit')
 def save_automation_settings():
     """Save automation / reminder settings for the current tenant."""
     data = request.get_json()
