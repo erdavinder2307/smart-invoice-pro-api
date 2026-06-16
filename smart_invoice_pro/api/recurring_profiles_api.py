@@ -16,6 +16,7 @@ from smart_invoice_pro.utils.bulk_archive_contracts import (
 )
 from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
 from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 
 recurring_profiles_blueprint = Blueprint('recurring_profiles', __name__)
@@ -417,6 +418,7 @@ def _set_profile_status(profile_id, next_status):
 
 @recurring_profiles_blueprint.route('/recurring-profiles', methods=['POST'])
 @recurring_profiles_blueprint.route('/recurring-invoices', methods=['POST'])
+@require_permission('invoices', 'create')
 def create_recurring_profile():
     data = request.get_json() or {}
     errors = validate_recurring_profile_data(data)
@@ -476,6 +478,7 @@ def create_recurring_profile():
 
 @recurring_profiles_blueprint.route('/recurring-profiles', methods=['GET'])
 @recurring_profiles_blueprint.route('/recurring-invoices', methods=['GET'])
+@require_permission('invoices', 'view')
 def get_recurring_profiles():
     try:
         tenant_id = request.tenant_id
@@ -609,6 +612,7 @@ def get_recurring_profiles():
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['GET'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['GET'])
+@require_permission('invoices', 'view')
 def get_recurring_profile(profile_id):
     try:
         profile = _query_single_profile(profile_id, request.tenant_id)
@@ -621,6 +625,7 @@ def get_recurring_profile(profile_id):
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['PUT'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['PUT'])
+@require_permission('invoices', 'edit')
 def update_recurring_profile(profile_id):
     data = request.get_json() or {}
     errors = validate_recurring_profile_data(data, is_update=True)
@@ -673,6 +678,7 @@ def update_recurring_profile(profile_id):
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['PATCH'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['PATCH'])
+@require_permission('invoices', 'edit')
 def patch_recurring_profile(profile_id):
     data = request.get_json() or {}
     action = str(data.get('action', '')).strip().lower()
@@ -690,6 +696,7 @@ def patch_recurring_profile(profile_id):
 @recurring_profiles_blueprint.route('/recurring-profiles/bulk', methods=['POST'])
 @recurring_profiles_blueprint.route('/recurring-profiles/bulk-archive', methods=['POST'])
 @recurring_profiles_blueprint.route('/recurring-invoices/bulk', methods=['POST'])
+@require_permission('invoices', 'edit')
 def bulk_recurring_profile_actions():
     payload = request.get_json() or {}
     action = str(payload.get('action', '')).strip().lower()
@@ -784,6 +791,7 @@ def bulk_recurring_profile_actions():
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>', methods=['DELETE'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['DELETE'])
+@require_permission('invoices', 'delete')
 def delete_recurring_profile(profile_id):
     try:
         profile = _query_single_profile(profile_id, request.tenant_id)
@@ -815,6 +823,7 @@ def delete_recurring_profile(profile_id):
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/restore', methods=['POST'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/restore', methods=['POST'])
+@require_permission('invoices', 'edit')
 def restore_recurring_profile(profile_id):
     try:
         profile = _query_single_profile(profile_id, request.tenant_id)
@@ -839,17 +848,20 @@ def restore_recurring_profile(profile_id):
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/pause', methods=['POST', 'PATCH'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/pause', methods=['POST', 'PATCH'])
+@require_permission('invoices', 'edit')
 def pause_recurring_profile(profile_id):
     return _set_profile_status(profile_id, 'Paused')
 
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/resume', methods=['POST', 'PATCH'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/resume', methods=['POST', 'PATCH'])
+@require_permission('invoices', 'edit')
 def resume_recurring_profile(profile_id):
     return _set_profile_status(profile_id, 'Active')
 
 
 @recurring_profiles_blueprint.route('/recurring-profiles/<profile_id>/cancel', methods=['PATCH'])
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>/cancel', methods=['PATCH'])
+@require_permission('invoices', 'edit')
 def cancel_recurring_profile(profile_id):
     return _set_profile_status(profile_id, 'Cancelled')

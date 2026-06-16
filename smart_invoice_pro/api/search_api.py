@@ -12,6 +12,7 @@ from smart_invoice_pro.utils.cosmos_client import (
     search_history_container,
 )
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
+from smart_invoice_pro.utils.permission_checker import check_permission, require_permission
 
 
 search_blueprint = Blueprint("search", __name__)
@@ -417,9 +418,9 @@ def global_search():
     per_category_limit = _parse_limit(default=5, max_limit=20)
 
     features = _search_features(term, per_category_limit)
-    customers = _search_customers(term, per_category_limit)
-    invoices = _search_invoices(term, per_category_limit)
-    products = _search_products(term, per_category_limit)
+    customers = _search_customers(term, per_category_limit) if check_permission('customers', 'view') else []
+    invoices = _search_invoices(term, per_category_limit) if check_permission('invoices', 'view') else []
+    products = _search_products(term, per_category_limit) if check_permission('products', 'view') else []
 
     total = len(features) + len(customers) + len(invoices) + len(products)
 

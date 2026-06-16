@@ -19,6 +19,7 @@ from smart_invoice_pro.utils.bulk_archive_contracts import (
     init_bulk_archive_result,
 )
 from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 # Create or get the products container (partition key: /product_id)
 products_container = get_container("products", "/product_id")
@@ -144,6 +145,7 @@ def _stock_bucket(stock, reorder_level):
 #  CREATE
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products', methods=['POST'])
+@require_permission('products', 'create')
 @swag_from({
     'tags': ['Products'],
     'parameters': [
@@ -260,6 +262,7 @@ def create_product():
 #  LIST
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products', methods=['GET'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Products'],
     'responses': {
@@ -345,6 +348,7 @@ def list_products():
 #  GET ONE
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/<product_id>', methods=['GET'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Products'],
     'parameters': [
@@ -382,6 +386,7 @@ def get_product(product_id):
 #  UPDATE
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/<product_id>', methods=['PUT'])
+@require_permission('products', 'edit')
 @swag_from({
     'tags': ['Products'],
     'parameters': [
@@ -508,6 +513,7 @@ def update_product(product_id):
 #  DEPENDENCY CHECK
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/<product_id>/dependencies', methods=['GET'])
+@require_permission('products', 'view')
 def get_product_dependencies(product_id):
     query = "SELECT * FROM c WHERE c.id = @id"
     items = list(products_container.query_items(
@@ -530,6 +536,7 @@ def get_product_dependencies(product_id):
 #  ARCHIVE
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/<product_id>', methods=['DELETE'])
+@require_permission('products', 'delete')
 @swag_from({
     'tags': ['Products'],
     'parameters': [
@@ -596,6 +603,7 @@ def delete_product(product_id):
 
 
 @product_blueprint.route('/products/<product_id>/restore', methods=['POST'])
+@require_permission('products', 'edit')
 def restore_product(product_id):
     """Restore an archived product back to ACTIVE status."""
     items = list(products_container.query_items(
@@ -622,6 +630,7 @@ def restore_product(product_id):
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/bulk-archive', methods=['POST'])
 @product_blueprint.route('/products/bulk', methods=['POST'])
+@require_permission('products', 'edit')
 def bulk_archive_products():
     """Lifecycle-aware bulk archive for products."""
     payload = request.get_json() or {}
@@ -696,6 +705,7 @@ def bulk_archive_products():
 #  STOCK SUMMARY
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/stock-summary', methods=['GET'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Products'],
     'responses': {
@@ -743,6 +753,7 @@ def products_stock_summary():
 #  LOW STOCK
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/low-stock', methods=['GET'])
+@require_permission('products', 'view')
 @swag_from({
     'tags': ['Products'],
     'responses': {
@@ -806,6 +817,7 @@ def get_low_stock_products():
 #  RESTOCK (Create PO)
 # ─────────────────────────────────────────────
 @product_blueprint.route('/products/<product_id>/restock', methods=['POST'])
+@require_permission('products', 'edit')
 @swag_from({
     'tags': ['Products'],
     'parameters': [

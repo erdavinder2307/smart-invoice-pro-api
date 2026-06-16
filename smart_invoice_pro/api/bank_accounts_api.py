@@ -6,6 +6,8 @@ import uuid
 from flasgger import swag_from
 from datetime import datetime
 
+from smart_invoice_pro.utils.permission_checker import require_permission
+
 bank_accounts_blueprint = Blueprint('bank_accounts', __name__)
 
 def get_user_from_request():
@@ -17,6 +19,7 @@ def get_user_from_request():
 
 
 @bank_accounts_blueprint.route('/bank-accounts', methods=['GET'])
+@require_permission('banking', 'view')
 @swag_from({
     'tags': ['Bank Accounts'],
     'parameters': [
@@ -76,6 +79,7 @@ def get_bank_accounts():
 
 
 @bank_accounts_blueprint.route('/bank-accounts', methods=['POST'])
+@require_permission('banking', 'create')
 @swag_from({
     'tags': ['Bank Accounts'],
     'parameters': [
@@ -186,6 +190,7 @@ def create_bank_account():
 
 
 @bank_accounts_blueprint.route('/bank-accounts/<account_id>', methods=['GET'])
+@require_permission('banking', 'view')
 @swag_from({
     'tags': ['Bank Accounts'],
     'parameters': [
@@ -266,6 +271,7 @@ def get_bank_account(account_id):
 
 
 @bank_accounts_blueprint.route('/bank-accounts/<account_id>', methods=['PUT'])
+@require_permission('banking', 'edit')
 def update_bank_account(account_id):
     """
     Update a bank account's name, bank name, or account type.
@@ -313,6 +319,7 @@ def update_bank_account(account_id):
 
 
 @bank_accounts_blueprint.route('/bank-accounts/<account_id>', methods=['DELETE'])
+@require_permission('banking', 'edit')
 def delete_bank_account(account_id):
     """
     Delete a bank account.

@@ -19,6 +19,7 @@ import os, uuid, hmac, hashlib, requests
 from datetime import datetime
 from dotenv import load_dotenv
 from smart_invoice_pro.utils.cosmos_client import invoices_container, get_container
+from smart_invoice_pro.utils.permission_checker import require_permission
 
 load_dotenv()
 
@@ -55,6 +56,7 @@ def _zoho_headers():
 
 # ── 1. Create payment session (payment link) ──────────────────────────────────
 @payments_blueprint.route('/payments/create-session', methods=['POST'])
+@require_permission('invoices', 'edit')
 def create_payment_session():
     """
     Create a Zoho Payments link for an invoice and return the checkout URL.
@@ -254,6 +256,7 @@ def zoho_payments_webhook():
 
 # ── 3. List transactions ──────────────────────────────────────────────────────
 @payments_blueprint.route('/payments/transactions', methods=['GET'])
+@require_permission('banking', 'view')
 def list_transactions():
     """
     List all payment transactions for a given user.
@@ -283,6 +286,7 @@ def list_transactions():
 
 # ── 4. Check transaction status ───────────────────────────────────────────────
 @payments_blueprint.route('/payments/status/<transaction_id>', methods=['GET'])
+@require_permission('banking', 'view')
 def payment_status(transaction_id):
     """
     Check status of a specific payment transaction.

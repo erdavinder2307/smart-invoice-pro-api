@@ -81,6 +81,19 @@ vendors_container   = _get_container("vendors",   "/vendor_id")
 bills_container     = _get_container("bills",     "/vendor_id")
 expenses_container  = _get_container("expenses",  "/id")
 stock_container     = _get_container("stock",     "/product_id")
+quotes_container    = _get_container("quotes",    "/customer_id")
+sales_orders_container = _get_container("sales_orders", "/customer_id")
+recurring_profiles_container = _get_container("recurring_profiles", "/customer_id")
+purchase_orders_container = _get_container("purchase_orders", "/vendor_id")
+payments_container  = _get_container("payments",  "/user_id")
+bank_accounts_container = _get_container("bank_accounts", "/user_id")
+notifications_container = _get_container("notifications", "/tenant_id")
+domain_events_container = _get_container("domain_events", "/tenant_id")
+webhook_logs_container = _get_container("webhook_logs", "/tenant_id")
+bank_import_batches_container = _get_container("bank_import_batches", "/tenant_id")
+bank_import_jobs_container = _get_container("bank_import_jobs", "/tenant_id")
+bank_import_rows_container = _get_container("bank_import_rows", "/tenant_id")
+bank_import_artifacts_container = _get_container("bank_import_artifacts", "/tenant_id")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -851,10 +864,23 @@ def reset_tenant_data(tenant_id: str) -> dict:
         (customers_container, "customer_id"),
         (products_container,  "product_id"),
         (invoices_container,  "customer_id"),
+        (quotes_container,    "customer_id"),
+        (sales_orders_container, "customer_id"),
+        (recurring_profiles_container, "customer_id"),
         (vendors_container,   "vendor_id"),
+        (purchase_orders_container, "vendor_id"),
         (bills_container,     "vendor_id"),
         (expenses_container,  "id"),
         (stock_container,     "product_id"),
+        (payments_container,  "user_id"),
+        (bank_accounts_container, "user_id"),
+        (notifications_container, "tenant_id"),
+        (domain_events_container, "tenant_id"),
+        (webhook_logs_container, "tenant_id"),
+        (bank_import_batches_container, "tenant_id"),
+        (bank_import_jobs_container, "tenant_id"),
+        (bank_import_rows_container, "tenant_id"),
+        (bank_import_artifacts_container, "tenant_id"),
     ]
     counts = {}
     for (container, pk_field) in containers_meta:
@@ -946,6 +972,8 @@ def main():
                         help="Data scenario: balanced | high-revenue | low-activity")
     parser.add_argument("--reset",     action="store_true",
                         help="Wipe all existing data for the tenant before seeding")
+    parser.add_argument("--yes",       action="store_true",
+                        help="Skip interactive confirmation for --reset (for CI/cron)")
     parser.add_argument("--seed",      type=int, default=None,
                         help="Integer random seed for reproducible data")
     # Per-entity overrides (take precedence over scenario defaults)
@@ -998,10 +1026,11 @@ def main():
     # ── Reset ────────────────────────────────────────────────────────────────
     if args.reset:
         print("!! RESET mode — deleting all existing data for this tenant.")
-        ans = input("   Type 'yes' to confirm: ").strip().lower()
-        if ans != "yes":
-            print("   Cancelled.")
-            sys.exit(0)
+        if not args.yes:
+            ans = input("   Type 'yes' to confirm: ").strip().lower()
+            if ans != "yes":
+                print("   Cancelled.")
+                sys.exit(0)
         print()
         reset_tenant_data(tid)
         print()

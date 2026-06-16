@@ -110,11 +110,15 @@ def create_app():
     limiter.limit("5 per minute")(login_user)
 
     allowed_origins = _get_allowed_origins()
+    cors_origins = sorted(allowed_origins) + [
+        r"^https://([a-z0-9-]+\.)*solidevbooks\.com$",
+        r"^https://[a-z0-9-]+\.azurestaticapps\.net$",
+    ]
 
-    # Enable CORS – explicit origins so that credentialed requests work correctly
+    # Enable CORS – explicit origins so that credentialed requests work correctly.
     CORS(
         app,
-        resources={r"/api/*": {"origins": sorted(allowed_origins)}},
+        resources={r"/api/*": {"origins": cors_origins}},
         allow_headers=["Content-Type", "Authorization", "X-User-Id", "X-Username"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         supports_credentials=True,
@@ -148,7 +152,12 @@ def create_app():
         # Allow configured exact origins. Also allow HTTPS Azure Static Web Apps
         # origins so branch/preview environments continue to work after deploy.
         is_azure_static_app = origin.startswith("https://") and origin.endswith(".azurestaticapps.net")
-        if origin in allowed_origins or is_azure_static_app:
+        is_solidevbooks_host = (
+            origin == "https://solidevbooks.com"
+            or origin.endswith(".solidevbooks.com")
+        )
+        current_allowed = _get_allowed_origins()
+        if origin in current_allowed or is_azure_static_app or is_solidevbooks_host:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Headers"] = (

@@ -18,6 +18,9 @@ import pytest
 # already set in os.environ, so setting this here ensures tests are
 # deterministic even when .env contains BANK_IMPORT_ASYNC=true.
 os.environ.setdefault("BANK_IMPORT_ASYNC", "false")
+os.environ.setdefault("CRON_SECRET", "test-cron-secret")
+
+CRON_SECRET = os.environ["CRON_SECRET"]
 
 # ── Mock CosmosClient before any application module is imported ─────────────
 # cosmos_client.py creates a real CosmosClient at import time, which fails
@@ -250,6 +253,12 @@ def headers_a():
 def headers_b():
     """Auth headers for tenant B (cross-tenant testing)."""
     return auth_headers(user_id=USER_B, tenant_id=TENANT_B)
+
+
+@pytest.fixture()
+def cron_headers():
+    """Cron job auth headers (X-Cron-Secret)."""
+    return {"X-Cron-Secret": CRON_SECRET, "Content-Type": "application/json"}
 
 
 # ── Sample data factories ───────────────────────────────────────────────────
