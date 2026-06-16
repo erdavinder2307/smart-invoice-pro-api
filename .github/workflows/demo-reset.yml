@@ -1,8 +1,8 @@
 name: Demo Tenant Nightly Reset
 
 on:
-    schedule:
-    # Every 12 hours — restore Interactive Workspace baseline data
+  schedule:
+    # Every 12 hours - restore Interactive Workspace baseline data
     - cron: '0 */12 * * *'
   workflow_dispatch:
 
