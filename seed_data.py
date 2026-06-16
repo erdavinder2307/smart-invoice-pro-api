@@ -244,6 +244,18 @@ SCENARIOS = {
         "invoice_mins":  [1, 3, 8, 10],
         "expense_mins":  [1, 2, 4,  5],
     },
+    "northstar": {
+        "description":   "NorthStar Industrial Supplies curated Interactive Workspace",
+        "customers":     0,
+        "items":         0,
+        "invoices":      0,
+        "vendors":       0,
+        "bills":         0,
+        "expenses":      0,
+        "customer_mins": [0, 0, 0, 0],
+        "invoice_mins":  [0, 0, 0, 0],
+        "expense_mins":  [0, 0, 0, 0],
+    },
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1034,6 +1046,14 @@ def main():
         print()
         reset_tenant_data(tid)
         print()
+
+    if args.scenario == "northstar":
+        from smart_invoice_pro.seeds.northstar_seed import run_northstar_seed
+        run_northstar_seed(tid)
+        print(f"\n{'='*62}")
+        print("  NorthStar curated seed finished.")
+        print(f"{'='*62}\n")
+        return
 
     # ── 1. Products ──────────────────────────────────────────────────────────
     print(f"[1/7] Products  (target: {n_items})")

@@ -35,13 +35,15 @@ def _extract_bearer_token():
     return token or None
 
 
-def _set_request_context(user_id, tenant_id, session_id=None):
+def _set_request_context(user_id, tenant_id, session_id=None, is_demo=False):
     g.user_id = user_id
     g.tenant_id = tenant_id
+    g.is_demo = bool(is_demo)
 
     # Keep compatibility with the requested contract.
     setattr(request, "user_id", user_id)
     setattr(request, "tenant_id", tenant_id)
+    setattr(request, "is_demo", bool(is_demo))
     # Used by me_api.get_sessions() to mark the current session
     if session_id:
         setattr(request, "token_id", session_id)
@@ -70,7 +72,12 @@ def authenticate_request_context():
     if not user_id or not tenant_id:
         return None, _unauthorized("Unauthorized")
 
-    _set_request_context(user_id, tenant_id, session_id)
+    _set_request_context(
+        user_id,
+        tenant_id,
+        session_id,
+        is_demo=bool(payload.get("is_demo")),
+    )
     return payload, None
 
 

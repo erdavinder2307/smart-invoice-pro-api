@@ -47,7 +47,8 @@ from smart_invoice_pro.utils.tenant_service import get_tenant_by_id  # noqa: E40
 DEFAULT_DEMO_TENANT_ID = "d3m00000-0000-4000-8000-000000000001"
 
 DEMO_ROLES = ["Sales", "Manager", "Accountant", "Purchaser"]
-DEMO_ORG_NAME = "Solidev Demo Industries Pvt Ltd"
+DEMO_ORG_NAME = "NorthStar Industrial Supplies Pvt Ltd"
+DEMO_SCENARIO = "northstar"
 
 
 def _now_iso() -> str:
@@ -71,6 +72,7 @@ def ensure_demo_tenant(tenants_ctr, tenant_id: str) -> dict:
     existing = get_tenant_by_id(tenant_id)
     if existing:
         existing["is_demo"] = True
+        existing["tenant_type"] = "DEMO"
         existing["name"] = DEMO_ORG_NAME
         existing["plan"] = existing.get("plan") or "trial"
         existing["status"] = "active"
@@ -86,6 +88,7 @@ def ensure_demo_tenant(tenants_ctr, tenant_id: str) -> dict:
         "status": "active",
         "plan": "trial",
         "is_demo": True,
+        "tenant_type": "DEMO",
         "created_at": now,
         "updated_at": now,
     }
@@ -110,6 +113,7 @@ def ensure_org_profile(settings_ctr, tenant_id: str) -> None:
         "tenant_id": tenant_id,
         "organization_name": DEMO_ORG_NAME,
         "legal_name": DEMO_ORG_NAME,
+        "industry": "B2B Industrial Distribution",
         "country": "India",
         "currency": "INR",
         "timezone": "Asia/Kolkata",
@@ -196,7 +200,7 @@ def run_seed(tenant_id: str, reset: bool, yes: bool = False) -> None:
         sys.executable,
         str(seed_script),
         f"--tenant_id={tenant_id}",
-        "--scenario=balanced",
+        f"--scenario={DEMO_SCENARIO}",
         "--seed=42",
     ]
     if reset:

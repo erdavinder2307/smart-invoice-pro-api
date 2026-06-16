@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
 from smart_invoice_pro.utils.cosmos_client import customers_container
 from smart_invoice_pro.utils.cosmos_client import invoices_container
 from smart_invoice_pro.utils.cosmos_client import quotes_container
@@ -157,6 +158,7 @@ def process_customer_documents(documents, customer_id):
 
 @customers_blueprint.route('/customers', methods=['POST'])
 @require_permission('customers', 'create')
+@enforce_demo_create_limit('customers')
 @swag_from({
     'tags': ['Customers'],
     'parameters': [
