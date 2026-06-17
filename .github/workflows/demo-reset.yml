@@ -37,6 +37,16 @@ jobs:
           fi
           python scripts/provision_demo_environment.py --seed --reset --yes
 
+      - name: Validate demo seed
+        env:
+          DEMO_TENANT_ID: ${{ secrets.DEMO_TENANT_ID }}
+          COSMOS_URI: ${{ secrets.COSMOS_URI }}
+          COSMOS_KEY: ${{ secrets.COSMOS_KEY }}
+          COSMOS_DB_NAME: ${{ secrets.COSMOS_DB_NAME }}
+        run: |
+          set -euo pipefail
+          python scripts/validate_demo_seed.py --scenario northstar --min-profile expanded
+
       - name: Revoke demo refresh tokens
         env:
           DEMO_TENANT_ID: ${{ secrets.DEMO_TENANT_ID }}

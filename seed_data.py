@@ -589,7 +589,7 @@ def seed_stock_initial(tenant_id: str, products: list) -> dict:
             _in(random.randint(20, 50))
             summary["normal"] += 1
         elif level < 9:         # 20% low stock (below reorder_level)
-            reorder = prod.get("reorder_level", 10)
+            reorder = int(prod.get("reorder_level", 10) or 10)
             stock_in  = reorder * 4
             # Leave between 1 and (reorder_level - 1) units — triggers the alert
             leave = random.randint(1, max(1, reorder - 1))
