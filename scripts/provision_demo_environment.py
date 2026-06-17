@@ -190,11 +190,11 @@ def ensure_demo_users(users_ctr, tenant_id: str) -> dict[str, str]:
     return role_map
 
 
-def run_seed(tenant_id: str, reset: bool, yes: bool = False) -> None:
+def run_seed(tenant_id: str, reset: bool, yes: bool = False) -> int:
     seed_script = ROOT / "seed_data.py"
     if not seed_script.exists():
         print("  seed_data.py not found — skipping data seed")
-        return
+        return 0
 
     cmd = [
         sys.executable,
@@ -210,9 +210,10 @@ def run_seed(tenant_id: str, reset: bool, yes: bool = False) -> None:
     proc = subprocess.run(cmd, cwd=str(ROOT), check=False)
 
     if proc.returncode != 0:
-        print(f"  WARN: seed_data exited with code {proc.returncode}")
+        print(f"  ERROR: seed_data exited with code {proc.returncode}")
     else:
         print("  Seed data completed")
+    return proc.returncode
 
 
 def main() -> None:
@@ -236,7 +237,9 @@ def main() -> None:
 
     if args.seed:
         print("\n=== Seeding demo data ===\n")
-        run_seed(tenant_id, reset=args.reset, yes=args.yes)
+        seed_rc = run_seed(tenant_id, reset=args.reset, yes=args.yes)
+        if seed_rc != 0:
+            sys.exit(seed_rc)
 
     print("\n=== Done ===")
     print(f"DEMO_TENANT_ID={tenant_id}")

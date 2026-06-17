@@ -1,42 +1,25 @@
 """
 Curated NorthStar Industrial Supplies dataset for the public Interactive Workspace.
 
-No Faker names — fixed B2B distribution business with interconnected workflows.
+Generates a realistic operating B2B distribution business with full workflow chains.
 """
 
 from __future__ import annotations
 
+import hashlib
+import random
 import uuid
 from datetime import datetime, timedelta
 
-NORTHSTAR_ORG_NAME = "NorthStar Industrial Supplies Pvt Ltd"
-NORTHSTAR_INDUSTRY = "B2B Industrial Distribution"
-
-CUSTOMERS = [
-    ("Horizon Manufacturing Ltd", "Maharashtra", "27", False),
-    ("Apex Engineering Solutions", "Karnataka", "29", True),
-    ("Sterling Packaging Industries", "Gujarat", "24", True),
-    ("Metro Retail Distribution", "Maharashtra", "27", False),
-    ("Delta Infrastructure Services", "Tamil Nadu", "33", True),
-]
-
-VENDORS = [
-    ("Prime Industrial Components", "Maharashtra"),
-    ("Zenith Packaging Materials", "Gujarat"),
-    ("Bharat Logistics Services", "Maharashtra"),
-    ("Allied Electrical Traders", "Karnataka"),
-]
-
-PRODUCTS = [
-    ("Industrial Safety Gloves", "Safety Equipment", "Nos", 450, 120, 18, "6116"),
-    ("Stainless Fasteners M8", "Hardware", "Nos", 85, 500, 18, "7318"),
-    ("Packaging Cartons 18x12", "Packaging", "Nos", 120, 800, 12, "4819"),
-    ("Electrical Control Panels", "Electrical", "Nos", 18500, 15, 18, "8537"),
-    ("PVC Insulation Tape", "Electrical", "Nos", 35, 200, 18, "3919"),
-    ("Hydraulic Hose Assembly", "Industrial", "Nos", 2200, 40, 18, "4009"),
-    ("Warehouse Labels Roll", "Packaging", "Roll", 280, 150, 12, "4821"),
-    ("LED Flood Light 50W", "Electrical", "Nos", 1650, 60, 18, "9405"),
-]
+from smart_invoice_pro.seeds.northstar_data import (
+    CREDIT_LIMITS,
+    CUSTOMERS,
+    NORTHSTAR_INDUSTRY,
+    NORTHSTAR_ORG_NAME,
+    PAYMENT_TERMS,
+    PRODUCTS,
+    VENDORS,
+)
 
 
 def _now_iso() -> str:
@@ -59,28 +42,88 @@ def _gst_totals(line_items, interstate: bool):
     return subtotal, half, half, 0.0, tax
 
 
+def _lookup_demo_user_id(tenant_id: str, role: str = "Manager") -> str:
+    from smart_invoice_pro.utils.cosmos_client import users_container
+
+    username = f"demo-{role.lower()}"
+    rows = list(
+        users_container.query_items(
+            query=(
+                "SELECT c.id FROM c WHERE c.tenant_id = @tid "
+                "AND (c.username = @u OR c.email = @e)"
+            ),
+            parameters=[
+                {"name": "@tid", "value": tenant_id},
+                {"name": "@u", "value": username},
+                {"name": "@e", "value": f"{username}@demo.internal"},
+            ],
+            enable_cross_partition_query=True,
+        )
+    )
+    return rows[0]["id"] if rows else str(uuid.uuid4())
+
+
+def _generate_gstin(state_code: str, seed: str) -> str:
+    digest = hashlib.sha256(seed.encode()).hexdigest().upper()
+    pan = digest[:10]
+    return f"{state_code}{pan[:5]}{digest[5:9]}{digest[9]}{digest[10]}Z{digest[11]}"
+
+
+def _state_code(state: str) -> str:
+    codes = {
+        "Maharashtra": "27",
+        "Gujarat": "24",
+        "Karnataka": "29",
+        "Tamil Nadu": "33",
+        "West Bengal": "19",
+        "Rajasthan": "08",
+        "Kerala": "32",
+        "Punjab": "03",
+        "Delhi": "07",
+        "Telangana": "36",
+        "Uttar Pradesh": "09",
+        "Madhya Pradesh": "23",
+        "Odisha": "21",
+        "Bihar": "10",
+    }
+    return codes.get(state, "27")
+
+
 def run_northstar_seed(tenant_id: str) -> None:
     """Seed NorthStar curated business data into Cosmos for the demo tenant."""
-    from smart_invoice_pro.utils.cosmos_client import settings_container
+    random.seed(42)
+
+    from smart_invoice_pro.utils.cosmos_client import (
+        get_container,
+        settings_container,
+    )
     from seed_data import (
-        customers_container,
-        products_container,
-        invoices_container,
-        vendors_container,
+        HOME_STATE,
+        PAYMENT_MODES,
+        bank_import_batches_container,
+        bank_import_jobs_container,
+        bank_import_rows_container,
         bills_container,
+        customers_container,
         expenses_container,
-        stock_container,
+        invoices_container,
+        payments_container,
+        products_container,
+        purchase_orders_container,
         quotes_container,
         sales_orders_container,
-        purchase_orders_container,
-        payments_container,
-        bank_accounts_container,
         seed_stock_initial,
-        PAYMENT_MODES,
-        HOME_STATE,
+        stock_container,
+        vendors_container,
     )
 
+    bank_accounts_container = get_container("bank_accounts", "/user_id")
+    bank_txns_container = get_container("bank_transactions", "/user_id")
+
+    manager_user_id = _lookup_demo_user_id(tenant_id, "Manager")
+    accountant_user_id = _lookup_demo_user_id(tenant_id, "Accountant")
     now = _now_iso()
+
     print(f"\n=== NorthStar curated seed for tenant {tenant_id} ===\n")
 
     # ── Organization profile ─────────────────────────────────────────────
@@ -108,7 +151,7 @@ def run_northstar_seed(tenant_id: str) -> None:
         "updated_at": now,
     }
     settings_container.upsert_item(body=profile)
-    print("  Organization profile: NorthStar Industrial Supplies Pvt Ltd")
+    print(f"  Organization profile: {NORTHSTAR_ORG_NAME}")
 
     # ── Products ───────────────────────────────────────────────────────
     products = []
@@ -125,8 +168,8 @@ def run_northstar_seed(tenant_id: str) -> None:
             "purchase_rate": round(price * 0.72, 2),
             "tax_rate": float(tax),
             "hsn_sac": hsn,
-            "reorder_level": float(reorder),
-            "reorder_qty": float(reorder * 2),
+            "reorder_level": int(reorder),
+            "reorder_qty": int(reorder * 2),
             "sales_enabled": True,
             "purchase_enabled": True,
             "is_deleted": False,
@@ -141,19 +184,21 @@ def run_northstar_seed(tenant_id: str) -> None:
 
     # ── Vendors ────────────────────────────────────────────────────────
     vendors = []
-    for name, state in VENDORS:
+    for idx, (name, state) in enumerate(VENDORS):
         vid = str(uuid.uuid4())
+        slug = name.split()[0].lower()
         doc = {
             "id": vid,
             "vendor_id": vid,
             "tenant_id": tenant_id,
             "name": name,
             "contact_person": "Procurement Desk",
-            "email": f"accounts@{name.split()[0].lower()}.in",
-            "phone": "9876543210",
+            "email": f"accounts@{slug}.in",
+            "phone": f"98{70000000 + idx}",
             "state": state,
             "country": "India",
-            "payment_terms": "Net 30",
+            "gst_number": _generate_gstin(_state_code(state), f"vendor-{name}"),
+            "payment_terms": PAYMENT_TERMS[idx % len(PAYMENT_TERMS)],
             "status": "Active",
             "created_at": now,
             "updated_at": now,
@@ -164,36 +209,44 @@ def run_northstar_seed(tenant_id: str) -> None:
 
     # ── Customers ──────────────────────────────────────────────────────
     customers = []
-    for company, state, _code, interstate in CUSTOMERS:
+    for idx, (company, state, interstate) in enumerate(CUSTOMERS):
         cid = str(uuid.uuid4())
+        slug = company.split()[0].lower()
         doc = {
             "id": cid,
             "customer_id": cid,
             "tenant_id": tenant_id,
             "display_name": company,
             "company_name": company,
-            "email": f"finance@{company.split()[0].lower()}.com",
-            "phone": "9898989898",
+            "email": f"finance@{slug}.com",
+            "phone": f"99{80000000 + idx}",
             "customer_type": "Business",
+            "gst_number": _generate_gstin(_state_code(state), f"customer-{company}"),
             "place_of_supply": state,
+            "billing_street": f"Plot {idx + 1}, Industrial Estate",
+            "billing_city": state.split()[0] if " " in state else "City",
             "billing_state": state,
+            "billing_zip": f"{411000 + idx}",
             "billing_country": "India",
             "currency": "INR",
-            "payment_terms": "Net 30",
+            "payment_terms": PAYMENT_TERMS[idx % len(PAYMENT_TERMS)],
+            "credit_limit": float(CREDIT_LIMITS[idx % len(CREDIT_LIMITS)]),
+            "contact_persons": [
+                {
+                    "name": f"Accounts {idx + 1}",
+                    "email": f"ap@{slug}.com",
+                    "phone": f"98{90000000 + idx}",
+                    "is_primary": True,
+                }
+            ],
             "is_interstate": interstate,
-            "created_at": _days_ago(45),
+            "created_at": _days_ago(30 + idx * 3),
             "updated_at": now,
         }
         customers_container.create_item(body=doc)
         customers.append(doc)
     print(f"  Customers: {len(customers)}")
 
-    horizon = customers[0]
-    apex = customers[1]
-    prime_vendor = vendors[0]
-    zenith_vendor = vendors[1]
-
-    # Helper to build line items
     def _lines(prod_indices, qtys):
         items = []
         for idx, qty in zip(prod_indices, qtys):
@@ -211,7 +264,73 @@ def run_northstar_seed(tenant_id: str) -> None:
             })
         return items
 
-    # ── Quote → SO → Invoice chain (Horizon) ───────────────────────────
+    horizon = customers[5]
+    apex = customers[6]
+    prime_vendor = vendors[0]
+    zenith_vendor = vendors[1]
+
+    # ── Quotes (mixed statuses) ─────────────────────────────────────────
+    quote_statuses = [
+        ("Accepted", 18, 2),
+        ("Sent", 8, 14),
+        ("Draft", 3, 30),
+        ("Declined", 25, 5),
+        ("Expired", 40, 10),
+    ]
+    quote_count = 0
+    for i, (status, issued_days, expiry_offset) in enumerate(quote_statuses):
+        cust = customers[i % len(customers)]
+        lines = _lines([i % len(products), (i + 3) % len(products)], [20 + i * 5, 50 + i * 10])
+        sub, cgst, sgst, igst, total_tax = _gst_totals(lines, cust.get("is_interstate", False))
+        quote_id = str(uuid.uuid4())
+        quotes_container.create_item(body={
+            "id": quote_id,
+            "tenant_id": tenant_id,
+            "customer_id": cust["customer_id"],
+            "customer_name": cust["display_name"],
+            "quote_number": f"QT-2026-{140 + i:04d}",
+            "issue_date": _days_ago(issued_days),
+            "expiry_date": _days_ago(issued_days - expiry_offset),
+            "status": status,
+            "subtotal": sub,
+            "cgst_amount": cgst,
+            "sgst_amount": sgst,
+            "igst_amount": igst,
+            "total_tax": total_tax,
+            "total_amount": round(sub + total_tax, 2),
+            "items": lines,
+            "created_at": now,
+            "updated_at": now,
+        })
+        quote_count += 1
+
+    for i in range(5):
+        cust = customers[(i + 10) % len(customers)]
+        lines = _lines([(i + 5) % len(products)], [15 + i * 8])
+        sub, cgst, sgst, igst, total_tax = _gst_totals(lines, cust.get("is_interstate", False))
+        quotes_container.create_item(body={
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "customer_id": cust["customer_id"],
+            "customer_name": cust["display_name"],
+            "quote_number": f"QT-2026-{150 + i:04d}",
+            "issue_date": _days_ago(5 + i),
+            "expiry_date": _days_ago(-20 + i),
+            "status": random.choice(["Sent", "Draft", "Accepted"]),
+            "subtotal": sub,
+            "cgst_amount": cgst,
+            "sgst_amount": sgst,
+            "igst_amount": igst,
+            "total_tax": total_tax,
+            "total_amount": round(sub + total_tax, 2),
+            "items": lines,
+            "created_at": now,
+            "updated_at": now,
+        })
+        quote_count += 1
+    print(f"  Quotes: {quote_count}")
+
+    # ── Flagship Quote → SO → Invoice chain (Horizon) ───────────────────
     quote_lines = _lines([0, 2], [200, 500])
     sub, cgst, sgst, igst, total_tax = _gst_totals(quote_lines, False)
     quote_id = str(uuid.uuid4())
@@ -234,6 +353,7 @@ def run_northstar_seed(tenant_id: str) -> None:
         "created_at": now,
         "updated_at": now,
     })
+    quote_count += 1
 
     so_id = str(uuid.uuid4())
     sales_orders_container.create_item(body={
@@ -279,7 +399,11 @@ def run_northstar_seed(tenant_id: str) -> None:
         "updated_at": now,
     })
 
-    # Overdue invoice (Apex)
+    # ── Additional invoices (status mix + dashboard volume) ─────────────
+    invoice_ids_for_payment: list[tuple[str, float, str]] = [
+        (inv_paid_id, paid_total, "completed"),
+    ]
+
     overdue_lines = _lines([3, 5], [2, 80])
     sub_o, cgst_o, sgst_o, igst_o, tax_o = _gst_totals(overdue_lines, True)
     inv_overdue_id = str(uuid.uuid4())
@@ -306,7 +430,6 @@ def run_northstar_seed(tenant_id: str) -> None:
         "updated_at": now,
     })
 
-    # Partial payment invoice
     partial_lines = _lines([1, 6], [300, 25])
     sub_p, cgst_p, sgst_p, igst_p, tax_p = _gst_totals(partial_lines, False)
     partial_total = round(sub_p + tax_p, 2)
@@ -315,8 +438,8 @@ def run_northstar_seed(tenant_id: str) -> None:
     invoices_container.create_item(body={
         "id": inv_partial_id,
         "tenant_id": tenant_id,
-        "customer_id": customers[2]["customer_id"],
-        "customer_name": customers[2]["display_name"],
+        "customer_id": customers[7]["customer_id"],
+        "customer_name": customers[7]["display_name"],
         "invoice_number": "INV-2026-0331",
         "issue_date": _days_ago(25),
         "due_date": _days_ago(5),
@@ -333,15 +456,16 @@ def run_northstar_seed(tenant_id: str) -> None:
         "created_at": now,
         "updated_at": now,
     })
+    invoice_ids_for_payment.append((inv_partial_id, partial_paid, "completed"))
 
-    # Draft invoice
     draft_lines = _lines([7], [40])
     sub_d, cgst_d, sgst_d, igst_d, tax_d = _gst_totals(draft_lines, False)
+    draft_total = round(sub_d + tax_d, 2)
     invoices_container.create_item(body={
         "id": str(uuid.uuid4()),
         "tenant_id": tenant_id,
-        "customer_id": customers[3]["customer_id"],
-        "customer_name": customers[3]["display_name"],
+        "customer_id": customers[8]["customer_id"],
+        "customer_name": customers[8]["display_name"],
         "invoice_number": "INV-2026-0344",
         "issue_date": _days_ago(2),
         "due_date": _days_ago(-28),
@@ -351,29 +475,71 @@ def run_northstar_seed(tenant_id: str) -> None:
         "sgst_amount": sgst_d,
         "igst_amount": igst_d,
         "total_tax": tax_d,
-        "total_amount": round(sub_d + tax_d, 2),
+        "total_amount": draft_total,
         "amount_paid": 0.0,
-        "balance_due": round(sub_d + tax_d, 2),
+        "balance_due": draft_total,
         "items": draft_lines,
         "created_at": now,
         "updated_at": now,
     })
 
-    # Issued (open) invoices for dashboard volume
+    invoice_count = 4
+    status_cycle = ["Issued", "Issued", "Paid", "Overdue", "Partially Paid", "Issued"]
     for i, cust in enumerate(customers):
-        lines = _lines([i % len(products)], [10 + i * 5])
+        if i < 9:
+            continue
+        lines = _lines([i % len(products)], [10 + (i % 20)])
         sub_i, cgst_i, sgst_i, igst_i, tax_i = _gst_totals(
             lines, cust.get("is_interstate", False)
         )
         total_i = round(sub_i + tax_i, 2)
+        status = status_cycle[i % len(status_cycle)]
+        days_ago = 5 + (i % 60)
+        amount_paid = total_i if status == "Paid" else (
+            round(total_i * 0.4, 2) if status == "Partially Paid" else 0.0
+        )
+        inv_id = str(uuid.uuid4())
         invoices_container.create_item(body={
-            "id": str(uuid.uuid4()),
+            "id": inv_id,
             "tenant_id": tenant_id,
             "customer_id": cust["customer_id"],
             "customer_name": cust["display_name"],
-            "invoice_number": f"INV-2026-{320 + i:04d}",
-            "issue_date": _days_ago(14 + i * 3),
-            "due_date": _days_ago(-15 + i),
+            "invoice_number": f"INV-2026-{400 + i:04d}",
+            "issue_date": _days_ago(days_ago),
+            "due_date": _days_ago(days_ago - 30),
+            "status": status,
+            "subtotal": sub_i,
+            "cgst_amount": cgst_i,
+            "sgst_amount": sgst_i,
+            "igst_amount": igst_i,
+            "total_tax": tax_i,
+            "total_amount": total_i,
+            "amount_paid": amount_paid,
+            "balance_due": round(total_i - amount_paid, 2),
+            "items": lines,
+            "created_at": now,
+            "updated_at": now,
+        })
+        invoice_count += 1
+        if status in ("Paid", "Partially Paid") and amount_paid > 0:
+            invoice_ids_for_payment.append((inv_id, amount_paid, "completed"))
+
+    for i in range(8):
+        cust = customers[i % len(customers)]
+        lines = _lines([(i + 2) % len(products), (i + 4) % len(products)], [12, 8])
+        sub_i, cgst_i, sgst_i, igst_i, tax_i = _gst_totals(
+            lines, cust.get("is_interstate", False)
+        )
+        total_i = round(sub_i + tax_i, 2)
+        inv_id = str(uuid.uuid4())
+        invoices_container.create_item(body={
+            "id": inv_id,
+            "tenant_id": tenant_id,
+            "customer_id": cust["customer_id"],
+            "customer_name": cust["display_name"],
+            "invoice_number": f"INV-2026-{500 + i:04d}",
+            "issue_date": _days_ago(3 + i * 2),
+            "due_date": _days_ago(-25 + i),
             "status": "Issued",
             "subtotal": sub_i,
             "cgst_amount": cgst_i,
@@ -387,10 +553,11 @@ def run_northstar_seed(tenant_id: str) -> None:
             "created_at": now,
             "updated_at": now,
         })
+        invoice_count += 1
 
-    print("  Invoices: workflow chain + varied statuses")
+    print(f"  Invoices: {invoice_count}")
 
-    # ── PO → Bill (Prime vendor) ───────────────────────────────────────
+    # ── Purchase orders ────────────────────────────────────────────────
     po_id = str(uuid.uuid4())
     po_lines = _lines([2, 4], [1000, 50])
     sub_po, cgst_po, sgst_po, igst_po, tax_po = _gst_totals(po_lines, False)
@@ -401,7 +568,8 @@ def run_northstar_seed(tenant_id: str) -> None:
         "vendor_id": prime_vendor["vendor_id"],
         "vendor_name": prime_vendor["name"],
         "po_number": "PO-2026-0045",
-        "issue_date": _days_ago(20),
+        "order_date": _days_ago(20),
+        "delivery_date": _days_ago(5),
         "status": "Sent",
         "subtotal": sub_po,
         "total_tax": tax_po,
@@ -410,19 +578,45 @@ def run_northstar_seed(tenant_id: str) -> None:
         "created_at": now,
         "updated_at": now,
     })
+    po_count = 1
 
+    for i in range(6):
+        vendor = vendors[(i + 2) % len(vendors)]
+        lines = _lines([(i + 1) % len(products)], [100 + i * 20])
+        sub_po, _, _, _, tax_po = _gst_totals(lines, False)
+        total_po = round(sub_po + tax_po, 2)
+        purchase_orders_container.create_item(body={
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "vendor_id": vendor["vendor_id"],
+            "vendor_name": vendor["name"],
+            "po_number": f"PO-2026-{50 + i:04d}",
+            "order_date": _days_ago(15 + i * 4),
+            "delivery_date": _days_ago(2 + i),
+            "status": random.choice(["Draft", "Sent", "Confirmed", "Received"]),
+            "subtotal": sub_po,
+            "total_tax": tax_po,
+            "total_amount": total_po,
+            "items": lines,
+            "created_at": now,
+            "updated_at": now,
+        })
+        po_count += 1
+    print(f"  Purchase orders: {po_count}")
+
+    # ── Bills (correct schema: payment_status, bill_date) ────────────────
     bills_container.create_item(body={
         "id": str(uuid.uuid4()),
         "tenant_id": tenant_id,
         "vendor_id": prime_vendor["vendor_id"],
         "vendor_name": prime_vendor["name"],
         "bill_number": "BILL-2026-0189",
-        "purchase_order_id": po_id,
-        "issue_date": _days_ago(15),
+        "converted_from_po_id": po_id,
+        "bill_date": _days_ago(15),
         "due_date": _days_ago(0),
-        "status": "Unpaid",
+        "payment_status": "Unpaid",
         "subtotal": sub_po,
-        "total_tax": tax_po,
+        "tax_amount": tax_po,
         "total_amount": po_total,
         "amount_paid": 0.0,
         "balance_due": po_total,
@@ -437,11 +631,11 @@ def run_northstar_seed(tenant_id: str) -> None:
         "vendor_id": zenith_vendor["vendor_id"],
         "vendor_name": zenith_vendor["name"],
         "bill_number": "BILL-2026-0201",
-        "issue_date": _days_ago(30),
+        "bill_date": _days_ago(30),
         "due_date": _days_ago(5),
-        "status": "Paid",
+        "payment_status": "Paid",
         "subtotal": 45000.0,
-        "total_tax": 8100.0,
+        "tax_amount": 8100.0,
         "total_amount": 53100.0,
         "amount_paid": 53100.0,
         "balance_due": 0.0,
@@ -449,28 +643,63 @@ def run_northstar_seed(tenant_id: str) -> None:
         "created_at": now,
         "updated_at": now,
     })
-    print("  Purchase orders and bills")
+    bill_count = 2
 
-    # ── Payment transaction (paid invoice) ─────────────────────────────
-    demo_user_id = str(uuid.uuid4())  # placeholder partition key
-    payments_container.create_item(body={
-        "id": str(uuid.uuid4()),
-        "user_id": demo_user_id,
-        "tenant_id": tenant_id,
-        "invoice_id": inv_paid_id,
-        "amount": paid_total,
-        "currency": "INR",
-        "status": "completed",
-        "payment_mode": "Bank Transfer",
-        "reference": "UTR-NSTAR-88421",
-        "created_at": now,
-        "updated_at": now,
-    })
+    bill_statuses = ["Unpaid", "Paid", "Partially Paid", "Overdue", "Unpaid"]
+    for i, vendor in enumerate(vendors[2:]):
+        lines = _lines([(i + 3) % len(products)], [80 + i * 15])
+        sub_b, _, _, _, tax_b = _gst_totals(lines, True)
+        total_b = round(sub_b + tax_b, 2)
+        status = bill_statuses[i % len(bill_statuses)]
+        paid = total_b if status == "Paid" else (
+            round(total_b * 0.5, 2) if status == "Partially Paid" else 0.0
+        )
+        bills_container.create_item(body={
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "vendor_id": vendor["vendor_id"],
+            "vendor_name": vendor["name"],
+            "bill_number": f"BILL-2026-{210 + i:04d}",
+            "bill_date": _days_ago(10 + i * 3),
+            "due_date": _days_ago(-5 + i),
+            "payment_status": status,
+            "subtotal": sub_b,
+            "tax_amount": tax_b,
+            "total_amount": total_b,
+            "amount_paid": paid,
+            "balance_due": round(total_b - paid, 2),
+            "items": lines,
+            "created_at": now,
+            "updated_at": now,
+        })
+        bill_count += 1
+    print(f"  Bills: {bill_count}")
 
-    # ── Bank account ───────────────────────────────────────────────────
+    # ── Customer payments ──────────────────────────────────────────────
+    payment_count = 0
+    for inv_id, amount, status in invoice_ids_for_payment[:18]:
+        payments_container.create_item(body={
+            "id": str(uuid.uuid4()),
+            "user_id": manager_user_id,
+            "tenant_id": tenant_id,
+            "invoice_id": inv_id,
+            "amount": amount,
+            "currency": "INR",
+            "status": status,
+            "payment_mode": random.choice(PAYMENT_MODES),
+            "reference": f"UTR-NSTAR-{88000 + payment_count}",
+            "created_at": now,
+            "updated_at": now,
+        })
+        payment_count += 1
+    print(f"  Payments: {payment_count}")
+
+    # ── Bank accounts ──────────────────────────────────────────────────
+    operating_account_id = str(uuid.uuid4())
+    payroll_account_id = str(uuid.uuid4())
     bank_accounts_container.create_item(body={
-        "id": str(uuid.uuid4()),
-        "user_id": demo_user_id,
+        "id": operating_account_id,
+        "user_id": manager_user_id,
         "tenant_id": tenant_id,
         "account_name": "NorthStar Operating Account",
         "bank_name": "HDFC Bank",
@@ -478,25 +707,147 @@ def run_northstar_seed(tenant_id: str) -> None:
         "ifsc": "HDFC0001234",
         "account_type": "Current",
         "currency": "INR",
+        "opening_balance": 2450000.0,
+        "current_balance": 3125800.0,
         "is_active": True,
         "created_at": now,
         "updated_at": now,
     })
-    print("  Payments and bank account")
+    bank_accounts_container.create_item(body={
+        "id": payroll_account_id,
+        "user_id": accountant_user_id,
+        "tenant_id": tenant_id,
+        "account_name": "NorthStar Payroll Account",
+        "bank_name": "ICICI Bank",
+        "account_number": "10200567890123",
+        "ifsc": "ICIC0001020",
+        "account_type": "Current",
+        "currency": "INR",
+        "opening_balance": 850000.0,
+        "current_balance": 620000.0,
+        "is_active": True,
+        "created_at": now,
+        "updated_at": now,
+    })
+    print("  Bank accounts: 2")
+
+    # ── Bank import batch + rows (reconciliation demo) ─────────────────
+    batch_id = str(uuid.uuid4())
+    bank_import_batches_container.create_item(body={
+        "id": batch_id,
+        "tenant_id": tenant_id,
+        "user_id": accountant_user_id,
+        "bank_account_id": operating_account_id,
+        "filename": "northstar-hdfc-jan2026.csv",
+        "status": "review_ready",
+        "review_status": "review_required",
+        "row_count": 0,
+        "warning_count": 0,
+        "warnings": [],
+        "created_at": now,
+        "updated_at": now,
+        "completed_at": now,
+    })
+    bank_import_jobs_container.create_item(body={
+        "id": str(uuid.uuid4()),
+        "tenant_id": tenant_id,
+        "user_id": accountant_user_id,
+        "batch_id": batch_id,
+        "status": "completed",
+        "stage": "review_ready",
+        "progress": 100,
+        "created_at": now,
+        "updated_at": now,
+        "completed_at": now,
+        "error": None,
+    })
+
+    txn_descriptions = [
+        ("NEFT CR METRO ENGINEERING", 185400.0),
+        ("IMPS CR HORIZON MFG", 92450.0),
+        ("UPI DR OFFICE RENT", -85000.0),
+        ("NEFT DR PRIME IND COMPONENTS", -53100.0),
+        ("CHQ DEP APEX ENGINEERING", 142800.0),
+        ("ATM WDL CASH PETTY", -10000.0),
+        ("NEFT CR VERTEX MANUFACTURING", 67800.0),
+        ("BANK CHARGES JAN", -590.0),
+    ]
+    row_count = 0
+    for i in range(40):
+        desc, base_amt = txn_descriptions[i % len(txn_descriptions)]
+        amount = round(base_amt * (0.85 + (i % 5) * 0.05), 2)
+        if i % 7 == 0:
+            amount = -abs(amount)
+        txn_date = _days_ago(2 + i)
+        fingerprint = hashlib.sha256(
+            f"{tenant_id}|{operating_account_id}|{txn_date}|{amount}|{desc}".encode()
+        ).hexdigest()
+        bank_import_rows_container.create_item(body={
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "user_id": accountant_user_id,
+            "batch_id": batch_id,
+            "bank_account_id": operating_account_id,
+            "source_filename": "northstar-hdfc-jan2026.csv",
+            "row_index": i,
+            "normalized_date": txn_date,
+            "description": f"{desc} #{i + 1}",
+            "amount": amount,
+            "currency": "INR",
+            "direction": "credit" if amount > 0 else "debit",
+            "confidence_score": 0.92 if i % 3 else 0.78,
+            "confidence_level": "high" if i % 3 else "medium",
+            "warnings": [],
+            "review_status": "ready" if i % 3 == 0 else "pending_review",
+            "fingerprint": fingerprint,
+            "created_at": now,
+            "updated_at": now,
+        })
+        row_count += 1
+
+    batch_doc = bank_import_batches_container.read_item(
+        item=batch_id, partition_key=tenant_id
+    )
+    batch_doc["row_count"] = row_count
+    bank_import_batches_container.replace_item(item=batch_id, body=batch_doc)
+    print(f"  Bank import rows: {row_count}")
+
+    # Direct bank transactions (deposits / withdrawals)
+    for i, (desc, amt) in enumerate(txn_descriptions):
+        bank_txns_container.create_item(body={
+            "id": str(uuid.uuid4()),
+            "user_id": accountant_user_id,
+            "tenant_id": tenant_id,
+            "bank_account_id": operating_account_id,
+            "date": _days_ago(5 + i),
+            "description": desc,
+            "amount": amt,
+            "currency": "INR",
+            "source": "manual",
+            "match_status": "matched" if i < 4 else "unmatched",
+            "created_at": now,
+            "updated_at": now,
+        })
+    print(f"  Bank transactions: {len(txn_descriptions)}")
 
     # ── Expenses ───────────────────────────────────────────────────────
-    for i, (cat, amt) in enumerate([
+    expense_categories = [
         ("Travel", 4200),
         ("Utilities", 8900),
         ("Software Subscriptions", 12500),
         ("Rent", 85000),
-    ]):
+        ("Fuel & Transport", 6800),
+        ("Office Supplies", 3200),
+        ("Insurance", 24000),
+        ("Professional Fees", 15000),
+    ]
+    for i, (cat, amt) in enumerate(expense_categories):
         expenses_container.create_item(body={
             "id": str(uuid.uuid4()),
             "tenant_id": tenant_id,
             "category": cat,
             "amount": float(amt),
-            "expense_date": _days_ago(10 + i * 7),
+            "expense_date": _days_ago(5 + i * 4),
             "payment_mode": PAYMENT_MODES[i % len(PAYMENT_MODES)],
             "vendor_name": vendors[i % len(vendors)]["name"],
             "description": f"{cat} — NorthStar operations",
@@ -504,6 +855,6 @@ def run_northstar_seed(tenant_id: str) -> None:
             "created_at": now,
             "updated_at": now,
         })
-    print("  Expenses: 4")
+    print(f"  Expenses: {len(expense_categories)}")
 
     print("\n=== NorthStar seed complete ===\n")
