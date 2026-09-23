@@ -113,7 +113,9 @@ def calculate_gst(items: list, seller_state: str, customer_state: str,
     Rules:
     - Not GST-applicable → all zeros
     - SEZ / deemed_export / export → zero-rated supply (IGST=0 but claimable refund)
-    - Composition dealer customer → no GST charged on invoice
+    - Consumer, unregistered and composition-dealer customers are taxed normally;
+      only a composition-scheme SELLER charges no GST, which callers enforce via
+      org_tax_mode.must_suppress_sales_tax()
     - Intra-state (seller_state == customer_state) → CGST + SGST
     - Inter-state → IGST
 
@@ -135,12 +137,8 @@ def calculate_gst(items: list, seller_state: str, customer_state: str,
         return zero
 
     # Zero-rated supplies
-    ZERO_RATED = {'special_economic_zone', 'deemed_export', 'export', 'consumer'}
+    ZERO_RATED = {'special_economic_zone', 'deemed_export', 'export'}
     if gst_treatment in ZERO_RATED:
-        return {**zero, 'tax_type': 'NONE'}
-
-    # Composition scheme: no GST charged on invoice
-    if gst_treatment == 'composition':
         return {**zero, 'tax_type': 'NONE'}
 
     # Determine intra vs inter state
