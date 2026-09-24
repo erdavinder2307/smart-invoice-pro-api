@@ -105,6 +105,14 @@ def _compute_item_totals(items, is_gst_applicable=True):
     return normalized, subtotal, item_tax
 
 
+def _resolve_total_tax(item_tax, manual_tax, is_gst_applicable):
+    """Line tax already holds the full GST, so the CGST/SGST/IGST split is only
+    a fallback for lines without tax. Mirrors calculateInvoiceTotals in the web client."""
+    if not is_gst_applicable:
+        return 0.0
+    return item_tax if item_tax > 0 else max(0.0, manual_tax)
+
+
 def validate_invoice_payload(data):
     errors = {}
     if not isinstance(data, dict):
@@ -409,7 +417,9 @@ def create_invoice():
             cgst_amount  = _to_number(data.get('cgst_amount', 0.0))
             sgst_amount  = _to_number(data.get('sgst_amount', 0.0))
             igst_amount  = _to_number(data.get('igst_amount', 0.0))
-            total_tax    = computed_item_tax + cgst_amount + sgst_amount + igst_amount
+            total_tax    = _resolve_total_tax(
+                computed_item_tax, cgst_amount + sgst_amount + igst_amount, True
+            )
             stored_items = normalized_items
             gst_treatment = data.get('gst_treatment', 'regular')
     else:
@@ -1100,7 +1110,7 @@ def update_invoice(invoice_id):
     sgst_amount = _to_number(merged_payload.get('sgst_amount', 0.0)) if is_gst_applicable else 0.0
     igst_amount = _to_number(merged_payload.get('igst_amount', 0.0)) if is_gst_applicable else 0.0
     manual_tax = cgst_amount + sgst_amount + igst_amount
-    computed_total_tax = computed_item_tax + (manual_tax if is_gst_applicable else 0.0)
+    computed_total_tax = _resolve_total_tax(computed_item_tax, manual_tax, is_gst_applicable)
     invoice_discount = max(0.0, _to_number(merged_payload.get('invoice_discount', 0.0)))
     round_off = _to_number(merged_payload.get('round_off', 0.0))
     computed_total = computed_subtotal + computed_total_tax - invoice_discount + round_off
