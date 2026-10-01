@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 
@@ -43,7 +44,7 @@ from smart_invoice_pro.api.admin_api import admin_blueprint
 from smart_invoice_pro.api.search_api import search_blueprint
 from smart_invoice_pro.api.me_api import me_blueprint
 from smart_invoice_pro.api.lifecycle_api import lifecycle_blueprint
-from smart_invoice_pro.api.auth_middleware import enforce_api_auth
+from smart_invoice_pro.api.auth_middleware import enforce_api_auth, get_customer_jwt_secret, get_jwt_secret
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
 
@@ -58,7 +59,18 @@ def _should_start_scheduler():
         return False
     return True
 
+def _require_auth_secrets():
+    """Stop at startup, with one clear log line, when a token-signing secret is missing."""
+    try:
+        get_jwt_secret()
+        get_customer_jwt_secret()
+    except RuntimeError as exc:
+        logging.getLogger(__name__).critical("Startup aborted: %s", exc)
+        raise
+
+
 def create_app():
+    _require_auth_secrets()
     app = Flask(__name__, template_folder="../templates")
 
     def _get_allowed_origins():

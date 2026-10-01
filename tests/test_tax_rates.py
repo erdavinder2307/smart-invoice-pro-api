@@ -253,12 +253,34 @@ class TestCalculateGst:
         assert result["tax_type"] == "NONE"
         assert result["total_tax"] == 0.0
 
-    def test_composition_zero_rated(self):
+    def test_composition_customer_is_charged_gst(self):
+        # A composition-scheme CUSTOMER is still charged GST by a regular seller.
+        # Only a composition SELLER charges none, via must_suppress_sales_tax().
         from smart_invoice_pro.api.tax_rates_api import calculate_gst
         items = [{"quantity": 1, "rate": 1000, "tax": 18}]
         result = calculate_gst(items, "Delhi", "Delhi", "composition", True)
-        assert result["tax_type"] == "NONE"
-        assert result["total_tax"] == 0.0
+        assert result["tax_type"] == "CGST_SGST"
+        assert result["cgst_amount"] == 90.0
+        assert result["sgst_amount"] == 90.0
+        assert result["total_tax"] == 180.0
+
+    def test_consumer_customer_is_charged_gst(self):
+        # B2C sales to consumers are taxable, not zero-rated.
+        from smart_invoice_pro.api.tax_rates_api import calculate_gst
+        items = [{"quantity": 1, "rate": 1000, "tax": 18}]
+        intra = calculate_gst(items, "Delhi", "Delhi", "consumer", True)
+        inter = calculate_gst(items, "Delhi", "Maharashtra", "consumer", True)
+        assert intra["tax_type"] == "CGST_SGST"
+        assert intra["total_tax"] == 180.0
+        assert inter["tax_type"] == "IGST"
+        assert inter["igst_amount"] == 180.0
+
+    def test_unregistered_customer_is_charged_gst(self):
+        from smart_invoice_pro.api.tax_rates_api import calculate_gst
+        items = [{"quantity": 1, "rate": 1000, "tax": 18}]
+        result = calculate_gst(items, "Delhi", "Maharashtra", "unregistered", True)
+        assert result["tax_type"] == "IGST"
+        assert result["total_tax"] == 180.0
 
     def test_discount_reduces_base(self):
         from smart_invoice_pro.api.tax_rates_api import calculate_gst

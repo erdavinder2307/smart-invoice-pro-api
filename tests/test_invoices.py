@@ -237,6 +237,86 @@ class TestUpdateInvoice:
         assert replaced["customer_name"] == "Acme Corp"
 
 
+class TestUpdateInvoiceGstTotals:
+    """SE-4060: the stored CGST/SGST/IGST must not be added on top of line tax."""
+
+    @staticmethod
+    def _gst_invoice(stored_invoice_a, line_tax_rate):
+        invoice = copy.deepcopy(stored_invoice_a)
+        invoice.update({
+            "is_gst_applicable": True,
+            "cgst_amount": 90.0,
+            "sgst_amount": 90.0,
+            "igst_amount": 0.0,
+            "items": [{"name": "Consulting", "quantity": 1, "rate": 1000, "discount": 0, "tax": line_tax_rate}],
+        })
+        return invoice
+
+    def _put_notes_only(self, mock_inv, client, headers_a, stored):
+        mock_inv.query_items.return_value = [stored]
+        resp = client.put("/api/invoices/inv-aaa-001", json={"notes": "edited"}, headers=headers_a)
+        assert resp.status_code == 200
+        return mock_inv.replace_item.call_args.kwargs["body"]
+
+    @patch("smart_invoice_pro.api.invoices.must_suppress_sales_tax", return_value=False)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_line_tax_not_doubled_by_stored_gst_split(self, mock_inv, _suppress, client, headers_a, stored_invoice_a):
+        saved = self._put_notes_only(mock_inv, client, headers_a, self._gst_invoice(stored_invoice_a, 18))
+        assert saved["total_tax"] == pytest.approx(180.0)
+        assert saved["total_amount"] == pytest.approx(1180.0)
+        assert saved["balance_due"] == pytest.approx(1180.0)
+
+    @patch("smart_invoice_pro.api.invoices.must_suppress_sales_tax", return_value=False)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_manual_gst_used_when_lines_carry_no_tax(self, mock_inv, _suppress, client, headers_a, stored_invoice_a):
+        saved = self._put_notes_only(mock_inv, client, headers_a, self._gst_invoice(stored_invoice_a, 0))
+        assert saved["total_tax"] == pytest.approx(180.0)
+        assert saved["total_amount"] == pytest.approx(1180.0)
+
+    @patch("smart_invoice_pro.api.invoices.must_suppress_sales_tax", return_value=False)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_no_tax_when_gst_not_applicable(self, mock_inv, _suppress, client, headers_a, stored_invoice_a):
+        stored = self._gst_invoice(stored_invoice_a, 18)
+        stored["is_gst_applicable"] = False
+        saved = self._put_notes_only(mock_inv, client, headers_a, stored)
+        assert saved["total_tax"] == pytest.approx(0.0)
+        assert saved["total_amount"] == pytest.approx(1000.0)
+
+
+class TestCreateInvoiceGstFallbackTotals:
+    """SE-4060: when server-side GST calculation fails, create falls back to the
+    client's CGST/SGST/IGST, which must not be added on top of line tax."""
+
+    @staticmethod
+    def _payload(sample_invoice, line_tax_rate):
+        payload = copy.deepcopy(sample_invoice)
+        payload.update({
+            "is_gst_applicable": True,
+            "cgst_amount": 90.0,
+            "sgst_amount": 90.0,
+            "igst_amount": 0.0,
+            "items": [{"name": "Consulting", "quantity": 1, "rate": 1000, "discount": 0, "tax": line_tax_rate}],
+        })
+        return payload
+
+    @pytest.mark.parametrize("line_tax_rate", [18, 0])
+    @patch("smart_invoice_pro.api.invoices._get_seller_state", side_effect=RuntimeError("settings unavailable"))
+    @patch("smart_invoice_pro.api.invoices.must_suppress_sales_tax", return_value=False)
+    @patch("smart_invoice_pro.api.invoices.customers_container")
+    @patch("smart_invoice_pro.api.invoices.get_container")
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_fallback_total_tax(self, mock_inv, mock_gc, mock_cust, _suppress, _seller,
+                                line_tax_rate, client, headers_a, sample_invoice):
+        mock_gc.return_value = MagicMock()
+        mock_cust.query_items.return_value = [{"id": "cust-001"}]
+        resp = client.post("/api/invoices", json=self._payload(sample_invoice, line_tax_rate), headers=headers_a)
+        assert resp.status_code == 201
+        created = mock_inv.create_item.call_args[1]["body"]
+        assert created["total_tax"] == pytest.approx(180.0)
+        assert created["total_amount"] == pytest.approx(1180.0)
+        assert created["balance_due"] == pytest.approx(1180.0)
+
+
 class TestPatchInvoice:
 
     @patch("smart_invoice_pro.api.invoices.invoices_container")

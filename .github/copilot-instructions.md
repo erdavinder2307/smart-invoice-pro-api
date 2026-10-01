@@ -114,7 +114,7 @@ TOKEN=$(python3 -c "
 import jwt, time, os
 from dotenv import load_dotenv
 load_dotenv()
-secret = os.getenv('JWT_SECRET_KEY', os.getenv('SECRET_KEY', 'your_secret_key'))
+secret = os.getenv('JWT_SECRET_KEY') or os.environ['SECRET_KEY']  # no default: the API refuses to start without it
 print(jwt.encode({
     'id': '4e39d516-2aa0-438a-94aa-f9ca8be4dfe3',
     'user_id': '4e39d516-2aa0-438a-94aa-f9ca8be4dfe3',

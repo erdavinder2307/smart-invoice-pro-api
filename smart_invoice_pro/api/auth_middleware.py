@@ -5,8 +5,24 @@ import jwt
 from flask import g, jsonify, request
 
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+
+
+def get_jwt_secret():
+    """Secret for staff login tokens: JWT_SECRET_KEY, else SECRET_KEY. There is no built-in default."""
+    secret = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY")
+    if not secret:
+        raise RuntimeError("JWT_SECRET_KEY (or SECRET_KEY) is not set; refusing to sign or verify login tokens.")
+    return secret
+
+
+def get_customer_jwt_secret():
+    """Secret for customer-portal tokens: CUSTOMER_JWT_SECRET_KEY. There is no built-in default."""
+    secret = os.getenv("CUSTOMER_JWT_SECRET_KEY")
+    if not secret:
+        raise RuntimeError("CUSTOMER_JWT_SECRET_KEY is not set; refusing to sign or verify customer portal tokens.")
+    return secret
+
 
 EXEMPT_PATHS = {
     "/api/auth/login",
@@ -55,7 +71,7 @@ def authenticate_request_context():
         return None, _unauthorized("Unauthorized")
 
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         return None, _unauthorized("Unauthorized")
     except jwt.InvalidTokenError:
@@ -131,7 +147,7 @@ def super_admin_required(f):
         if not token:
             return jsonify({"error": "Unauthorized"}), 401
         try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         except jwt.InvalidTokenError:
             return jsonify({"error": "Unauthorized"}), 401
 

@@ -19,6 +19,9 @@ import pytest
 # deterministic even when .env contains BANK_IMPORT_ASYNC=true.
 os.environ.setdefault("BANK_IMPORT_ASYNC", "false")
 os.environ.setdefault("CRON_SECRET", "test-cron-secret")
+# The app refuses to start without its token secrets; tests use their own values.
+os.environ["JWT_SECRET_KEY"] = "test-jwt-secret"
+os.environ["CUSTOMER_JWT_SECRET_KEY"] = "test-customer-jwt-secret"
 
 CRON_SECRET = os.environ["CRON_SECRET"]
 
@@ -33,8 +36,9 @@ _cosmos_client_patcher.start()
 
 from smart_invoice_pro.app import create_app
 
-# ── JWT secret must match the one in auth_middleware.py ──────────────────────
-JWT_SECRET = "your_secret_key"
+# ── JWT secrets the app reads from the environment (set above) ──────────────
+JWT_SECRET = os.environ["JWT_SECRET_KEY"]
+CUSTOMER_JWT_SECRET = os.environ["CUSTOMER_JWT_SECRET_KEY"]
 
 # ── Tenant / user identifiers ───────────────────────────────────────────────
 TENANT_A = "tenant-aaa-1111"
