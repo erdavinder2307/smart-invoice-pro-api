@@ -92,11 +92,72 @@ class TestApply:
         assert before["total_tax"] == 360.0
         assert after["total_tax"] == 180.0
 
+    def test_invoice_changed_since_read_is_refused_and_the_run_continues(self):
+        first, second = _invoice(id="inv-1"), _invoice(id="inv-2", invoice_number="INV-0002")
+        saved, logged = [], []
+
+        def save(inv):
+            if inv["id"] == "inv-1":
+                raise fix.ChangedSinceRead()
+            saved.append(inv)
+
+        out = io.StringIO()
+        counts = fix.correct(
+            ["inv-1", "inv-2"], {"inv-1": first, "inv-2": second}.get, save,
+            lambda before, after: logged.append(after["id"]), lambda tenant_id: "standard",
+            apply=True, out=out,
+        )
+        assert counts["refused"] == 1 and counts["corrected"] == 1
+        assert [inv["id"] for inv in saved] == ["inv-2"]
+        assert logged == ["inv-2"]
+        assert "inv-1 (INV-0001, Issued, tenant standard): REFUSED, changed since read" in out.getvalue()
+
+    def test_log_warning_is_printed(self):
+        out = io.StringIO()
+        fix.correct(
+            ["inv-1"], {"inv-1": _invoice()}.get, lambda inv: None,
+            lambda before, after: "no audit log entry was written", lambda tenant_id: "standard",
+            apply=True, out=out,
+        )
+        assert "inv-1 (INV-0001, Issued, tenant standard): WARNING, no audit log entry was written" in out.getvalue()
+
     def test_missing_id_is_counted_not_written(self):
         counts, saved, _, out = _run([_invoice()], apply="with-missing")
         assert counts["not_found"] == 1
         assert counts["corrected"] == 1
         assert "missing: NOT FOUND" in out
+
+
+class TestAuditLog:
+    def test_audit_entry_is_written_before_log_change_returns(self):
+        from unittest.mock import MagicMock, patch
+        from smart_invoice_pro.utils import audit_logger
+
+        container = MagicMock()
+        # A background thread that never runs: only an inline write can reach the container.
+        with patch.object(audit_logger, "audit_logs_container", container), \
+                patch.object(audit_logger.threading, "Thread") as thread:
+            warning = fix._log_change(_invoice(), {**_invoice(), "total_tax": 180.0})
+        assert warning is None
+        thread.assert_not_called()
+        container.create_item.assert_called_once()
+        doc = container.create_item.call_args.kwargs["body"]
+        assert doc["entity_id"] == "inv-1"
+        assert audit_logger._fire_and_forget_write.__name__ == "_fire_and_forget_write"
+
+    def test_failed_audit_write_is_reported(self):
+        from unittest.mock import MagicMock, patch
+        from smart_invoice_pro.utils import audit_logger
+
+        container = MagicMock()
+        container.create_item.side_effect = RuntimeError("down")
+        with patch.object(audit_logger, "audit_logs_container", container):
+            warning = fix._log_change(_invoice(), _invoice())
+        assert "audit log write failed" in warning
+
+    def test_invoice_without_tenant_is_reported(self):
+        warning = fix._log_change(_invoice(tenant_id=""), _invoice(tenant_id=""))
+        assert "no tenant_id" in warning
 
 
 class TestRefusals:

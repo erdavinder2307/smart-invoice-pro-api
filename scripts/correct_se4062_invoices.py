@@ -44,6 +44,10 @@ CHANGED_FIELDS = ('total_tax', 'total_amount', 'balance_due')
 SCRIPT_ACTOR = 'script:correct_se4062_invoices'
 
 
+class ChangedSinceRead(Exception):
+    """The invoice changed between the read and the write (etag mismatch)."""
+
+
 def plan_correction(inv):
     """
     Return (new_values, refusal). Exactly one of them is None.
@@ -77,8 +81,9 @@ def _fmt(inv, new_values):
 def correct(ids, fetch_invoice, save_invoice, log_change, tenant_kind, apply=False, out=sys.stdout):
     """
     Plan (and with apply=True, write) the correction for each id.
-    fetch_invoice(id) -> dict | None, save_invoice(inv), log_change(before, after)
-    and tenant_kind(tenant_id) -> str are injected so tests need no database.
+    fetch_invoice(id) -> dict | None, save_invoice(inv) (raises ChangedSinceRead on an etag
+    mismatch), log_change(before, after) -> None or a warning string, and
+    tenant_kind(tenant_id) -> str are injected so tests need no database.
     Returns counts per outcome.
     """
     counts = {'corrected': 0, 'would_correct': 0, 'refused': 0, 'not_found': 0}
@@ -101,10 +106,17 @@ def correct(ids, fetch_invoice, save_invoice, log_change, tenant_kind, apply=Fal
             continue
         before = dict(inv)
         after = {**inv, **new_values}
-        save_invoice(after)
-        log_change(before, after)
+        try:
+            save_invoice(after)
+        except ChangedSinceRead:
+            counts['refused'] += 1
+            print(f'{label}: REFUSED, changed since read: run the dry run again', file=out)
+            continue
+        warning = log_change(before, after)
         counts['corrected'] += 1
         print(f'{label}: CORRECTED, {_fmt(inv, new_values)}', file=out)
+        if warning:
+            print(f'{label}: WARNING, {warning}', file=out)
     return counts
 
 
@@ -123,25 +135,43 @@ def _make_fetch(container):
 
 def _make_save(container):
     from azure.core import MatchConditions
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
     def save(inv):
         # The etag from the read makes Cosmos reject the write if the invoice changed in between.
-        container.replace_item(
-            item=inv['id'], body=inv, etag=inv.get('_etag'), match_condition=MatchConditions.IfNotModified,
-        )
+        try:
+            container.replace_item(
+                item=inv['id'], body=inv, etag=inv.get('_etag'), match_condition=MatchConditions.IfNotModified,
+            )
+        except CosmosAccessConditionFailedError as exc:
+            raise ChangedSinceRead() from exc
     return save
 
 
 def _log_change(before, after):
-    from smart_invoice_pro.utils.audit_logger import log_audit
+    """Write the audit entry before returning; return a warning string when none was written."""
+    from smart_invoice_pro.utils import audit_logger
 
-    log_audit(
-        'invoice', 'update', after['id'],
-        {field: before.get(field) for field in CHANGED_FIELDS},
-        {field: after.get(field) for field in CHANGED_FIELDS},
-        user_id=SCRIPT_ACTOR, tenant_id=after.get('tenant_id'),
-        summary='SE-4062: corrected totals inflated by the SE-4060 bug',
-    )
+    if not after.get('tenant_id'):
+        return 'the invoice has no tenant_id, so no audit log entry was written'
+    # log_audit normally writes on a daemon thread, which Python kills when the script exits;
+    # write inline instead so the entry is stored before the next invoice (or exit).
+    failed_before = audit_logger.get_audit_write_stats().get('failed', 0)
+    background_write = audit_logger._fire_and_forget_write
+    audit_logger._fire_and_forget_write = audit_logger._write_audit_doc
+    try:
+        audit_logger.log_audit(
+            'invoice', 'update', after['id'],
+            {field: before.get(field) for field in CHANGED_FIELDS},
+            {field: after.get(field) for field in CHANGED_FIELDS},
+            user_id=SCRIPT_ACTOR, tenant_id=after.get('tenant_id'),
+            summary='SE-4062: corrected totals inflated by the SE-4060 bug',
+        )
+    finally:
+        audit_logger._fire_and_forget_write = background_write
+    if audit_logger.get_audit_write_stats().get('failed', 0) > failed_before:
+        return 'the audit log write failed (see the warning above); record this correction by hand'
+    return None
 
 
 def _tenant_kind(tenant_id):
