@@ -31,6 +31,7 @@ from smart_invoice_pro.api.tax_rates_api import (
 from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, COMPOSITION
 from smart_invoice_pro.utils.stock_utils import validate_stock_out
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.api.auth_middleware import get_customer_jwt_secret
 from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
 
 api_blueprint = Blueprint('api', __name__)
@@ -1422,7 +1423,7 @@ def token_required(f):
             if token.startswith('Bearer '):
                 token = token[7:]
             
-            data = jwt.decode(token, "customer_secret_key", algorithms=["HS256"])
+            data = jwt.decode(token, get_customer_jwt_secret(), algorithms=["HS256"])
             current_customer = data
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired!'}), 401

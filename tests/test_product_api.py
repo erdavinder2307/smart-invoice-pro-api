@@ -4,6 +4,7 @@ import jwt
 import datetime
 from unittest.mock import patch, MagicMock
 from smart_invoice_pro.app import create_app
+from tests.conftest import JWT_SECRET
 
 
 def _auth_headers(tenant_id="tenant-1", user_id="user-1"):
@@ -14,7 +15,7 @@ def _auth_headers(tenant_id="tenant-1", user_id="user-1"):
             "tenant_id": tenant_id,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1),
         },
-        "your_secret_key",
+        JWT_SECRET,
         algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}

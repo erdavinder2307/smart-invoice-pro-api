@@ -5,6 +5,7 @@ import jwt
 import pytest
 
 from smart_invoice_pro.app import create_app
+from tests.conftest import JWT_SECRET
 
 
 def _make_token(user_id="user-1", tenant_id="tenant-1"):
@@ -14,7 +15,7 @@ def _make_token(user_id="user-1", tenant_id="tenant-1"):
         "tenant_id": tenant_id,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1),
     }
-    return jwt.encode(payload, "your_secret_key", algorithm="HS256")
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
 @pytest.fixture

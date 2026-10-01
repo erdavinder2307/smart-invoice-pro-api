@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.api.auth_middleware import get_customer_jwt_secret
 from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
 from smart_invoice_pro.utils.cosmos_client import customers_container
 from smart_invoice_pro.utils.cosmos_client import invoices_container
@@ -1218,7 +1219,7 @@ def customer_login():
                 "name": customer['name'],
                 "exp": datetime.utcnow() + timedelta(hours=24)
             },
-            "customer_secret_key",  # Use a different secret for customer tokens
+            get_customer_jwt_secret(),
             algorithm="HS256"
         )
         
@@ -1246,7 +1247,7 @@ def token_required(f):
             if token.startswith('Bearer '):
                 token = token[7:]
             
-            data = jwt.decode(token, "customer_secret_key", algorithms=["HS256"])
+            data = jwt.decode(token, get_customer_jwt_secret(), algorithms=["HS256"])
             current_customer = data
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired!'}), 401

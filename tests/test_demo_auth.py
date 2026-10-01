@@ -7,7 +7,7 @@ from unittest.mock import patch
 import jwt
 import pytest
 
-from tests.conftest import USER_A, make_token
+from tests.conftest import JWT_SECRET, USER_A, make_token
 
 DEMO_TENANT = "d3m00000-0000-4000-8000-000000000001"
 
@@ -64,7 +64,7 @@ class TestDemoLogin:
 
 class TestRefreshTokenDemo:
     def test_refresh_preserves_is_demo(self, client):
-        jwt_secret = os.getenv("JWT_SECRET_KEY", "your_secret_key")
+        jwt_secret = JWT_SECRET
 
         with patch("smart_invoice_pro.api.routes.refresh_tokens_container") as mock_rt, \
              patch("smart_invoice_pro.api.routes.users_container") as mock_users:

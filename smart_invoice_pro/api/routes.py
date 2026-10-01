@@ -8,6 +8,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import datetime
 from smart_invoice_pro.utils.audit_logger import log_audit_event
+from smart_invoice_pro.api.auth_middleware import get_jwt_secret
 
 try:
     import user_agents as _ua_lib
@@ -124,7 +125,7 @@ def _demo_rate_limit_exceeded() -> bool:
 
 def _issue_auth_tokens(user_doc: dict):
     """Create refresh token record + JWT access token for an authenticated user."""
-    jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+    jwt_secret = get_jwt_secret()
     tenant_id = user_doc.get("tenant_id") or user_doc.get("id")
     user_id = user_doc["id"]
     is_demo = bool(user_doc.get("is_demo_user"))
@@ -370,7 +371,7 @@ def login_user():
         ))
 
     if items and check_password_hash(items[0]['password'], data['password']):
-        jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+        jwt_secret = get_jwt_secret()
         tenant_id = items[0].get('tenant_id') or items[0].get('id')
         user_id = items[0]['id']
 
@@ -619,7 +620,7 @@ def refresh_token():
         return jsonify({"error": "Refresh token expired"}), 401
 
     # Issue new access token
-    jwt_secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
+    jwt_secret = get_jwt_secret()
 
     # Fetch user to get current role/username
     user_items = list(users_container.query_items(
@@ -752,7 +753,7 @@ def delete_account():
         token = request.headers.get("Authorization", "").split(" ", 1)[-1]
         payload = jwt.decode(
             token,
-            os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key")),
+            get_jwt_secret(),
             algorithms=["HS256"],
         )
         if payload.get("is_demo"):
