@@ -264,10 +264,7 @@ class TestRefreshToken:
         assert "access_token" in data
         assert "refresh_token" in data
 
-        import jwt
-        import os
-        secret = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "your_secret_key"))
-        payload = jwt.decode(data["access_token"], secret, algorithms=["HS256"])
+        payload = jwt.decode(data["access_token"], JWT_SECRET, algorithms=["HS256"])
         assert payload["is_super_admin"] is True
 
     @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
