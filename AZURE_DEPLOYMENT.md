@@ -108,7 +108,7 @@ git push azure main
 
 ### 3. Configure App Service Settings
 
-Set environment variables in Azure:
+Set environment variables in Azure. Enable the system-assigned identity and assign it the "Communication and Email Service Owner" role on the email resource first (see Security below); with only `AZURE_EMAIL_ENDPOINT` set, every send fails with an authentication error.
 
 ```bash
 az webapp config appsettings set \
@@ -165,7 +165,7 @@ func azure functionapp publish smartinvoice-inventory-alerts
 
 ### 3. Configure Function App Settings
 
-Set environment variables for the Function App:
+Set environment variables for the Function App. Enable the system-assigned identity and assign it the "Communication and Email Service Owner" role on the email resource first (see Security below); with only `AZURE_EMAIL_ENDPOINT` set, every send fails with an authentication error.
 
 ```bash
 az functionapp config appsettings set \

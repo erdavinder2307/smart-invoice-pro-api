@@ -850,3 +850,56 @@ class TestExportInvoices:
         params = call_kwargs.get("parameters", [])
         tenant_param = next((p for p in params if p["name"] == "@tenant_id"), None)
         assert tenant_param is not None
+
+
+class TestSendInvoiceReminder:
+    """POST /invoices/<id>/send-reminder sends through the shared email helper from SENDER_EMAIL."""
+
+    _URL = "/api/invoices/inv-aaa-001/send-reminder"
+
+    @staticmethod
+    def _invoice(stored_invoice_a):
+        return dict(stored_invoice_a, customer_email="acme@example.com")
+
+    @patch("smart_invoice_pro.utils.email_client.email_configured", lambda: False)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_not_configured_returns_503(self, mock_inv, client, headers_a, stored_invoice_a):
+        mock_inv.query_items.return_value = [self._invoice(stored_invoice_a)]
+        resp = client.post(self._URL, json={}, headers=headers_a)
+        assert resp.status_code == 503
+
+    @patch("smart_invoice_pro.utils.email_client.get_email_client")
+    @patch("smart_invoice_pro.utils.email_client.email_configured", lambda: True)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_sends_from_sender_email_setting(self, mock_inv, mock_get_client, client, headers_a,
+                                             stored_invoice_a, monkeypatch):
+        monkeypatch.setenv("SENDER_EMAIL", "billing@example.com")
+        mock_inv.query_items.return_value = [self._invoice(stored_invoice_a)]
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        resp = client.post(self._URL, json={}, headers=headers_a)
+
+        assert resp.status_code == 200
+        mock_client.begin_send.assert_called_once()
+        message = mock_client.begin_send.call_args[0][0]
+        assert message["senderAddress"] == "billing@example.com"
+        assert message["recipients"]["to"] == [{"address": "acme@example.com"}]
+        assert "INV-001" in message["content"]["subject"]
+
+    @patch("smart_invoice_pro.utils.email_client.get_email_client")
+    @patch("smart_invoice_pro.utils.email_client.email_configured", lambda: True)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_default_sender_when_setting_missing(self, mock_inv, mock_get_client, client, headers_a,
+                                                 stored_invoice_a, monkeypatch):
+        monkeypatch.delenv("SENDER_EMAIL", raising=False)
+        mock_inv.query_items.return_value = [self._invoice(stored_invoice_a)]
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        resp = client.post(self._URL, json={"recipient_email": "other@example.com"}, headers=headers_a)
+
+        assert resp.status_code == 200
+        message = mock_client.begin_send.call_args[0][0]
+        assert message["senderAddress"] == "noreply@solidevelectrosoft.com"
+        assert message["recipients"]["to"] == [{"address": "other@example.com"}]

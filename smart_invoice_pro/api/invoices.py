@@ -2089,7 +2089,7 @@ def send_invoice_reminder(invoice_id):
         return jsonify({'error': 'No customer email on invoice. Pass recipient_email in body.'}), 400
 
     from smart_invoice_pro.utils.email_client import email_configured, get_email_client
-    sender   = os.getenv('ACS_SENDER_ADDRESS', 'donotreply@youremaildomain.com')
+    sender   = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
     if not email_configured():
         return jsonify({'error': 'Email service not configured on server.'}), 503
 
