@@ -1858,12 +1858,11 @@ def void_invoice(invoice_id):
 def send_invoice_email(invoice_id):
     """Send an invoice to the customer via Azure Communication Services."""
     import os
-    from azure.communication.email import EmailClient
+    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
 
-    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
     sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
 
-    if not connection_string:
+    if not email_configured():
         return jsonify({'error': 'Email service not configured on the server'}), 503
 
     data       = request.get_json() or {}
@@ -1968,7 +1967,7 @@ def send_invoice_email(invoice_id):
                 print(f"WARNING: PDF generation failed, sending without attachment: {pdf_err}")
 
         # ── Send via Azure Communication Services ─────────────────────────────
-        client = EmailClient.from_connection_string(connection_string)
+        client = get_email_client()
         poller = client.begin_send(email_message)
         result = poller.result()
 
@@ -2089,9 +2088,9 @@ def send_invoice_reminder(invoice_id):
     if not recipient_email:
         return jsonify({'error': 'No customer email on invoice. Pass recipient_email in body.'}), 400
 
-    acs_conn = os.getenv('AZURE_COMMUNICATION_CONNECTION_STRING')
+    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
     sender   = os.getenv('ACS_SENDER_ADDRESS', 'donotreply@youremaildomain.com')
-    if not acs_conn:
+    if not email_configured():
         return jsonify({'error': 'Email service not configured on server.'}), 503
 
     inv_number  = inv.get('invoice_number', '')
@@ -2112,8 +2111,7 @@ def send_invoice_reminder(invoice_id):
     )
 
     try:
-        from azure.communication.email import EmailClient
-        client = EmailClient.from_connection_string(acs_conn)
+        client = get_email_client()
         poller = client.begin_send({
             "senderAddress": sender,
             "recipients": {"to": [{"address": recipient_email}]},

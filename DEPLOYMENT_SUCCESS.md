@@ -37,7 +37,7 @@ All required environment variables have been successfully configured:
 | FUNCTIONS_WORKER_RUNTIME | python | ✅ Set |
 | FUNCTIONS_EXTENSION_VERSION | ~4 | ✅ Set |
 | AzureWebJobsStorage | (Storage Connection String) | ✅ Set |
-| AZURE_EMAIL_CONNECTION_STRING | (Email Service Connection) | ✅ Set |
+| AZURE_EMAIL_ENDPOINT | (Email Service endpoint — managed identity, no key; replaces AZURE_EMAIL_CONNECTION_STRING since Oct 2026) | ✅ Set |
 | SENDER_EMAIL | admin@solidevelectrosoft.com | ✅ Set |
 | ALERT_EMAIL | davinder@solidevelectrosoft.com | ✅ Set |
 | COSMOS_URI | https://smartinvoicepro.documents.azure.com:443/ | ✅ Set |
@@ -217,7 +217,7 @@ az functionapp restart \
    az functionapp config appsettings list \
      --name smartinvoice-inventory-alerts \
      --resource-group solidev \
-     --query "[?name=='AZURE_EMAIL_CONNECTION_STRING'].value"
+     --query "[?name=='AZURE_EMAIL_ENDPOINT'].value"
    ```
 
 2. **Check email domain verification**:

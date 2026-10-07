@@ -15,8 +15,8 @@
     "slotSetting": false
   },
   {
-    "name": "AZURE_EMAIL_CONNECTION_STRING",
-    "value": "YOUR_AZURE_EMAIL_CONNECTION_STRING",
+    "name": "AZURE_EMAIL_ENDPOINT",
+    "value": "https://YOUR_EMAIL_RESOURCE.communication.azure.com",
     "slotSetting": false
   },
   {

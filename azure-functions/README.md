@@ -24,7 +24,7 @@ This Azure Function sends automated daily email alerts for low stock inventory i
 Set these in Azure Function App Settings:
 
 ```bash
-AZURE_EMAIL_CONNECTION_STRING=endpoint=https://...;accesskey=...
+AZURE_EMAIL_ENDPOINT=https://<email-resource>.communication.azure.com   # the Function App's managed identity needs "Communication and Email Service Owner" on the resource
 SENDER_EMAIL=admin@solidevelectrosoft.com
 ALERT_EMAIL=davinder@solidevelectrosoft.com
 COSMOS_URI=https://smartinvoicepro.documents.azure.com:443/
@@ -110,7 +110,7 @@ The alert email includes:
 ## Troubleshooting
 
 ### Email not sending
-- Verify `AZURE_EMAIL_CONNECTION_STRING` is correct
+- Verify `AZURE_EMAIL_ENDPOINT` is set and the Function App's managed identity has the "Communication and Email Service Owner" role on the email resource (fallback: `AZURE_EMAIL_CONNECTION_STRING` as a Key Vault reference)
 - Check sender email domain is verified in Azure Communication Services
 - Review function logs for email sending errors
 
@@ -128,6 +128,7 @@ The alert email includes:
 
 - `azure-functions`: Azure Functions Python worker
 - `azure-communication-email`: Email sending client
+- `azure-identity`: managed identity credential, so no email key is stored anywhere
 - `azure-cosmos`: Cosmos DB Python SDK
 
 ## Cost Considerations

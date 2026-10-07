@@ -59,7 +59,7 @@ COSMOS_DB_NAME=smartinvoicedb
 COSMOS_CONTAINER_NAME=users
 
 # Azure Communication Service
-AZURE_EMAIL_CONNECTION_STRING=YOUR_AZURE_EMAIL_CONNECTION_STRING
+AZURE_EMAIL_ENDPOINT=https://<email-resource>.communication.azure.com
 SENDER_EMAIL=admin@solidevelectrosoft.com
 ALERT_EMAIL=davinder@solidevelectrosoft.com
 ```
@@ -115,7 +115,7 @@ az webapp config appsettings set \
   --name smartinvoicepro \
   --resource-group solidev \
   --settings \
-    AZURE_EMAIL_CONNECTION_STRING="<connection-string>" \
+    AZURE_EMAIL_ENDPOINT="https://<email-resource>.communication.azure.com" \
     SENDER_EMAIL="admin@solidevelectrosoft.com" \
     ALERT_EMAIL="davinder@solidevelectrosoft.com" \
     COSMOS_URI="https://smartinvoicepro.documents.azure.com:443/" \
@@ -172,7 +172,7 @@ az functionapp config appsettings set \
   --name smartinvoice-inventory-alerts \
   --resource-group solidev \
   --settings \
-    "AZURE_EMAIL_CONNECTION_STRING=<connection-string>" \
+    "AZURE_EMAIL_ENDPOINT=https://<email-resource>.communication.azure.com" \
     "SENDER_EMAIL=admin@solidevelectrosoft.com" \
     "ALERT_EMAIL=davinder@solidevelectrosoft.com" \
     "COSMOS_URI=https://smartinvoicepro.documents.azure.com:443/" \
@@ -314,11 +314,13 @@ func azure functionapp publish smartinvoice-inventory-alerts
      --resource-group solidev \
      --key-type primary
    ```
-   Then update `AZURE_EMAIL_CONNECTION_STRING` in all services.
+   Only needed where a service still uses the `AZURE_EMAIL_CONNECTION_STRING` fallback; with `AZURE_EMAIL_ENDPOINT` and managed identity there is no email key to rotate.
 
-2. **Enable Managed Identity** (Optional)
-   - Configure Function App to use Managed Identity
-   - Grant access to Cosmos DB without connection strings
+2. **Managed Identity for email** (the default since Oct 2026 — see `smart_invoice_pro/utils/email_client.py`)
+   - Turn on the system-assigned identity of the App Service and of the Function App
+   - Grant each identity the role "Communication and Email Service Owner" on the Communication Services resource
+   - Set `AZURE_EMAIL_ENDPOINT` on both; then remove `AZURE_EMAIL_CONNECTION_STRING` — the code never needs a key
+   - Cosmos DB still uses its key (separate change)
 
 3. **Restrict Network Access**
    - Configure firewall rules for Cosmos DB
@@ -354,12 +356,12 @@ func azure functionapp publish smartinvoice-inventory-alerts
 
 ### Email Not Sending
 
-1. **Test Connection String**
+1. **Test the email client** (uses AZURE_EMAIL_ENDPOINT + your `az login` identity; no key)
    ```python
-   from azure.communication.email import EmailClient
-   
-   client = EmailClient.from_connection_string(CONNECTION_STRING)
-   print("Connection successful")
+   from smart_invoice_pro.utils.email_client import get_email_client
+
+   client = get_email_client()
+   print("Email client ready" if client else "Email not configured")
    ```
 
 2. **Check Domain Verification**

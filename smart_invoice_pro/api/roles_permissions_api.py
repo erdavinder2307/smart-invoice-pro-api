@@ -550,12 +550,12 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
     import os
     import logging
 
-    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
+    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
     sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
     app_url           = os.getenv('APP_URL', 'https://app.solidevbooks.com')
 
-    if not connection_string:
-        logging.warning("invite_user: AZURE_EMAIL_CONNECTION_STRING not set — skipping invite email")
+    if not email_configured():
+        logging.warning("invite_user: email service not configured — skipping invite email")
         return
 
     try:
@@ -640,8 +640,7 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
             f"Please change your password after your first login."
         )
 
-        from azure.communication.email import EmailClient
-        client = EmailClient.from_connection_string(connection_string)
+        client = get_email_client()
         poller = client.begin_send({
             "senderAddress": sender_address,
             "recipients": {"to": [{"address": to_email, "displayName": to_name}]},

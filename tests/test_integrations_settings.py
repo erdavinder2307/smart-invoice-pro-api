@@ -206,10 +206,11 @@ class TestTestEmailEndpoint:
         """Endpoint must exist and return a non-404 response (200 or 500 depending on ACS config)."""
         with patch("smart_invoice_pro.api.integrations_settings_api.settings_container") as mock_ctr:
             mock_ctr.query_items.return_value = [STORED_DOC.copy()]
-            # Mock the Azure EmailClient used inside the handler
-            with patch("azure.communication.email.EmailClient") as mock_client_cls:
+            # Mock the shared email client helper used inside the handler (function-local import)
+            with patch("smart_invoice_pro.utils.email_client.email_configured", lambda: True), \
+                 patch("smart_invoice_pro.utils.email_client.get_email_client") as mock_client_cls:
                 mock_client = MagicMock()
-                mock_client_cls.from_connection_string.return_value = mock_client
+                mock_client_cls.return_value = mock_client
                 mock_client.begin_send.return_value = MagicMock(result=MagicMock(return_value={}))
                 resp = client.post("/api/settings/integrations/test-email",
                                    json={"to": "recipient@example.com"},
