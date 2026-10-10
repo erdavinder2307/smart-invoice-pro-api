@@ -6,6 +6,14 @@ from azure.cosmos import CosmosClient
 import os
 
 
+def _email_client(endpoint, connection_string):
+    """Managed identity (AZURE_EMAIL_ENDPOINT) first; the connection string is only a fallback."""
+    if endpoint:
+        from azure.identity import DefaultAzureCredential
+        return EmailClient(endpoint, DefaultAzureCredential())
+    return EmailClient.from_connection_string(connection_string)
+
+
 def main(mytimer: func.TimerRequest) -> None:
     """
     Azure Function Timer Trigger for Low Stock Alerts
@@ -21,6 +29,7 @@ def main(mytimer: func.TimerRequest) -> None:
 
     try:
         # Get environment variables
+        email_endpoint = (os.getenv('AZURE_EMAIL_ENDPOINT') or '').strip()
         connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
         cosmos_uri = os.getenv('COSMOS_URI')
         cosmos_key = os.getenv('COSMOS_KEY')
@@ -28,7 +37,7 @@ def main(mytimer: func.TimerRequest) -> None:
         sender_email = os.getenv('SENDER_EMAIL', 'admin@solidevelectrosoft.com')
         alert_email = os.getenv('ALERT_EMAIL', 'davinder@solidevelectrosoft.com')
 
-        if not all([connection_string, cosmos_uri, cosmos_key, cosmos_db_name]):
+        if not all([email_endpoint or connection_string, cosmos_uri, cosmos_key, cosmos_db_name]):
             logging.error('Missing required environment variables')
             return
 
@@ -58,7 +67,7 @@ def main(mytimer: func.TimerRequest) -> None:
             return
 
         # Send email alert
-        email_client = EmailClient.from_connection_string(connection_string)
+        email_client = _email_client(email_endpoint, connection_string)
 
         subject = f'Low Stock Alert - {len(low_stock_products)} Products Need Restocking'
 
