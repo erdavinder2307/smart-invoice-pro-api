@@ -1,13 +1,9 @@
-import os
 from flask import Blueprint, request, jsonify
 from flasgger import swag_from
-from azure.communication.email import EmailClient
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client
 
 contact_blueprint = Blueprint('contact', __name__)
 
-# Replace with your actual connection string or set it as an environment variable
-# export AZURE_EMAIL_CONNECTION_STRING="endpoint=https://<resource>.communication.azure.com/;accesskey=<key>"
-CONNECTION_STRING = os.getenv('AZURE_EMAIL_CONNECTION_STRING') or "endpoint=https://<resource>.communication.azure.com/;accesskey=YOUR_KEY"
 SENDER_ADDRESS = "admin@solidevelectrosoft.com"
 RECIPIENT_ADDRESS = "davinder@solidevelectrosoft.com"
 
@@ -72,11 +68,11 @@ def send_message():
     print(f"---------------------------------------------")
 
     try:
-        if not CONNECTION_STRING or "YOUR_KEY" in CONNECTION_STRING:
-             print("WARNING: Azure Connection String not configured. Email will NOT be sent.")
-             return jsonify({"message": "Message received (Email simulation only - invalid key)!"}), 200
+        if not email_configured():
+             print("WARNING: email service not configured. Email will NOT be sent.")
+             return jsonify({"message": "Message received (Email simulation only - email service not configured)!"}), 200
 
-        client = EmailClient.from_connection_string(CONNECTION_STRING)
+        client = get_email_client()
 
         email_message = {
             "senderAddress": SENDER_ADDRESS,

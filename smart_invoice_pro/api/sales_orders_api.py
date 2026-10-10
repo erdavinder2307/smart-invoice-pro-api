@@ -999,11 +999,10 @@ def get_so_pdf(so_id):
 def send_so_email(so_id):
     """Send a sales order to the customer via Azure Communication Services."""
     import os
-    from azure.communication.email import EmailClient
+    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
 
-    connection_string = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
     sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
-    if not connection_string:
+    if not email_configured():
         return jsonify({'error': 'Email service not configured on the server'}), 503
 
     data = request.get_json() or {}
@@ -1080,7 +1079,7 @@ def send_so_email(so_id):
             print(f"WARNING: SO PDF generation failed: {pdf_err}")
 
     try:
-        client = EmailClient.from_connection_string(connection_string)
+        client = get_email_client()
         poller = client.begin_send(email_message)
         result = poller.result()
 
