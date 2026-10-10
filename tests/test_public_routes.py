@@ -150,8 +150,12 @@ class TestPublicRouteHardening:
                 client.post("/api/customer/login", json={"email": "a@example.com", "password": "pw"}).status_code
                 for _ in range(6)
             ]
+            last = client.post("/api/customer/login", json={"email": "a@example.com", "password": "pw"})
         assert codes[:5] == [401] * 5
         assert codes[5] == 429
+        assert last.status_code == 429
+        assert last.is_json
+        assert last.get_json()["message"] == "Too many requests. Please try again later."
 
     def test_customer_without_password_gets_the_same_answer(self, client):
         with patch("smart_invoice_pro.api.customers_api.customers_container") as container:
@@ -167,8 +171,10 @@ class TestPublicRouteHardening:
     @patch("smart_invoice_pro.api.contact_api.CONNECTION_STRING", None)
     def test_contact_is_rate_limited(self, client):
         payload = {"name": "A", "email": "a@example.com", "subject": "Hi", "message": "Hello"}
-        codes = [client.post("/api/contact", json=payload).status_code for _ in range(4)]
-        assert codes == [200, 200, 200, 429]
+        resps = [client.post("/api/contact", json=payload) for _ in range(4)]
+        assert [r.status_code for r in resps] == [200, 200, 200, 429]
+        assert resps[3].is_json
+        assert resps[3].get_json()["message"] == "Too many requests. Please try again later."
 
     def test_contact_rejects_non_object_json(self, client):
         resp = client.post("/api/contact", json=["not", "an", "object"])
