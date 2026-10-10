@@ -152,14 +152,80 @@ class TestRegister:
         mock_users.create_item.assert_called_once()
 
     @patch("smart_invoice_pro.api.routes.users_container")
-    def test_register_second_user_gets_sales_role(self, mock_users, client):
-        mock_users.query_items.return_value = [5]  # >=1 user → Sales role
+    def test_register_later_sign_up_is_admin_of_own_tenant(self, mock_users, client):
+        # SE-4196: other users in the database no longer make a new sign-up "Sales"
+        mock_users.query_items.return_value = [5]
         resp = client.post(
             "/api/auth/register",
-            json={"username": "sales1", "password": "secret123"},
+            json={"username": "owner2", "password": "secret123"},
         )
         assert resp.status_code == 201
-        assert resp.get_json()["user"]["role"] == "Sales"
+        assert resp.get_json()["user"]["role"] == "Admin"
+
+    @patch("smart_invoice_pro.utils.tenant_service.ensure_tenant_exists")
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_register_ignores_tenant_id_in_body(self, mock_users, mock_ensure, client):
+        mock_users.query_items.return_value = [5]
+        resp = client.post(
+            "/api/auth/register",
+            json={"username": "intruder", "password": "secret123", "tenant_id": TENANT_A},
+        )
+        assert resp.status_code == 201
+        new_tenant = resp.get_json()["user"]["tenant_id"]
+        assert new_tenant and new_tenant != TENANT_A
+        saved = mock_users.create_item.call_args.kwargs["body"]
+        assert saved["tenant_id"] == new_tenant
+        # the new tenant is created with the new user as its owner
+        assert mock_ensure.call_args.args[0] == new_tenant
+        assert mock_ensure.call_args.kwargs["owner_user_id"] == saved["id"]
+
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_register_ignores_role_in_body(self, mock_users, client):
+        mock_users.query_items.return_value = [5]
+        resp = client.post(
+            "/api/auth/register",
+            json={"username": "u1", "password": "secret123",
+                  "tenant_id": TENANT_A, "role": "Sales"},
+        )
+        assert resp.status_code == 201
+        user = resp.get_json()["user"]
+        assert user["tenant_id"] != TENANT_A
+        assert user["role"] == "Admin"
+        assert mock_users.create_item.call_args.kwargs["body"]["role"] == "Admin"
+
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_two_sign_ups_get_separate_tenants(self, mock_users, client):
+        mock_users.query_items.return_value = [5]
+        t1 = client.post("/api/auth/register",
+                         json={"username": "a", "password": "secret123"}).get_json()["user"]["tenant_id"]
+        t2 = client.post("/api/auth/register",
+                         json={"username": "b", "password": "secret123"}).get_json()["user"]["tenant_id"]
+        assert t1 != t2
+
+    @patch("smart_invoice_pro.api.organization_profile_api.settings_container")
+    @patch("smart_invoice_pro.api.roles_api.users_container")
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_new_sign_up_can_save_gstin(self, mock_users, mock_role_users, mock_settings, client):
+        # SE-4196: the creator of a tenant is its Admin, so Settings accepts their GSTIN
+        mock_users.query_items.return_value = [5]
+        resp = client.post("/api/auth/register",
+                           json={"username": "owner@example.com", "password": "secret123"})
+        saved = mock_users.create_item.call_args.kwargs["body"]
+        mock_role_users.query_items.return_value = [saved]
+        mock_settings.read_item.return_value = {"id": f"{saved['tenant_id']}:organization_profile"}
+        mock_settings.upsert_item.return_value = {}
+
+        resp = client.put(
+            "/api/settings/organization-profile",
+            json={"organization_name": "Owner Co", "country": "India",
+                  "gst_registration_type": "regular", "gstin": "22AAAAA0000A1Z5"},
+            headers=auth_headers(user_id=saved["id"], tenant_id=saved["tenant_id"]),
+        )
+        assert resp.status_code == 200
+        stored = mock_settings.upsert_item.call_args.args[0] if mock_settings.upsert_item.call_args.args \
+            else mock_settings.upsert_item.call_args.kwargs["body"]
+        assert stored["gstin"] == "22AAAAA0000A1Z5"
+        assert stored["tenant_id"] == saved["tenant_id"]
 
     def test_register_non_json_body_returns_400(self, client):
         resp = client.post(

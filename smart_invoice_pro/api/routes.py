@@ -250,14 +250,10 @@ def register_user():
         return data  # Return error response if JSON is invalid
 
     hashed_password = generate_password_hash(data['password'],method='pbkdf2:sha256', salt_length=16)
-    tenant_id = data.get('tenant_id') or str(uuid.uuid4())
-
-    # First registered user gets Admin role; everyone else defaults to 'Sales'
-    existing_users = list(users_container.query_items(
-        query='SELECT VALUE COUNT(1) FROM c',
-        enable_cross_partition_query=True
-    ))
-    default_role = 'Admin' if (not existing_users or existing_users[0] == 0) else 'Sales'
+    # Self sign-up always creates a new tenant owned by this user, so tenant_id and
+    # role in the body are ignored. Joining an existing tenant goes through an
+    # Admin's invite (POST /api/settings/users), which takes the tenant from the token.
+    tenant_id = str(uuid.uuid4())
 
     user_id = str(uuid.uuid4())
     username = data['username'].strip()
@@ -270,7 +266,7 @@ def register_user():
         'email': email,
         'name': (data.get('name') or username).strip(),
         'password': hashed_password,
-        'role': data.get('role', default_role),
+        'role': 'Admin',
         'is_active': True,
         'created_at': datetime.datetime.utcnow().isoformat()
     }
