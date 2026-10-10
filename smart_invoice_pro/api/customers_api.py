@@ -1186,8 +1186,8 @@ def merge_customer(source_id, target_id):
     }
 })
 def customer_login():
-    data = request.get_json()
-    if not data:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data:
         return jsonify({'error': 'Request must be JSON'}), 400
     
     email = data.get('email')
@@ -1209,8 +1209,9 @@ def customer_login():
     customer = items[0]
     
     # Check if customer has a password field (for existing customers without auth)
+    # Same answer as an unknown email, so the public route does not reveal which emails are customers.
     if 'password' not in customer:
-        return jsonify({'message': 'Account not set up for login. Please contact administrator.'}), 401
+        return jsonify({'message': 'Invalid email or password.'}), 401
     
     # Verify password
     if check_password_hash(customer['password'], password):

@@ -224,6 +224,13 @@ def create_app():
     app.register_blueprint(me_blueprint, url_prefix="/api")
     app.register_blueprint(lifecycle_blueprint, url_prefix="/api")
 
+    # Public (no staff token) endpoints get their own per-client limits. limiter.limit() returns a
+    # wrapper, so the wrapped view must replace the registered one for the limit to take effect.
+    from smart_invoice_pro.api.routes import _get_client_ip
+    for endpoint, rule in (("customers.customer_login", "5 per minute"),
+                           ("contact.send_message", "3 per minute;20 per hour")):
+        app.view_functions[endpoint] = limiter.limit(rule, key_func=_get_client_ip)(app.view_functions[endpoint])
+
     # Start the background scheduler for recurring invoices outside test runs.
     if _should_start_scheduler():
         try:
