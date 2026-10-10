@@ -1197,8 +1197,11 @@ def customer_login():
         return jsonify({'error': 'Email and password are required'}), 400
     
     # Query customer by email
-    query = f"SELECT * FROM c WHERE c.email = '{email}'"
-    items = list(customers_container.query_items(query=query, enable_cross_partition_query=True))
+    items = list(customers_container.query_items(
+        query="SELECT * FROM c WHERE c.email = @email",
+        parameters=[{"name": "@email", "value": email}],
+        enable_cross_partition_query=True,
+    ))
     
     if not items:
         return jsonify({'message': 'Invalid email or password.'}), 401

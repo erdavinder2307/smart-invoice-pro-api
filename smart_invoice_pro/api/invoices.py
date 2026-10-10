@@ -1559,8 +1559,9 @@ def get_invoice_by_portal_token(token):
             'branding':          portal_branding,
         }
         return jsonify(safe), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        # Public route: never return internal error details.
+        return jsonify({'error': 'Could not load the invoice'}), 500
 
 
 # ── Generate / regenerate a portal token for an existing invoice ─────────────
