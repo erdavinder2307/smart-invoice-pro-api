@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 
-from flask import Flask, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flasgger import Swagger
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -223,6 +223,18 @@ def create_app():
     app.register_blueprint(search_blueprint, url_prefix="/api")
     app.register_blueprint(me_blueprint, url_prefix="/api")
     app.register_blueprint(lifecycle_blueprint, url_prefix="/api")
+
+    # Public (no staff token) endpoints get their own per-client limits. limiter.limit() returns a
+    # wrapper, so the wrapped view must replace the registered one for the limit to take effect.
+    from smart_invoice_pro.api.routes import _get_client_ip
+    for endpoint, rule in (("customers.customer_login", "5 per minute"),
+                           ("contact.send_message", "3 per minute;20 per hour")):
+        app.view_functions[endpoint] = limiter.limit(rule, key_func=_get_client_ip)(app.view_functions[endpoint])
+
+    # Flask-Limiter answers with an HTML page by default; keep 429s JSON like the API's other errors.
+    @app.errorhandler(429)
+    def _rate_limited(_error):
+        return jsonify({"message": "Too many requests. Please try again later."}), 429
 
     # Start the background scheduler for recurring invoices outside test runs.
     if _should_start_scheduler():

@@ -1,3 +1,4 @@
+import html
 import os
 from flask import Blueprint, request, jsonify
 from flasgger import swag_from
@@ -10,6 +11,9 @@ contact_blueprint = Blueprint('contact', __name__)
 CONNECTION_STRING = os.getenv('AZURE_EMAIL_CONNECTION_STRING') or "endpoint=https://<resource>.communication.azure.com/;accesskey=YOUR_KEY"
 SENDER_ADDRESS = "admin@solidevelectrosoft.com"
 RECIPIENT_ADDRESS = "davinder@solidevelectrosoft.com"
+
+# The route is public, so cap what a stranger can send.
+MAX_LENGTHS = {'name': 200, 'email': 320, 'phone': 50, 'subject': 200, 'message': 5000}
 
 @contact_blueprint.route('/contact', methods=['POST'])
 @swag_from({
@@ -49,27 +53,28 @@ def send_message():
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
     
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request must be a JSON object"}), 400
     
     # Validation
     required_fields = ['name', 'email', 'subject', 'message']
     for field in required_fields:
         if field not in data or not data[field]:
              return jsonify({"error": f"Field '{field}' is required"}), 400
+    for field, max_len in MAX_LENGTHS.items():
+        value = data.get(field)
+        if value is not None and (not isinstance(value, str) or len(value) > max_len):
+            return jsonify({"error": f"Field '{field}' must be text of at most {max_len} characters"}), 400
 
     name = data['name']
     email = data['email']
-    phone = data.get('phone', 'N/A')
-    subject = data['subject']
+    phone = data.get('phone') or 'N/A'
+    # No line breaks in the subject line of the email.
+    subject = ' '.join(data['subject'].splitlines())
     message_content = data['message']
 
-    print(f"------------ NEW CONTACT MESSAGE ------------")
-    print(f"Name: {name}")
-    print(f"Email: {email}")
-    print(f"Phone: {phone}")
-    print(f"Subject: {subject}")
-    print(f"Message: {message_content}")
-    print(f"---------------------------------------------")
+    print("New contact message received")
 
     try:
         if not CONNECTION_STRING or "YOUR_KEY" in CONNECTION_STRING:
@@ -78,6 +83,8 @@ def send_message():
 
         client = EmailClient.from_connection_string(CONNECTION_STRING)
 
+        safe = {k: html.escape(v) for k, v in
+                {'name': name, 'email': email, 'phone': phone, 'message': message_content}.items()}
         email_message = {
             "senderAddress": SENDER_ADDRESS,
             "recipients": {
@@ -90,12 +97,12 @@ def send_message():
                 <html>
                     <body>
                         <h1>New Contact Request</h1>
-                        <p><strong>Name:</strong> {name}</p>
-                        <p><strong>Email:</strong> {email}</p>
-                        <p><strong>Phone:</strong> {phone}</p>
+                        <p><strong>Name:</strong> {safe['name']}</p>
+                        <p><strong>Email:</strong> {safe['email']}</p>
+                        <p><strong>Phone:</strong> {safe['phone']}</p>
                         <br>
                         <h2>Message:</h2>
-                        <p>{message_content}</p>
+                        <p>{safe['message']}</p>
                     </body>
                 </html>
                 """
@@ -109,9 +116,5 @@ def send_message():
         return jsonify({"message": "Message sent successfully!"}), 200
 
     except Exception as e:
-        print(f"Error sending email: {str(e)}")
-        # We might still want to return 200 to the frontend if we logged it, 
-        # or 500 if we want to bubble up the error. 
-        # For a contact form, it's often better to fail gracefully if the DB/Log worked (which we did above) 
-        # but here we rely solely on email so let's return error if email fails.
-        return jsonify({"error": f"Failed to send email: {str(e)}"}), 500
+        print(f"Error sending contact email: {type(e).__name__}")
+        return jsonify({"error": "Failed to send your message. Please try again later."}), 500
