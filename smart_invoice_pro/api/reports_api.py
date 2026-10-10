@@ -11,6 +11,11 @@ from collections import defaultdict
 
 reports_blueprint = Blueprint('reports', __name__)
 
+# Invoices that count as sales and output tax: everything issued and not cancelled.
+# Draft and Cancelled stay out. ("Pending" is not an invoice status.)
+REPORTED_INVOICE_STATUSES = ('Issued', 'Overdue', 'Partially Paid', 'Paid')
+_REPORTED_STATUS_SQL = ', '.join(f"'{s}'" for s in REPORTED_INVOICE_STATUSES)
+
 
 def parse_date(date_str):
     """Parse date string to datetime object"""
@@ -712,7 +717,7 @@ def get_sales_summary():
             WHERE c.tenant_id = '{tenant_id}'
             AND c.issue_date >= '{start_date.strftime('%Y-%m-%d')}'
             AND c.issue_date <= '{end_date.strftime('%Y-%m-%d')}'
-            AND c.status IN ('Paid', 'Partially Paid', 'Pending')
+            AND c.status IN ({_REPORTED_STATUS_SQL})
         """
         invoices = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
 
@@ -793,7 +798,7 @@ def get_gst_tax_summary():
             WHERE c.tenant_id = '{tenant_id}'
             AND c.issue_date >= '{start_date.strftime('%Y-%m-%d')}'
             AND c.issue_date <= '{end_date.strftime('%Y-%m-%d')}'
-            AND c.status IN ('Paid', 'Partially Paid', 'Pending')
+            AND c.status IN ({_REPORTED_STATUS_SQL})
         """
         invoices = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
 
