@@ -99,6 +99,14 @@ def _is_accountant(user: dict) -> bool:
     return (user.get("role") or "").strip().lower() == ACCOUNTANT_ROLE
 
 
+def role_change_takes_seat(old_role: str | None, new_role: str | None) -> bool:
+    """True when an active user moving from ``old_role`` to ``new_role`` may need a seat it did not use:
+    an accountant (possibly the free seat) becoming any other role."""
+    def is_acc(role):
+        return (role or "").strip().lower() == ACCOUNTANT_ROLE
+    return is_acc(old_role) and not is_acc(new_role)
+
+
 def check_seat_available(tenant_id: str, active_users: list[dict], new_role: str | None):
     """None when one more active user with ``new_role`` fits the plan, else a 402 response.
 

@@ -1,6 +1,7 @@
 """
 Tests for plan limits (utils/entitlements.py) and the seat check on
-POST /api/settings/users and the reactivation branch of PUT /api/settings/users/<id>.
+POST /api/settings/users, the reactivation and role branches of PUT /api/settings/users/<id>,
+and PUT /api/users/<id>/role.
 """
 from unittest.mock import patch
 
@@ -164,6 +165,62 @@ class TestReactivationSeatLimit:
         active = dict(self.INACTIVE, is_active=True)
         resp, _ = self._put(client, headers_a, _tenant("starter"), _users(5),
                             active, {"is_active": False})
+        assert resp.status_code == 200
+
+
+class TestRoleChangeSeatLimit:
+    """An active accountant uses the free seat; moving them to another role must fit the plan."""
+    ACCOUNTANT = {"id": "u-acc", "username": "acc", "role": "Accountant", "tenant_id": TENANT_A, "is_active": True}
+
+    def _settings_put(self, client, headers, active_users, target, body):
+        return TestReactivationSeatLimit._put(self, client, headers, _tenant("starter"),
+                                              active_users, target, body)
+
+    def _role_put(self, client, headers, active_users, target, role):
+        with patch("smart_invoice_pro.api.roles_api._get_role", return_value="Admin"), \
+                patch("smart_invoice_pro.api.roles_api._fetch_user", return_value=dict(target)), \
+                patch("smart_invoice_pro.api.roles_api.users_container") as mock_users, \
+                patch("smart_invoice_pro.utils.entitlements.get_tenant_by_id", return_value=_tenant("starter")), \
+                patch("smart_invoice_pro.api.roles_permissions_api._active_account_users",
+                      return_value=active_users):
+            resp = client.put(f"/api/users/{target['id']}/role", json={"role": role}, headers=headers)
+            return resp, mock_users
+
+    def test_settings_accountant_to_sales_at_limit_returns_402(self, client, headers_a):
+        resp, mock_users = self._settings_put(client, headers_a, _users(3), self.ACCOUNTANT, {"role": "Sales"})
+        assert resp.status_code == 402
+        assert resp.get_json()["code"] == "seat_limit"
+        mock_users.upsert_item.assert_not_called()
+
+    def test_settings_accountant_to_sales_under_limit_ok(self, client, headers_a):
+        resp, mock_users = self._settings_put(client, headers_a, _users(2), self.ACCOUNTANT, {"role": "Sales"})
+        assert resp.status_code == 200
+        mock_users.upsert_item.assert_called_once()
+
+    def test_settings_inactive_accountant_role_change_not_checked(self, client, headers_a):
+        inactive = dict(self.ACCOUNTANT, is_active=False)
+        resp, _ = self._settings_put(client, headers_a, _users(3), inactive, {"role": "Sales"})
+        assert resp.status_code == 200
+
+    def test_settings_sales_to_admin_not_checked(self, client, headers_a):
+        sales = dict(self.ACCOUNTANT, role="Sales")
+        resp, _ = self._settings_put(client, headers_a, _users(5), sales, {"role": "Admin"})
+        assert resp.status_code == 200
+
+    def test_role_endpoint_accountant_to_sales_at_limit_returns_402(self, client, headers_a):
+        resp, mock_users = self._role_put(client, headers_a, _users(3), self.ACCOUNTANT, "Sales")
+        assert resp.status_code == 402
+        assert resp.get_json()["code"] == "seat_limit"
+        mock_users.upsert_item.assert_not_called()
+
+    def test_role_endpoint_accountant_to_sales_under_limit_ok(self, client, headers_a):
+        resp, mock_users = self._role_put(client, headers_a, _users(2), self.ACCOUNTANT, "Sales")
+        assert resp.status_code == 200
+        mock_users.upsert_item.assert_called_once()
+
+    def test_role_endpoint_sales_to_accountant_not_checked(self, client, headers_a):
+        sales = dict(self.ACCOUNTANT, role="Sales")
+        resp, _ = self._role_put(client, headers_a, _users(5), sales, "Accountant")
         assert resp.status_code == 200
 
 

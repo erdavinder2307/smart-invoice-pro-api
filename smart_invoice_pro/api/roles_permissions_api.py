@@ -53,7 +53,7 @@ from smart_invoice_pro.utils.cosmos_client import users_container, get_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
 from smart_invoice_pro.utils.audit_logger import log_audit
-from smart_invoice_pro.utils.entitlements import check_seat_available
+from smart_invoice_pro.utils.entitlements import check_seat_available, role_change_takes_seat
 import copy
 
 roles_permissions_blueprint = Blueprint('roles_permissions', __name__)
@@ -803,6 +803,7 @@ def update_settings_user(target_user_id):
             user['email'] = (data['email'] or '').strip().lower()
 
         # Role update
+        old_role = user.get('role')
         role_id = data.get('role_id')
         role_name = data.get('role')
         if role_id:
@@ -815,6 +816,17 @@ def update_settings_user(target_user_id):
             role_doc = _get_role_by_name(role_name.strip(), request.tenant_id)
             user['role'] = role_name.strip()
             user['role_id'] = role_doc['id'] if role_doc else user.get('role_id')
+
+        # An active accountant (free seat) moving to another role must fit the plan.
+        stays_active = user.get('is_active', True) is not False and data.get('is_active', True) is not False
+        if stays_active and role_change_takes_seat(old_role, user.get('role')):
+            seat_error = check_seat_available(
+                request.tenant_id,
+                _active_account_users(request.tenant_id, exclude_user_id=target_user_id),
+                user.get('role'),
+            )
+            if seat_error:
+                return seat_error
 
         if 'is_active' in data:
             # Prevent deactivating the last Admin

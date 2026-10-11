@@ -142,6 +142,17 @@ def update_user_role(target_user_id):
             return jsonify({'error': 'Cannot remove the last Admin user'}), 400
 
     old_role = user.get('role')
+    if user.get('is_active', True) is not False:
+        from smart_invoice_pro.utils.entitlements import check_seat_available, role_change_takes_seat
+        if role_change_takes_seat(old_role, new_role):
+            # Imported here: roles_permissions_api imports require_role from this module.
+            from smart_invoice_pro.api.roles_permissions_api import _active_account_users
+            tenant_id = getattr(request, 'tenant_id', None)
+            seat_error = check_seat_available(
+                tenant_id, _active_account_users(tenant_id, exclude_user_id=target_user_id), new_role)
+            if seat_error:
+                return seat_error
+
     user['role'] = new_role
     user['updated_at'] = datetime.utcnow().isoformat()
     users_container.upsert_item(body=user)
