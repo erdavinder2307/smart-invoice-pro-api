@@ -454,3 +454,100 @@ def generate_invoice_pdf():
         f"attachment; filename=invoice_{invoice.get('invoice_number', 'document')}.pdf"
     )
     return response
+
+
+def build_tax_invoice_pdf(invoice: dict) -> bytes:
+    """
+    PDF bytes for a Solidev Books subscription tax invoice (utils/tax_invoices.py document).
+    Amounts are printed as "Rs." because the built-in PDF fonts have no rupee glyph.
+    """
+    from xml.sax.saxutils import escape
+
+    seller = invoice.get('seller') or {}
+    buyer = invoice.get('buyer') or {}
+    place = invoice.get('place_of_supply') or {}
+    intra = invoice.get('supply_type') == 'intra-state'
+
+    def money(value):
+        return f"Rs. {float(value or 0):,.2f}"
+
+    def lines(*parts):
+        return '<br/>'.join(escape(str(p)) for p in parts if p)
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=40, rightMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle('TaxTitle', parent=styles['Normal'], fontSize=16, alignment=2, leading=20)
+    small = ParagraphStyle('TaxSmall', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.grey)
+    company = ParagraphStyle('TaxCompany', parent=styles['Normal'], fontSize=13, leading=16)
+
+    story = []
+    header = Table([[
+        Paragraph(f"<b>{escape(seller.get('legal_name', ''))}</b>", company),
+        Paragraph('<b>TAX INVOICE</b>', title),
+    ]], colWidths=[doc.width * 0.6, doc.width * 0.4])
+    header.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+    story.extend([header, Spacer(1, 10)])
+
+    seller_block = lines(*seller.get('address_lines', []),
+                         f"GSTIN: {seller.get('gstin', '')}",
+                         f"State: {seller.get('state', '')} ({seller.get('state_code', '')})",
+                         f"CIN: {seller.get('cin', '')}",
+                         seller.get('email'))
+    details_block = lines(f"Invoice No: {invoice.get('number', '')}",
+                          f"Invoice Date: {invoice.get('issue_date', '')}",
+                          f"Place of Supply: {place.get('state', '')} ({place.get('state_code', '')})",
+                          'Whether tax is payable under reverse charge: No',
+                          f"Payment Ref: {invoice.get('payment_ref', '')}")
+    buyer_block = lines(buyer.get('name', ''), *buyer.get('address_lines', []),
+                        f"GSTIN: {buyer['gstin']}" if buyer.get('gstin') else 'GSTIN: Unregistered',
+                        f"State: {buyer.get('state', '')} ({buyer.get('state_code', '')})" if buyer.get('state') else '')
+    parties = Table([
+        [Paragraph(f'<b>From</b><br/>{seller_block}', styles['Normal']),
+         Paragraph(f'<b>Invoice</b><br/>{details_block}', styles['Normal'])],
+        [Paragraph(f'<b>Bill To</b><br/>{buyer_block}', styles['Normal']), ''],
+    ], colWidths=[doc.width * 0.5, doc.width * 0.5])
+    parties.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BOTTOMPADDING', (0, 0), (-1, -1), 10)]))
+    story.extend([parties, Spacer(1, 10)])
+
+    cell = ParagraphStyle('TaxCell', parent=styles['Normal'], fontSize=9, leading=11)
+    rows = [['#', 'Description', 'SAC', 'Qty', 'Taxable value'],
+            ['1', Paragraph(escape(invoice.get('description', '')), cell), invoice.get('sac', ''), '1',
+             money(invoice.get('taxable_value'))]]
+    items = Table(rows, colWidths=[doc.width * w for w in (0.05, 0.52, 0.12, 0.08, 0.23)])
+    items.setStyle(TableStyle([
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f0f4fa')),
+        ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+    ]))
+    story.extend([items, Spacer(1, 8)])
+
+    tax_rows = [['Taxable value', money(invoice.get('taxable_value'))]]
+    if intra:
+        tax_rows += [[f"CGST @ {invoice.get('cgst_rate', 9)}%", money(invoice.get('cgst'))],
+                     [f"SGST @ {invoice.get('sgst_rate', 9)}%", money(invoice.get('sgst'))]]
+    else:
+        tax_rows += [[f"IGST @ {invoice.get('igst_rate', 18)}%", money(invoice.get('igst'))]]
+    tax_rows += [['Total tax', money(invoice.get('total_tax'))], ['Total (paid)', money(invoice.get('total'))]]
+    totals = Table(tax_rows, colWidths=[doc.width * 0.25, doc.width * 0.2], hAlign='RIGHT')
+    totals.setStyle(TableStyle([
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('LINEABOVE', (0, -1), (-1, -1), 0.8, colors.black),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+    ]))
+    story.extend([totals, Spacer(1, 8),
+                  Paragraph(f"<b>Amount in words:</b> {escape(invoice.get('amount_in_words', ''))}", styles['Normal']),
+                  Spacer(1, 18)])
+
+    story.append(Paragraph(
+        'The amount charged includes GST at 18%. Taxable value = total / 1.18, rounded to the paisa; '
+        'tax = total - taxable value' + ('; CGST and SGST are half each, any odd paisa in SGST.' if intra else '.'),
+        small))
+    story.append(Paragraph('Computer generated invoice; no signature required.', small))
+    story.append(Paragraph(escape(f"{seller.get('legal_name', '')} · CIN {seller.get('cin', '')} · "
+                                  f"GSTIN {seller.get('gstin', '')}"), small))
+
+    doc.build(story)
+    return buffer.getvalue()

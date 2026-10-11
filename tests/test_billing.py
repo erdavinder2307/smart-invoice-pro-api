@@ -22,6 +22,11 @@ BILLING_ENV = {
     "RAZORPAY_PLAN_STARTER_MONTHLY": "plan_starter_m",
     "RAZORPAY_PLAN_STARTER_YEARLY": "plan_starter_y",
     "RAZORPAY_PLAN_GROWTH_MONTHLY": "plan_growth_m",
+    "SELLER_LEGAL_NAME": "Example Seller Private Limited",
+    "SELLER_CIN": "U00000PB2000PTC000000",
+    "SELLER_GSTIN": "03AAAAA0000A1Z5",
+    "SELLER_ADDRESS_LINES": "1 Test Street|Mohali, Punjab 140000",
+    "BILLING_SAC_CODE": "997331",
 }
 PERIOD_END = 1793836800  # 2026-11-05T00:00:00 UTC
 
@@ -75,6 +80,10 @@ class TestPlans:
 
     def test_checkout_is_on_with_config(self, client, mocks, billing_env):
         assert client.get("/api/billing/plans").get_json()["checkout_enabled"] is True
+
+    def test_checkout_stays_off_without_tax_invoice_details(self, client, mocks, billing_env, monkeypatch):
+        monkeypatch.delenv("SELLER_GSTIN")
+        assert client.get("/api/billing/plans").get_json()["checkout_enabled"] is False
 
 
 # ── Start a subscription ──────────────────────────────────────────────────────
