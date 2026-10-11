@@ -132,7 +132,8 @@ def enforce_api_auth():
     if error_response:
         return error_response
 
-    return None
+    from smart_invoice_pro.utils.entitlements import enforce_account_writes
+    return enforce_account_writes()
 
 
 def super_admin_required(f):

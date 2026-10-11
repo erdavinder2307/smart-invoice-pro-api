@@ -8,13 +8,19 @@ At a limit the API answers HTTP 402 with one error shape the app can show:
     {"error": "plan_limit", "code": "seat_limit" | "feature",
      "message": "...", "upgrade_url": "/settings/billing"}
 
+After a trial ends (no active payment), or 7 days after a failed payment's
+period end, every write answers 402 with code "trial_ended" or
+"payment_failed"; reads keep working and nothing is deleted.
+
 DEMO and INTERNAL tenants and super-admins are never limited. A tenant with no
-tenant document (older sign-ups) is not limited either; that is logged.
+tenant document (older sign-ups), or a trial with no trial_ends_at yet, is not
+limited either; that is logged.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import g, jsonify, request
@@ -50,6 +56,13 @@ PLAN_ALIASES = {"pro": "growth", "enterprise": "growth"}
 EXEMPT_TENANT_TYPES = frozenset({"DEMO", "INTERNAL"})
 ACCOUNTANT_ROLE = "accountant"
 
+PAYMENT_GRACE = timedelta(days=7)
+FAILED_BILLING_STATUSES = frozenset({"halted", "cancelled"})
+READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Writes a locked tenant can still make (login and refresh never reach the check).
+LOCKED_WRITE_PATHS = frozenset({"/api/auth/logout"})
+LOCKED_WRITE_PREFIXES = ("/api/billing/",)
+
 
 def resolve_plan(plan: str | None) -> str:
     """Plan key in PLANS for a stored plan name; unknown names fall back to trial."""
@@ -74,25 +87,91 @@ def _request_is_exempt() -> bool:
     return request_is_demo_mode()
 
 
-def get_tenant_entitlements(tenant_id: str) -> dict | None:
-    """The tenant's plan and limits, read once per request. None means not limited."""
-    cache = getattr(g, "_entitlements", None)
+def _limited_tenant(tenant_id: str) -> dict | None:
+    """The tenant document, read once per request. None when it is missing or exempt."""
+    cache = getattr(g, "_limited_tenants", None)
     if cache is None:
-        cache = g._entitlements = {}
+        cache = g._limited_tenants = {}
     if tenant_id in cache:
         return cache[tenant_id]
 
     tenant = get_tenant_by_id(tenant_id)
     if not tenant:
         logger.warning("entitlements: no tenant document for %s; plan limits not applied", tenant_id)
-        result = None
+        tenant = None
     elif (tenant.get("tenant_type") or "").upper() in EXEMPT_TENANT_TYPES:
-        result = None
-    else:
-        plan = resolve_plan(tenant.get("plan"))
-        result = {"plan": plan, **PLANS[plan]}
-    cache[tenant_id] = result
-    return result
+        tenant = None
+    cache[tenant_id] = tenant
+    return tenant
+
+
+def get_tenant_entitlements(tenant_id: str) -> dict | None:
+    """The tenant's plan and limits. None means not limited."""
+    tenant = _limited_tenant(tenant_id)
+    if tenant is None:
+        return None
+    plan = resolve_plan(tenant.get("plan"))
+    return {"plan": plan, **PLANS[plan]}
+
+
+def _parse_utc(value) -> datetime | None:
+    """Naive UTC datetime from a stored ISO timestamp (with or without an offset), else None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def account_lock_code(tenant: dict, now: datetime) -> str | None:
+    """"trial_ended" or "payment_failed" when the tenant may no longer write at ``now`` (naive UTC), else None."""
+    billing = tenant.get("billing") or {}
+    billing_status = (billing.get("status") or "").strip().lower()
+
+    if (tenant.get("plan") or "trial").strip().lower() == "trial":
+        if billing_status == "active":
+            return None
+        ends = _parse_utc(tenant.get("trial_ends_at"))
+        if ends is None:
+            logger.warning("entitlements: trial tenant %s has no trial_ends_at; not locked", tenant.get("id"))
+            return None
+        return "trial_ended" if now > ends else None
+
+    if billing_status in FAILED_BILLING_STATUSES:
+        period_end = _parse_utc(tenant.get("plan_period_end"))
+        if period_end is not None and now > period_end + PAYMENT_GRACE:
+            return "payment_failed"
+    return None
+
+
+_LOCK_MESSAGES = {
+    "trial_ended": "Your free trial has ended. Choose a plan to keep adding and changing data. "
+                   "Everything you entered is still here.",
+    "payment_failed": "Your last payment did not go through. Update your payment to keep adding and "
+                      "changing data. Everything you entered is still here.",
+}
+
+
+def enforce_account_writes():
+    """before_request check, after authentication: 402 for a write by a tenant whose trial or payment lapsed."""
+    if request.method in READ_METHODS:
+        return None
+    path = request.path
+    if path in LOCKED_WRITE_PATHS or path.startswith(LOCKED_WRITE_PREFIXES):
+        return None
+    if _request_is_exempt():
+        return None
+    tenant = _limited_tenant(getattr(request, "tenant_id", None))
+    if tenant is None:
+        return None
+    code = account_lock_code(tenant, datetime.utcnow())
+    if code is None:
+        return None
+    return plan_limit_response(code, _LOCK_MESSAGES[code])
 
 
 def _is_accountant(user: dict) -> bool:
