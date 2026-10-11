@@ -4,7 +4,7 @@ from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
 from datetime import datetime, date
 from flasgger import swag_from
-from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client, resolve_sender
 import os
 import uuid
 import secrets
@@ -12,7 +12,6 @@ import secrets
 cron_blueprint = Blueprint('cron', __name__)
 
 # Azure Communication Services configuration
-SENDER_ADDRESS = os.getenv('SENDER_EMAIL', "admin@solidevelectrosoft.com")
 ALERT_EMAIL = os.getenv('ALERT_EMAIL', "davinder@solidevelectrosoft.com")
 
 def send_low_stock_email(low_stock_products):
@@ -22,6 +21,7 @@ def send_low_stock_email(low_stock_products):
             print("WARNING: email service not configured. Email will NOT be sent.")
             return False
         
+        sender_address = resolve_sender()
         client = get_email_client()
         
         # Create email content
@@ -86,7 +86,7 @@ def send_low_stock_email(low_stock_products):
         
         # Send email using Azure Communication Services
         email_message = {
-            "senderAddress": SENDER_ADDRESS,
+            "senderAddress": sender_address,
             "recipients": {
                 "to": [{"address": ALERT_EMAIL}],
             },
@@ -407,7 +407,7 @@ def get_schedule_info():
                 'setup_instructions': {
                     'environment_variables': {
                         'AZURE_EMAIL_ENDPOINT': 'Azure Communication Services endpoint (sends with the host\'s managed identity)',
-                        'SENDER_EMAIL': 'Sender address (default: admin@solidevelectrosoft.com)',
+                        'AZURE_SENDER_EMAIL': 'Sender address (SENDER_EMAIL is the older name; no email is sent when neither is set)',
                         'ALERT_EMAIL': 'Email to receive low-stock alerts',
                     },
                     'scheduler_options': [

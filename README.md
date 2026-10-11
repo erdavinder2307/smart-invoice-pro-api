@@ -113,7 +113,7 @@ This project leverages Azure cloud services for production deployment:
    AZURE_EMAIL_ENDPOINT=https://<email-resource>.communication.azure.com   # sends with the host's managed identity (local: az login); no key
    # that identity (or your az login account) needs the "Communication and Email Service Owner" role on the email resource
    # AZURE_EMAIL_CONNECTION_STRING is only a fallback — set it as a Key Vault reference, never a plain key
-   SENDER_EMAIL=admin@solidevelectrosoft.com
+   AZURE_SENDER_EMAIL=DoNotReply@<your-email-domain>   # used when a tenant saved no sender (older name: SENDER_EMAIL); with neither, nothing is sent
    ALERT_EMAIL=davinder@solidevelectrosoft.com
    COSMOS_URI=https://smartinvoicepro.documents.azure.com:443/
    COSMOS_KEY=your-key

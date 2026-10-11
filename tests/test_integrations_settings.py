@@ -217,6 +217,50 @@ class TestTestEmailEndpoint:
                                    headers=headers_a)
         assert resp.status_code != 404
 
+    def _send(self, client, headers_a, body, saved_doc, monkeypatch, azure_sender=None):
+        monkeypatch.delenv("SENDER_EMAIL", raising=False)
+        if azure_sender:
+            monkeypatch.setenv("AZURE_SENDER_EMAIL", azure_sender)
+        else:
+            monkeypatch.delenv("AZURE_SENDER_EMAIL", raising=False)
+        mock_ctr = MagicMock()
+        mock_ctr.query_items.return_value = [saved_doc] if saved_doc else []
+        mock_client = MagicMock()
+        with patch("smart_invoice_pro.api.integrations_settings_api.settings_container", mock_ctr), \
+             patch("smart_invoice_pro.utils.cosmos_client.settings_container", mock_ctr), \
+             patch("smart_invoice_pro.utils.email_client.email_configured", lambda: True), \
+             patch("smart_invoice_pro.utils.email_client.get_email_client", return_value=mock_client):
+            resp = client.post("/api/settings/integrations/test-email", json=body, headers=headers_a)
+        return resp, mock_client
+
+    def test_no_sender_anywhere_returns_503_and_sends_nothing(self, client, headers_a, monkeypatch):
+        resp, mock_client = self._send(client, headers_a, {"to": "r@example.com"}, None, monkeypatch)
+        assert resp.status_code == 503
+        assert resp.get_json()["error"] == (
+            "No sender address is set. Add one in Settings → Integrations and save."
+        )
+        mock_client.begin_send.assert_not_called()
+
+    def test_uses_saved_tenant_sender(self, client, headers_a, monkeypatch):
+        resp, mock_client = self._send(client, headers_a, {"to": "r@example.com"},
+                                       STORED_DOC.copy(), monkeypatch, azure_sender="server@example.com")
+        assert resp.status_code == 200
+        assert mock_client.begin_send.call_args[0][0]["senderAddress"] == "bills@example.com"
+
+    def test_uses_on_screen_sender_before_it_is_saved(self, client, headers_a, monkeypatch):
+        resp, mock_client = self._send(client, headers_a,
+                                       {"to": "r@example.com", "sender_email": " typed@example.com "},
+                                       None, monkeypatch)
+        assert resp.status_code == 200
+        assert mock_client.begin_send.call_args[0][0]["senderAddress"] == "typed@example.com"
+
+    def test_falls_back_to_server_sender(self, client, headers_a, monkeypatch):
+        doc = dict(STORED_DOC, email={"provider": "azure", "sender_email": "", "enabled": True})
+        resp, mock_client = self._send(client, headers_a, {"to": "r@example.com"}, doc, monkeypatch,
+                                       azure_sender="server@example.com")
+        assert resp.status_code == 200
+        assert mock_client.begin_send.call_args[0][0]["senderAddress"] == "server@example.com"
+
 
 class TestWebhookLogsEndpoint:
     """GET /api/settings/integrations/webhook-logs"""
