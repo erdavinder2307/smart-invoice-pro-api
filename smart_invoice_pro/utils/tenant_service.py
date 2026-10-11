@@ -7,7 +7,7 @@ Tenant provisioning helpers for registration and platform admin APIs.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from smart_invoice_pro.utils.cosmos_client import tenants_container
 
@@ -16,10 +16,7 @@ DEFAULT_TENANT_PLAN = "trial"
 VALID_TENANT_STATUSES = frozenset({"active", "inactive", "suspended"})
 VALID_TENANT_TYPES = frozenset({"PRODUCTION", "DEMO", "INTERNAL"})
 DEFAULT_TENANT_TYPE = "PRODUCTION"
-
-
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+TRIAL_DAYS = 30
 
 
 def get_tenant_by_id(tenant_id: str) -> dict | None:
@@ -67,7 +64,8 @@ def create_tenant_doc(
     if get_tenant_by_id(tid):
         raise ValueError("Tenant already exists")
 
-    now = _now_iso()
+    created = datetime.utcnow()
+    now = created.isoformat()
     doc = {
         "id": tid,
         "name": clean_name,
@@ -77,6 +75,9 @@ def create_tenant_doc(
         "created_at": now,
         "updated_at": now,
     }
+    if clean_plan == "trial":
+        # Absolute end time, checked against the clock on every write (utils/entitlements.py).
+        doc["trial_ends_at"] = (created + timedelta(days=TRIAL_DAYS)).isoformat()
     if owner_user_id:
         doc["owner_user_id"] = owner_user_id
 
