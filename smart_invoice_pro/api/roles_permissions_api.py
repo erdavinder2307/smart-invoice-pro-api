@@ -53,6 +53,7 @@ from smart_invoice_pro.utils.cosmos_client import users_container, get_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
 from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.entitlements import check_seat_available, role_change_takes_seat
 import copy
 
 roles_permissions_blueprint = Blueprint('roles_permissions', __name__)
@@ -243,6 +244,21 @@ def _is_account_user(doc: dict) -> bool:
     return bool(doc.get('password')) or bool(doc.get('username')) or (
         not doc_type and bool(doc.get('role'))
     )
+
+
+def _active_account_users(tenant_id: str, exclude_user_id: str | None = None) -> list:
+    """Active login accounts in the tenant: the users that take a plan seat."""
+    items = users_container.query_items(
+        query="SELECT * FROM c WHERE c.tenant_id = @tid",
+        parameters=[{"name": "@tid", "value": tenant_id}],
+        enable_cross_partition_query=True,
+    )
+    return [
+        u for u in items
+        if _is_account_user(u)
+        and u.get('is_active', True) is not False
+        and u.get('id') != exclude_user_id
+    ]
 
 
 def _safe_user(u: dict) -> dict:
@@ -502,6 +518,22 @@ def delete_role(role_id):
             ],
             enable_cross_partition_query=True,
         ))
+
+        # Active accountants (free seat) moved to Sales must fit the plan, one by one.
+        movers = [
+            u for u in users_on_role
+            if _is_account_user(u) and u.get('is_active', True) is not False
+            and role_change_takes_seat(u.get('role'), 'Sales')
+        ]
+        if movers:
+            mover_ids = {u.get('id') for u in movers}
+            others = [u for u in _active_account_users(request.tenant_id) if u.get('id') not in mover_ids]
+            for u in movers:
+                seat_error = check_seat_available(request.tenant_id, others, 'Sales')
+                if seat_error:
+                    return seat_error
+                others.append(dict(u, role='Sales'))
+
         fallback = _get_role_by_name('Sales', request.tenant_id)
         for u in users_on_role:
             if not _is_account_user(u):
@@ -719,6 +751,11 @@ def invite_user():
             role_doc = _get_role_by_name(role_name, request.tenant_id)
             role_id = role_doc['id'] if role_doc else None
 
+        seat_error = check_seat_available(
+            request.tenant_id, _active_account_users(request.tenant_id), role_name)
+        if seat_error:
+            return seat_error
+
         user_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         hashed_pw = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
@@ -782,6 +819,7 @@ def update_settings_user(target_user_id):
             user['email'] = (data['email'] or '').strip().lower()
 
         # Role update
+        old_role = user.get('role')
         role_id = data.get('role_id')
         role_name = data.get('role')
         if role_id:
@@ -795,6 +833,17 @@ def update_settings_user(target_user_id):
             user['role'] = role_name.strip()
             user['role_id'] = role_doc['id'] if role_doc else user.get('role_id')
 
+        # An active accountant (free seat) moving to another role must fit the plan.
+        stays_active = user.get('is_active', True) is not False and data.get('is_active', True) is not False
+        if stays_active and role_change_takes_seat(old_role, user.get('role')):
+            seat_error = check_seat_available(
+                request.tenant_id,
+                _active_account_users(request.tenant_id, exclude_user_id=target_user_id),
+                user.get('role'),
+            )
+            if seat_error:
+                return seat_error
+
         if 'is_active' in data:
             # Prevent deactivating the last Admin
             if user.get('role') == 'Admin' and not data['is_active']:
@@ -805,6 +854,14 @@ def update_settings_user(target_user_id):
                 ))
                 if len(admins) <= 1:
                     return jsonify({'error': 'Cannot deactivate the last active Admin'}), 400
+            if data['is_active'] and user.get('is_active', True) is False:
+                seat_error = check_seat_available(
+                    request.tenant_id,
+                    _active_account_users(request.tenant_id, exclude_user_id=target_user_id),
+                    user.get('role'),
+                )
+                if seat_error:
+                    return seat_error
             user['is_active'] = bool(data['is_active'])
 
         user['updated_at'] = datetime.utcnow().isoformat()
