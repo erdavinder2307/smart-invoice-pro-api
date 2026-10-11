@@ -224,6 +224,57 @@ class TestRoleChangeSeatLimit:
         assert resp.status_code == 200
 
 
+class TestDeleteRoleSeatLimit:
+    """Deleting a custom role moves its users to Sales; active accountants leaving the free seat must fit."""
+    LOWER_ACC_ROLE = {"id": "role-acc-2", "tenant_id": TENANT_A, "name": "accountant",
+                      "is_system_role": False, "permissions": {}}
+
+    def _mover(self, i=0, **kw):
+        return dict({"id": f"m{i}", "username": f"m{i}", "role": "accountant", "role_id": "role-acc-2",
+                     "tenant_id": TENANT_A, "is_active": True}, **kw)
+
+    def _delete(self, client, headers, active_users, on_role):
+        p1, p2, p3 = _patches()
+        mock_rctr = _mock_roles_ctr()
+        with p1 as mock_users, p2 as mock_roles_fn, p3 as mock_role_users, \
+                patch("smart_invoice_pro.utils.entitlements.get_tenant_by_id", return_value=_tenant("starter")), \
+                patch("smart_invoice_pro.api.roles_permissions_api._active_account_users",
+                      return_value=active_users):
+            mock_role_users.query_items.return_value = [ADMIN_USER]
+            mock_roles_fn.return_value = mock_rctr
+            mock_rctr.query_items.side_effect = lambda query, **_: (
+                [self.LOWER_ACC_ROLE] if "c.id" in query else [SALES_ROLE_DOC])
+            mock_users.query_items.return_value = on_role
+            resp = client.delete("/api/settings/roles/role-acc-2", headers=headers)
+            return resp, mock_users, mock_rctr
+
+    def test_moving_free_accountant_at_limit_returns_402(self, client, headers_a):
+        mover = self._mover()
+        resp, mock_users, mock_rctr = self._delete(client, headers_a, _users(3) + [mover], [mover])
+        assert resp.status_code == 402
+        assert resp.get_json()["code"] == "seat_limit"
+        mock_users.upsert_item.assert_not_called()
+        mock_rctr.delete_item.assert_not_called()
+
+    def test_moving_free_accountant_under_limit_ok(self, client, headers_a):
+        mover = self._mover()
+        resp, mock_users, mock_rctr = self._delete(client, headers_a, _users(2) + [mover], [mover])
+        assert resp.status_code == 200
+        mock_users.upsert_item.assert_called_once()
+        mock_rctr.delete_item.assert_called_once()
+
+    def test_two_movers_counted_together(self, client, headers_a):
+        movers = [self._mover(0), self._mover(1)]
+        resp, mock_users, _ = self._delete(client, headers_a, _users(2) + movers, movers)
+        assert resp.status_code == 402
+        mock_users.upsert_item.assert_not_called()
+
+    def test_inactive_accountant_not_checked(self, client, headers_a):
+        mover = self._mover(is_active=False)
+        resp, _, _ = self._delete(client, headers_a, _users(3), [mover])
+        assert resp.status_code == 200
+
+
 class TestRequireEntitlement:
     def _call(self, tenant, feature="approvals", **ctx):
         from smart_invoice_pro.app import create_app

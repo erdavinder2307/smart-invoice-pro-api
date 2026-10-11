@@ -518,6 +518,22 @@ def delete_role(role_id):
             ],
             enable_cross_partition_query=True,
         ))
+
+        # Active accountants (free seat) moved to Sales must fit the plan, one by one.
+        movers = [
+            u for u in users_on_role
+            if _is_account_user(u) and u.get('is_active', True) is not False
+            and role_change_takes_seat(u.get('role'), 'Sales')
+        ]
+        if movers:
+            mover_ids = {u.get('id') for u in movers}
+            others = [u for u in _active_account_users(request.tenant_id) if u.get('id') not in mover_ids]
+            for u in movers:
+                seat_error = check_seat_available(request.tenant_id, others, 'Sales')
+                if seat_error:
+                    return seat_error
+                others.append(dict(u, role='Sales'))
+
         fallback = _get_role_by_name('Sales', request.tenant_id)
         for u in users_on_role:
             if not _is_account_user(u):
