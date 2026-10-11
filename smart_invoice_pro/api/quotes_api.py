@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, make_response
+from smart_invoice_pro.utils.email_verification import require_verified_email
 from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import quotes_container, invoices_container, sales_orders_container
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
@@ -469,6 +470,10 @@ def bulk_quote_actions():
         return jsonify({'error': 'Invalid bulk action'}), 400
     if not isinstance(ids, list) or not ids:
         return jsonify({'error': 'ids must be a non-empty list'}), 400
+    if action == 'convert_to_invoice':
+        unverified = require_verified_email(getattr(request, 'user_id', None))
+        if unverified:
+            return unverified
 
     processed = []
     skipped = []
@@ -864,6 +869,10 @@ def convert_quote(quote_id):
     """Convert a quote to an invoice or sales order"""
     data = request.get_json()
     convert_to = data.get('convert_to')
+    if convert_to == 'invoice':
+        unverified = require_verified_email(getattr(request, 'user_id', None))
+        if unverified:
+            return unverified
     
     if convert_to not in ['invoice', 'sales_order']:
         return jsonify({"error": "Invalid conversion type. Must be 'invoice' or 'sales_order'"}), 400

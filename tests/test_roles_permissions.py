@@ -4,6 +4,9 @@ GET /api/settings/permissions, GET/POST/PUT/DELETE /api/settings/roles,
 GET/POST/PUT/DELETE /api/settings/users.
 """
 import pytest
+from werkzeug.security import check_password_hash
+
+from smart_invoice_pro.utils.email_verification import hash_token
 from unittest.mock import patch, MagicMock, call
 from tests.conftest import TENANT_A, TENANT_B, USER_A, USER_B
 
@@ -380,16 +383,28 @@ class TestInviteUser:
             }, headers=headers_a)
         assert resp.status_code == 400
 
-    def test_short_password(self, client, headers_a):
+    def test_password_in_body_is_ignored_and_link_is_sent(self, client, headers_a):
         p1, p2, p3 = _patches()
-        with p1, p2, p3 as mock_role_users:
+        mock_rctr = _mock_roles_ctr()
+        with p1 as mock_users, p2 as mock_roles_fn, p3 as mock_role_users, \
+                patch("smart_invoice_pro.api.roles_permissions_api._send_invite_email",
+                      return_value=True) as mock_send:
             mock_role_users.query_items.return_value = [ADMIN_USER]
+            mock_roles_fn.return_value = mock_rctr
+            mock_users.query_items.return_value = []
+            mock_rctr.query_items.side_effect = [[SALES_ROLE_DOC], [SALES_ROLE_DOC]]
             resp = client.post("/api/settings/users", json={
                 "email": "new@example.com",
-                "password": "123",
+                "password": "AdminChosen123",
             }, headers=headers_a)
-        assert resp.status_code == 400
-        assert "password" in resp.get_json()["error"].lower()
+        assert resp.status_code == 201
+        assert resp.get_json()["invite_pending"] is True
+        saved = mock_users.create_item.call_args.kwargs["body"]
+        assert not check_password_hash(saved["password"], "AdminChosen123")
+        sent_kwargs = mock_send.call_args.kwargs
+        assert "password" not in sent_kwargs
+        assert saved["invite_token_hash"] == hash_token(sent_kwargs["invite_token"])
+        assert sent_kwargs["invite_token"] not in str(saved)
 
     def test_duplicate_email(self, client, headers_a):
         p1, p2, p3 = _patches()

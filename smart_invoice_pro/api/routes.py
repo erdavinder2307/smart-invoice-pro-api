@@ -9,6 +9,10 @@ import jwt
 import datetime
 from smart_invoice_pro.utils.audit_logger import log_audit_event
 from smart_invoice_pro.api.auth_middleware import get_jwt_secret
+from smart_invoice_pro.utils import email_verification, invites
+import re
+
+_EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 
 try:
     import user_agents as _ua_lib
@@ -250,18 +254,16 @@ def register_user():
         return data  # Return error response if JSON is invalid
 
     hashed_password = generate_password_hash(data['password'],method='pbkdf2:sha256', salt_length=16)
-    tenant_id = data.get('tenant_id') or str(uuid.uuid4())
-
-    # First registered user gets Admin role; everyone else defaults to 'Sales'
-    existing_users = list(users_container.query_items(
-        query='SELECT VALUE COUNT(1) FROM c',
-        enable_cross_partition_query=True
-    ))
-    default_role = 'Admin' if (not existing_users or existing_users[0] == 0) else 'Sales'
+    # Self sign-up always creates a new tenant owned by this user, so tenant_id and
+    # role in the body are ignored. Joining an existing tenant goes through an
+    # Admin's invite (POST /api/settings/users), which takes the tenant from the token.
+    tenant_id = str(uuid.uuid4())
 
     user_id = str(uuid.uuid4())
     username = data['username'].strip()
     email = username.lower() if '@' in username else (data.get('email') or '').strip().lower()
+    if not _EMAIL_RE.match(email):
+        return jsonify({"error": "A valid email address is required."}), 400
     user = {
         'id': user_id,
         'userid': user_id,  # partition key field for Cosmos DB
@@ -270,11 +272,13 @@ def register_user():
         'email': email,
         'name': (data.get('name') or username).strip(),
         'password': hashed_password,
-        'role': data.get('role', default_role),
+        'role': 'Admin',
         'is_active': True,
         'created_at': datetime.datetime.utcnow().isoformat()
     }
+    verification_token = email_verification.issue_token(user)
     users_container.create_item(body=user)
+    verification_sent = email_verification.send_verification_email(email, user['name'], verification_token)
 
     from smart_invoice_pro.utils.tenant_service import ensure_tenant_exists
     try:
@@ -292,8 +296,10 @@ def register_user():
             "id": user['id'],
             "tenant_id": user['tenant_id'],
             "username": user['username'],
-            "role": user['role']
-        }
+            "role": user['role'],
+            "email_verified": False,
+        },
+        "verification_email_sent": verification_sent,
     }), 201
 
 @auth_blueprint.route('/auth/login', methods=['POST'])
@@ -454,7 +460,8 @@ def login_user():
                 "username": items[0]['username'],
                 "name": profile_name or items[0].get('name', ''),
                 "role": items[0].get('role', 'Sales'),
-                "is_super_admin": bool(items[0].get('is_super_admin', False))
+                "is_super_admin": bool(items[0].get('is_super_admin', False)),
+                "email_verified": email_verification.is_verified(items[0]),
             },
             "token": access_token,
             "access_token": access_token,
@@ -729,6 +736,95 @@ def logout_user():
         })
 
     return jsonify({"message": "Logout successful."}), 200
+
+
+@auth_blueprint.route('/auth/verify-email', methods=['POST'])
+def verify_email():
+    """
+    Confirm an email address with the one-time token from the sign-up email.
+    Public (the link may be opened signed out). Input JSON: { "token": "<token>" }
+    """
+    data = request.get_json(silent=True) or {}
+    token = (data.get('token') or '').strip()
+    user = email_verification.find_user_by_token(token)
+    if not user:
+        return jsonify({"error": "This link is not valid or has already been used.",
+                        "code": "TOKEN_INVALID"}), 400
+    if email_verification.token_expired(user):
+        return jsonify({"error": "This link has expired. Sign in and ask for a new one.",
+                        "code": "TOKEN_EXPIRED"}), 400
+
+    email_verification.mark_verified(user)
+    users_container.replace_item(item=user['id'], body=user)
+    log_audit_event({
+        "action": "EMAIL_VERIFIED",
+        "entity": "auth",
+        "entity_id": user['id'],
+        "before": None,
+        "after": {"email_verified": True},
+        "metadata": {"event": "email_verified"},
+        "tenant_id": user.get('tenant_id'),
+        "user_id": user['id'],
+    })
+    return jsonify({"message": "Email verified.", "email_verified": True}), 200
+
+
+@auth_blueprint.route('/auth/resend-verification', methods=['POST'])
+def resend_verification():
+    """Send a new verification link to the signed-in user (old links stop working)."""
+    user_id = getattr(request, 'user_id', None)
+    user = email_verification.load_user(user_id) if user_id else None
+    if not isinstance(user, dict):
+        return jsonify({"error": "Unauthorized"}), 401
+    if email_verification.is_verified(user):
+        return jsonify({"message": "Email already verified.", "email_verified": True}), 200
+    if email_verification.resend_too_soon(user):
+        return jsonify({"error": "Please wait a minute before asking for another email."}), 429
+
+    token = email_verification.issue_token(user)
+    users_container.replace_item(item=user['id'], body=user)
+    sent = email_verification.send_verification_email(user.get('email'), user.get('name'), token)
+    if not sent:
+        return jsonify({"error": "We could not send the email right now. Please try again later."}), 503
+    return jsonify({"message": "Verification email sent.", "email_verified": False}), 200
+
+
+@auth_blueprint.route('/auth/accept-invite', methods=['POST'])
+def accept_invite():
+    """
+    Set your own password from an Admin's one-time invite link.
+    Public. Input JSON: { "token": "<token>", "password": "<new password>" }
+    """
+    data = request.get_json(silent=True) or {}
+    token = (data.get('token') or '').strip()
+    password = data.get('password') or ''
+    if len(password) < invites.MIN_PASSWORD_LENGTH:
+        return jsonify({"error": f"Password must be at least {invites.MIN_PASSWORD_LENGTH} characters."}), 400
+
+    user = invites.find_user_by_invite_token(token)
+    if not user or not user.get('invite_pending'):
+        return jsonify({"error": "This invite link is not valid or has already been used.",
+                        "code": "TOKEN_INVALID"}), 400
+    if invites.invite_expired(user):
+        return jsonify({"error": "This invite link has expired. Ask your admin to send a new one.",
+                        "code": "TOKEN_EXPIRED"}), 400
+    if user.get('is_active') is False:
+        return jsonify({"error": "This account has been deactivated.", "code": "TOKEN_INVALID"}), 400
+
+    invites.accept_invite(user, password)
+    users_container.replace_item(item=user['id'], body=user)
+    log_audit_event({
+        "action": "INVITE_ACCEPTED",
+        "entity": "auth",
+        "entity_id": user['id'],
+        "before": None,
+        "after": {"invite_pending": False},
+        "metadata": {"event": "invite_accepted"},
+        "tenant_id": user.get('tenant_id'),
+        "user_id": user['id'],
+    })
+    return jsonify({"message": "Password set. You can sign in now.",
+                    "username": user.get('username', '')}), 200
 
 
 @auth_blueprint.route('/auth/delete-account', methods=['DELETE'])

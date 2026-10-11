@@ -47,12 +47,12 @@ from datetime import datetime
 from functools import wraps
 
 from flask import Blueprint, request, jsonify
-from werkzeug.security import generate_password_hash
 
 from smart_invoice_pro.utils.cosmos_client import users_container, get_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
 from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.invites import issue_invite, unusable_password_hash
 import copy
 
 roles_permissions_blueprint = Blueprint('roles_permissions', __name__)
@@ -254,6 +254,7 @@ def _safe_user(u: dict) -> dict:
         'role':       u.get('role', 'Sales'),
         'role_id':    u.get('role_id'),
         'is_active':  u.get('is_active', True),
+        'invite_pending': bool(u.get('invite_pending', False)),
         'created_at': u.get('created_at', ''),
     }
 
@@ -542,7 +543,7 @@ def list_settings_users():
 
 
 def _send_invite_email(to_email: str, to_name: str, username: str,
-                       password: str, role: str, tenant_id: str) -> None:
+                       invite_token: str, role: str, tenant_id: str) -> bool:
     """
     Send a welcome / invite email to the newly created user via Azure ACS.
     Failures are logged but do NOT prevent user creation from succeeding.
@@ -552,11 +553,12 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
 
     from smart_invoice_pro.utils.email_client import email_configured, get_email_client
     sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
-    app_url           = os.getenv('APP_URL', 'https://app.solidevbooks.com')
+    app_url           = os.getenv('APP_URL', 'https://app.solidevbooks.com').rstrip('/')
+    invite_link       = f"{app_url}/accept-invite?token={invite_token}"
 
     if not email_configured():
         logging.warning("invite_user: email service not configured — skipping invite email")
-        return
+        return False
 
     try:
         # Fetch org name for personalisation
@@ -583,9 +585,8 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
           </h2>
           <p style="color:#4a5568;font-size:14px;line-height:1.6;margin:0 0 24px">
             Hi {to_name},<br><br>
-            An administrator has created an account for you on
-            <strong>Solidev Books</strong>. You can log in immediately
-            using the credentials below.
+            An administrator has added you to <strong>{org_name}</strong> on
+            <strong>Solidev Books</strong>. Choose your own password to start.
           </p>
 
           <table style="background:#f7fafc;border:1px solid #e2e8f0;
@@ -597,12 +598,6 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
                          padding:4px 0">{username}</td>
             </tr>
             <tr>
-              <td style="font-size:13px;color:#718096;padding:4px 0">
-                Temporary password</td>
-              <td style="font-size:13px;color:#2d3748;font-weight:600;
-                         padding:4px 0;font-family:monospace">{password}</td>
-            </tr>
-            <tr>
               <td style="font-size:13px;color:#718096;padding:4px 0">Role</td>
               <td style="font-size:13px;color:#2d3748;font-weight:600;
                          padding:4px 0">{role}</td>
@@ -610,18 +605,17 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
           </table>
 
           <p style="margin:0 0 24px">
-            <a href="{app_url}/login"
+            <a href="{invite_link}"
                style="display:inline-block;background:#1a56db;color:#fff;
                       text-decoration:none;padding:12px 28px;border-radius:6px;
                       font-size:14px;font-weight:600">
-              Log in to Solidev Books
+              Set your password
             </a>
           </p>
 
           <p style="font-size:12px;color:#a0aec0;margin:0">
-            Please change your password after your first login.
-            If you were not expecting this invitation, you can safely ignore
-            this email.
+            The link works once and expires in 7 days. If you were not expecting
+            this invitation, you can safely ignore this email.
           </p>
         </td></tr>
       </table>
@@ -634,10 +628,9 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
         plain_body = (
             f"You've been invited to {org_name} on Solidev Books.\n\n"
             f"Username: {username}\n"
-            f"Temporary password: {password}\n"
             f"Role: {role}\n\n"
-            f"Log in at: {app_url}/login\n\n"
-            f"Please change your password after your first login."
+            f"Set your password: {invite_link}\n\n"
+            f"The link works once and expires in 7 days."
         )
 
         client = get_email_client()
@@ -651,10 +644,12 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
             },
         })
         poller.result(timeout=30)
-        logging.info(f"invite_user: welcome email sent to {to_email}")
+        logging.info("invite_user: invite email sent")
+        return True
 
     except Exception as exc:
-        logging.error(f"invite_user: failed to send invite email to {to_email}: {exc}")
+        logging.error("invite_user: failed to send invite email: %s", type(exc).__name__)
+        return False
 
 
 @roles_permissions_blueprint.route('/settings/users', methods=['POST'])
@@ -663,22 +658,20 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
 def invite_user():
     """
     Invite a new user to the tenant (Admin only).
-    Creates account immediately with a temporary password.
-    Body: { name, email, username, password, role_id?, role? }
+    Creates the account with an unusable password and emails a one-time link
+    where the invitee sets their own password. A password in the body is ignored.
+    Body: { name, email, username, role_id?, role? }
     """
     try:
         data = request.get_json(silent=True) or {}
         email = (data.get('email') or '').strip().lower()
         username = (data.get('username') or email.split('@')[0]).strip()
-        password = (data.get('password') or '').strip()
         name = (data.get('name') or username).strip()
 
         if not email or '@' not in email:
             return jsonify({'error': 'Valid email is required'}), 400
         if not username:
             return jsonify({'error': 'username is required'}), 400
-        if not password or len(password) < 8:
-            return jsonify({'error': 'password must be at least 8 characters'}), 400
 
         # Check duplicate email within tenant
         dupes = list(users_container.query_items(
@@ -721,7 +714,7 @@ def invite_user():
 
         user_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
-        hashed_pw = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
+        hashed_pw = unusable_password_hash()
 
         user_doc = {
             'id':         user_id,
@@ -738,21 +731,22 @@ def invite_user():
             'created_at': now,
             'updated_at': now,
         }
+        invite_token = issue_invite(user_doc)
         users_container.create_item(body=user_doc)
-        log_audit("user", "create", user_doc["id"], None, user_doc,
+        log_audit("user", "create", user_doc["id"], None, _safe_user(user_doc),
                   user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
 
         # ── Send invite email ─────────────────────────────────────────────────
-        _send_invite_email(
+        sent = _send_invite_email(
             to_email=email,
             to_name=name,
             username=username,
-            password=password,          # plain password — only available here
+            invite_token=invite_token,
             role=role_name,
             tenant_id=request.tenant_id,
         )
 
-        return jsonify(_safe_user(user_doc)), 201
+        return jsonify({**_safe_user(user_doc), 'invite_email_sent': sent}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -812,6 +806,38 @@ def update_settings_user(target_user_id):
         log_audit("user", "update", target_user_id, before_snapshot, user,
                   user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
         return jsonify(_safe_user(user)), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@roles_permissions_blueprint.route('/settings/users/<target_user_id>/resend-invite', methods=['POST'])
+@require_role('Admin')
+@forbid_demo_settings_mutation("User invitations are disabled in the Interactive Workspace.")
+def resend_invite(target_user_id):
+    """Send a new invite link to a user who has not set a password yet (old link stops working)."""
+    try:
+        user = _fetch_user_by_id(target_user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        if user.get('tenant_id') != request.tenant_id:
+            return jsonify({'error': 'Forbidden'}), 403
+        if not user.get('invite_pending'):
+            return jsonify({'error': 'This user has already set a password'}), 400
+        if user.get('is_active') is False:
+            return jsonify({'error': 'This user is deactivated; activate them before resending the invite'}), 400
+
+        invite_token = issue_invite(user)
+        user['updated_at'] = datetime.utcnow().isoformat()
+        users_container.upsert_item(user)
+        sent = _send_invite_email(
+            to_email=user.get('email', ''),
+            to_name=user.get('name', ''),
+            username=user.get('username', ''),
+            invite_token=invite_token,
+            role=user.get('role', ''),
+            tenant_id=request.tenant_id,
+        )
+        return jsonify({**_safe_user(user), 'invite_email_sent': sent}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
