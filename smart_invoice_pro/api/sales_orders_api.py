@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, g, make_response
+from smart_invoice_pro.utils.email_verification import require_verified_email
 from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import sales_orders_container, invoices_container
 from smart_invoice_pro.api.auth_middleware import token_required
@@ -709,6 +710,9 @@ def bulk_archive_sales_orders():
 @token_required
 def convert_so_to_invoice(so_id):
     """Convert a sales order to an invoice"""
+    unverified = require_verified_email(getattr(request, 'user_id', None))
+    if unverified:
+        return unverified
     data = request.get_json()
     invoice_number = data.get('invoice_number')
     

@@ -28,6 +28,7 @@ EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/refresh",
+    "/api/auth/verify-email",
     "/api/auth/demo-login",
     "/api/auth/demo-roles",
     "/api/ping",

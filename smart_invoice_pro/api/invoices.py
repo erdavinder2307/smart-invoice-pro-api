@@ -33,6 +33,7 @@ from smart_invoice_pro.utils.stock_utils import validate_stock_out
 from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.api.auth_middleware import get_customer_jwt_secret
 from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
+from smart_invoice_pro.utils.email_verification import require_verified_email
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -321,6 +322,9 @@ def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction, credi
     }
 })
 def create_invoice():
+    unverified = require_verified_email(getattr(request, 'user_id', None))
+    if unverified:
+        return unverified
     data = request.get_json() or {}
 
     validation_errors = validate_invoice_payload(data)

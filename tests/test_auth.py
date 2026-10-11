@@ -142,7 +142,7 @@ class TestRegister:
         mock_users.query_items.return_value = [0]  # 0 users → Admin role
         resp = client.post(
             "/api/auth/register",
-            json={"username": "admin1", "password": "secret123"},
+            json={"username": "admin1", "email": "admin1@example.com", "password": "secret123"},
         )
         assert resp.status_code == 201
         data = resp.get_json()
@@ -157,7 +157,7 @@ class TestRegister:
         mock_users.query_items.return_value = [5]
         resp = client.post(
             "/api/auth/register",
-            json={"username": "owner2", "password": "secret123"},
+            json={"username": "owner2", "email": "owner2@example.com", "password": "secret123"},
         )
         assert resp.status_code == 201
         assert resp.get_json()["user"]["role"] == "Admin"
@@ -168,7 +168,7 @@ class TestRegister:
         mock_users.query_items.return_value = [5]
         resp = client.post(
             "/api/auth/register",
-            json={"username": "intruder", "password": "secret123", "tenant_id": TENANT_A},
+            json={"username": "intruder", "email": "intruder@example.com", "password": "secret123", "tenant_id": TENANT_A},
         )
         assert resp.status_code == 201
         new_tenant = resp.get_json()["user"]["tenant_id"]
@@ -184,7 +184,7 @@ class TestRegister:
         mock_users.query_items.return_value = [5]
         resp = client.post(
             "/api/auth/register",
-            json={"username": "u1", "password": "secret123",
+            json={"username": "u1", "email": "u1@example.com", "password": "secret123",
                   "tenant_id": TENANT_A, "role": "Sales"},
         )
         assert resp.status_code == 201
@@ -197,9 +197,9 @@ class TestRegister:
     def test_two_sign_ups_get_separate_tenants(self, mock_users, client):
         mock_users.query_items.return_value = [5]
         t1 = client.post("/api/auth/register",
-                         json={"username": "a", "password": "secret123"}).get_json()["user"]["tenant_id"]
+                         json={"username": "a@example.com", "password": "secret123"}).get_json()["user"]["tenant_id"]
         t2 = client.post("/api/auth/register",
-                         json={"username": "b", "password": "secret123"}).get_json()["user"]["tenant_id"]
+                         json={"username": "b@example.com", "password": "secret123"}).get_json()["user"]["tenant_id"]
         assert t1 != t2
 
     @patch("smart_invoice_pro.api.organization_profile_api.settings_container")
@@ -257,7 +257,7 @@ class TestLogin:
         ]
         resp = client.post(
             "/api/auth/login",
-            json={"username": "admin1", "password": "secret123"},
+            json={"username": "admin1", "email": "admin1@example.com", "password": "secret123"},
         )
         assert resp.status_code == 200
         data = resp.get_json()
