@@ -113,6 +113,14 @@ class TestWriteLock:
     def test_logout_stays_open_after_trial_end(self, client):
         assert _post_customer(client, EXPIRED, path="/api/auth/logout").status_code != 402
 
+    def test_password_change_stays_open_after_trial_end(self, client):
+        resp = _post_customer(client, EXPIRED, path="/api/me/password", method="put")
+        assert resp.status_code != 402
+
+    def test_session_revoke_stays_open_after_trial_end(self, client):
+        resp = _post_customer(client, EXPIRED, path="/api/me/sessions/s1", method="delete")
+        assert resp.status_code != 402
+
     def test_billing_paths_stay_open_after_trial_end(self, client):
         # No billing routes yet: the lock lets the request through to the router (404).
         assert _post_customer(client, EXPIRED, path="/api/billing/checkout").status_code == 404
