@@ -105,6 +105,12 @@ class TestResendInvite:
         assert resp.status_code == 400
         mock_send.assert_not_called()
 
+    def test_resend_refused_for_deactivated_user(self, client):
+        user, _ = _invitee(is_active=False)
+        resp, _, mock_send = self._post(client, user)
+        assert resp.status_code == 400
+        mock_send.assert_not_called()
+
     def test_resend_refused_for_other_tenant(self, client):
         user, _ = _invitee(tenant_id=TENANT_B)
         resp, _, mock_send = self._post(client, user)

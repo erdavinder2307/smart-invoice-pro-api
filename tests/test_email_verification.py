@@ -156,6 +156,42 @@ class TestInvoiceGate:
                            json={})
         assert resp.status_code == 403
 
+    @patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container")
+    @patch("smart_invoice_pro.utils.email_verification.users_container")
+    def test_unverified_user_cannot_create_recurring_profile(self, mock_ev_users, mock_profiles, client):
+        mock_ev_users.read_item.return_value = _unverified_user()
+        for path in ("/api/recurring-profiles", "/api/recurring-invoices"):
+            resp = client.post(path, headers=auth_headers(role="Admin"),
+                               json={"profile_name": "Monthly", "customer_id": "c1",
+                                     "frequency": "monthly", "start_date": "2026-11-01", "auto_send": True})
+            assert resp.status_code == 403
+            assert resp.get_json()["code"] == "EMAIL_NOT_VERIFIED"
+        mock_profiles.create_item.assert_not_called()
+
+    @patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container")
+    @patch("smart_invoice_pro.utils.email_verification.users_container")
+    def test_unverified_user_cannot_edit_or_resume_recurring_profile(self, mock_ev_users, mock_profiles, client):
+        mock_ev_users.read_item.return_value = _unverified_user()
+        headers = auth_headers(role="Admin")
+        calls = [
+            client.put("/api/recurring-profiles/p1", headers=headers, json={"status": "Active"}),
+            client.patch("/api/recurring-profiles/p1", headers=headers, json={"action": "resume"}),
+            client.post("/api/recurring-profiles/p1/resume", headers=headers),
+            client.post("/api/recurring-profiles/bulk", headers=headers, json={"action": "resume", "ids": ["p1"]}),
+        ]
+        assert [r.status_code for r in calls] == [403, 403, 403, 403]
+        mock_profiles.replace_item.assert_not_called()
+
+    @patch("smart_invoice_pro.api.recurring_profiles_api.recurring_profiles_container")
+    @patch("smart_invoice_pro.utils.email_verification.users_container")
+    def test_unverified_user_can_still_pause_recurring_profile(self, mock_ev_users, mock_profiles, client):
+        mock_ev_users.read_item.return_value = _unverified_user()
+        mock_profiles.query_items.return_value = [{"id": "p1", "tenant_id": TENANT_A, "status": "Active"}]
+        mock_profiles.replace_item.side_effect = lambda item, body: body
+        resp = client.post("/api/recurring-profiles/p1/pause", headers=auth_headers(role="Admin"))
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "Paused"
+
     def test_accounts_from_before_verification_are_not_blocked(self):
         assert ev.is_verified({"id": "old-user"}) is True
         assert ev.is_verified({"email_verified": True}) is True

@@ -17,6 +17,7 @@ from smart_invoice_pro.utils.bulk_archive_contracts import (
 from smart_invoice_pro.utils.domain_events import record_bulk_archive_completed
 from smart_invoice_pro.utils.audit_logger import log_bulk_archive_summary
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.utils.email_verification import require_verified_email
 
 
 recurring_profiles_blueprint = Blueprint('recurring_profiles', __name__)
@@ -402,7 +403,16 @@ def _sanitize_profile(profile):
     return {k: v for k, v in profile.items() if not k.startswith('_')}
 
 
+def _unverified_response():
+    # Active profiles create (and may email) invoices on schedule, so they need a verified email like create_invoice.
+    return require_verified_email(getattr(request, 'user_id', None))
+
+
 def _set_profile_status(profile_id, next_status):
+    if next_status == 'Active':
+        unverified = _unverified_response()
+        if unverified:
+            return unverified
     tenant_id = request.tenant_id
     profile = _query_single_profile(profile_id, tenant_id)
     if not profile:
@@ -420,6 +430,9 @@ def _set_profile_status(profile_id, next_status):
 @recurring_profiles_blueprint.route('/recurring-invoices', methods=['POST'])
 @require_permission('invoices', 'create')
 def create_recurring_profile():
+    unverified = _unverified_response()
+    if unverified:
+        return unverified
     data = request.get_json() or {}
     errors = validate_recurring_profile_data(data)
     if errors:
@@ -627,6 +640,9 @@ def get_recurring_profile(profile_id):
 @recurring_profiles_blueprint.route('/recurring-invoices/<profile_id>', methods=['PUT'])
 @require_permission('invoices', 'edit')
 def update_recurring_profile(profile_id):
+    unverified = _unverified_response()
+    if unverified:
+        return unverified
     data = request.get_json() or {}
     errors = validate_recurring_profile_data(data, is_update=True)
     if errors:
@@ -706,6 +722,10 @@ def bulk_recurring_profile_actions():
         return jsonify({'error': 'Invalid bulk action'}), 400
     if not isinstance(ids, list) or not ids:
         return jsonify({'error': 'ids must be a non-empty array'}), 400
+    if action == 'resume':
+        unverified = _unverified_response()
+        if unverified:
+            return unverified
 
     updated = 0
     deleted = 0

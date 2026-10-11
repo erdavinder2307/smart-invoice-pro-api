@@ -823,6 +823,8 @@ def resend_invite(target_user_id):
             return jsonify({'error': 'Forbidden'}), 403
         if not user.get('invite_pending'):
             return jsonify({'error': 'This user has already set a password'}), 400
+        if user.get('is_active') is False:
+            return jsonify({'error': 'This user is deactivated; activate them before resending the invite'}), 400
 
         invite_token = issue_invite(user)
         user['updated_at'] = datetime.utcnow().isoformat()
