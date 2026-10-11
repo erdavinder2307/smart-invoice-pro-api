@@ -32,6 +32,8 @@ EXEMPT_PATHS = {
     "/api/auth/demo-roles",
     "/api/ping",
     "/api/payments/webhook",
+    "/api/billing/plans",
+    "/api/billing/webhook",
 }
 
 
@@ -51,10 +53,11 @@ def _extract_bearer_token():
     return token or None
 
 
-def _set_request_context(user_id, tenant_id, session_id=None, is_demo=False):
+def _set_request_context(user_id, tenant_id, session_id=None, is_demo=False, is_super_admin=False):
     g.user_id = user_id
     g.tenant_id = tenant_id
     g.is_demo = bool(is_demo)
+    g.is_super_admin = is_super_admin is True
 
     # Keep compatibility with the requested contract.
     setattr(request, "user_id", user_id)
@@ -93,6 +96,7 @@ def authenticate_request_context():
         tenant_id,
         session_id,
         is_demo=bool(payload.get("is_demo")),
+        is_super_admin=payload.get("is_super_admin"),
     )
     return payload, None
 
@@ -130,7 +134,8 @@ def enforce_api_auth():
     if error_response:
         return error_response
 
-    return None
+    from smart_invoice_pro.utils.entitlements import enforce_account_writes
+    return enforce_account_writes()
 
 
 def super_admin_required(f):
