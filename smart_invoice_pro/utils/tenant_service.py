@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from smart_invoice_pro.utils.cosmos_client import tenants_container
 
-VALID_TENANT_PLANS = frozenset({"trial", "starter", "pro", "enterprise"})
+VALID_TENANT_PLANS = frozenset({"trial", "starter", "growth", "pro", "enterprise"})
 DEFAULT_TENANT_PLAN = "trial"
 VALID_TENANT_STATUSES = frozenset({"active", "inactive", "suspended"})
 VALID_TENANT_TYPES = frozenset({"PRODUCTION", "DEMO", "INTERNAL"})

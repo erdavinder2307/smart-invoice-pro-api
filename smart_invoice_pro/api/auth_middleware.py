@@ -32,6 +32,8 @@ EXEMPT_PATHS = {
     "/api/auth/demo-roles",
     "/api/ping",
     "/api/payments/webhook",
+    "/api/billing/plans",
+    "/api/billing/webhook",
 }
 
 
