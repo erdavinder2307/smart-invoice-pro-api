@@ -9,7 +9,7 @@ import jwt
 import datetime
 from smart_invoice_pro.utils.audit_logger import log_audit_event
 from smart_invoice_pro.api.auth_middleware import get_jwt_secret
-from smart_invoice_pro.utils import email_verification
+from smart_invoice_pro.utils import email_verification, invites
 import re
 
 _EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
@@ -787,6 +787,44 @@ def resend_verification():
     if not sent:
         return jsonify({"error": "We could not send the email right now. Please try again later."}), 503
     return jsonify({"message": "Verification email sent.", "email_verified": False}), 200
+
+
+@auth_blueprint.route('/auth/accept-invite', methods=['POST'])
+def accept_invite():
+    """
+    Set your own password from an Admin's one-time invite link.
+    Public. Input JSON: { "token": "<token>", "password": "<new password>" }
+    """
+    data = request.get_json(silent=True) or {}
+    token = (data.get('token') or '').strip()
+    password = data.get('password') or ''
+    if len(password) < invites.MIN_PASSWORD_LENGTH:
+        return jsonify({"error": f"Password must be at least {invites.MIN_PASSWORD_LENGTH} characters."}), 400
+
+    user = invites.find_user_by_invite_token(token)
+    if not user or not user.get('invite_pending'):
+        return jsonify({"error": "This invite link is not valid or has already been used.",
+                        "code": "TOKEN_INVALID"}), 400
+    if invites.invite_expired(user):
+        return jsonify({"error": "This invite link has expired. Ask your admin to send a new one.",
+                        "code": "TOKEN_EXPIRED"}), 400
+    if user.get('is_active') is False:
+        return jsonify({"error": "This account has been deactivated.", "code": "TOKEN_INVALID"}), 400
+
+    invites.accept_invite(user, password)
+    users_container.replace_item(item=user['id'], body=user)
+    log_audit_event({
+        "action": "INVITE_ACCEPTED",
+        "entity": "auth",
+        "entity_id": user['id'],
+        "before": None,
+        "after": {"invite_pending": False},
+        "metadata": {"event": "invite_accepted"},
+        "tenant_id": user.get('tenant_id'),
+        "user_id": user['id'],
+    })
+    return jsonify({"message": "Password set. You can sign in now.",
+                    "username": user.get('username', '')}), 200
 
 
 @auth_blueprint.route('/auth/delete-account', methods=['DELETE'])
