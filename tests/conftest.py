@@ -206,6 +206,14 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.search_api.customers_container",
     "smart_invoice_pro.api.search_api.invoices_container",
     "smart_invoice_pro.api.search_api.products_container",
+    # Billing
+    "smart_invoice_pro.api.billing_api.tenants_container",
+    "smart_invoice_pro.api.billing_api.subscriptions_container",
+    "smart_invoice_pro.api.billing_api.billing_events_container",
+    "smart_invoice_pro.api.billing_api.settings_container",
+    "smart_invoice_pro.api.billing_api.tax_invoices_container",
+    "smart_invoice_pro.utils.tax_invoices.tax_invoices_container",
+    "smart_invoice_pro.utils.tax_invoices.counters_container",
 ]
 
 
