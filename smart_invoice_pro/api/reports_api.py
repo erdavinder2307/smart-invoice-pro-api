@@ -2,8 +2,10 @@ from flask import Blueprint, jsonify, request
 from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import (
     invoices_container, expenses_container, bills_container,
-    products_container, bank_accounts_container, customers_container
+    products_container, bank_accounts_container, customers_container,
+    settings_container
 )
+from smart_invoice_pro.services.gstr1 import build_gstr1
 from datetime import datetime, timedelta
 from flasgger import swag_from
 import os
@@ -864,6 +866,54 @@ def get_gst_tax_summary():
                 'invoice_count': totals['invoice_count']
             }
         }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@reports_blueprint.route('/reports/gstr1', methods=['GET'])
+@require_permission('reports', 'view')
+def get_gstr1():
+    """GSTR-1 JSON for one month (?month=YYYY-MM), in the GST offline tool's import layout.
+
+    `issues` lists invoices or lines that need fixing before filing (missing HSN,
+    place of supply, invalid GSTIN); they are reported, never guessed.
+    """
+    try:
+        tenant_id = request.tenant_id
+        try:
+            period = datetime.strptime(request.args.get('month', ''), '%Y-%m')
+        except ValueError:
+            return jsonify({'error': 'month must be YYYY-MM'}), 400
+
+        params = [{'name': '@tid', 'value': tenant_id}]
+        invoices = list(invoices_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tid AND STARTSWITH(c.issue_date, @month)",
+            parameters=params + [{'name': '@month', 'value': period.strftime('%Y-%m')}],
+            enable_cross_partition_query=True,
+        ))
+        customers = list(customers_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tid", parameters=params,
+            enable_cross_partition_query=True,
+        ))
+        products = list(products_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tid", parameters=params,
+            enable_cross_partition_query=True,
+        ))
+        profiles = list(settings_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+            parameters=params + [{'name': '@id', 'value': f'{tenant_id}:organization_profile'}],
+            enable_cross_partition_query=True,
+        ))
+        seller_gstin = (profiles[0].get('gstin') if profiles else '') or ''
+
+        payload, issues, count = build_gstr1(
+            invoices,
+            {str(c.get('id')): c for c in customers},
+            {str(p.get('name') or '').strip().lower(): p for p in products},
+            seller_gstin, period.year, period.month,
+        )
+        return jsonify({'gstr1': payload, 'issues': issues, 'invoice_count': count}), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
