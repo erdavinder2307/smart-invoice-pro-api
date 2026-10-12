@@ -222,6 +222,10 @@ def validate_json_request():
                     'password': {
                         'type': 'string',
                         'description': 'The password of the user.'
+                    },
+                    'partner_code': {
+                        'type': 'string',
+                        'description': 'Optional code of the CA/partner who referred this sign-up (3-32 letters, digits or dashes).'
                     }
                 },
                 'required': ['username', 'password']
@@ -248,6 +252,12 @@ def register_user():
     data = validate_json_request()
     if isinstance(data, tuple):
         return data  # Return error response if JSON is invalid
+
+    from smart_invoice_pro.utils.tenant_service import ensure_tenant_exists, normalize_partner_code
+    try:
+        partner_code = normalize_partner_code(data.get('partner_code'))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     hashed_password = generate_password_hash(data['password'],method='pbkdf2:sha256', salt_length=16)
     tenant_id = data.get('tenant_id') or str(uuid.uuid4())
@@ -276,12 +286,12 @@ def register_user():
     }
     users_container.create_item(body=user)
 
-    from smart_invoice_pro.utils.tenant_service import ensure_tenant_exists
     try:
         ensure_tenant_exists(
             tenant_id,
             name=(data.get('organization_name') or data.get('name') or username).strip(),
             owner_user_id=user_id,
+            partner_code=partner_code,
         )
     except Exception:
         pass
