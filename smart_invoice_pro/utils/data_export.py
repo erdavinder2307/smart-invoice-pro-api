@@ -14,6 +14,16 @@ _EXCLUDED_FIELDS = {
     "password", "hashed_pw", "portal_password", "portal_token",
     "token", "refresh_token",
 }
+# Any field whose name contains one of these is treated as a secret too, so new ones are not exported by accident.
+_SECRET_NAME_PARTS = ("password", "token", "secret", "otp")
+
+# Text starting with one of these is run as a formula by Excel/Sheets (CSV injection).
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _is_excluded(key):
+    lowered = key.lower()
+    return key in _EXCLUDED_FIELDS or any(part in lowered for part in _SECRET_NAME_PARTS)
 
 # Columns that lead each file, when present; the rest follow alphabetically.
 _LEADING_COLUMNS = ["id", "number", "invoice_number", "bill_number", "display_name", "date"]
@@ -28,14 +38,21 @@ def _cell(value):
     if value is None:
         return ""
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return str(value)
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    elif isinstance(value, (bool, int, float)):
+        # Numbers (including negative amounts) stay numbers.
+        return str(value)
+    else:
+        text = str(value)
+    if text.startswith(_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def _columns(rows):
     keys = set()
     for row in rows:
-        keys.update(k for k in row if k not in _EXCLUDED_FIELDS)
+        keys.update(k for k in row if not _is_excluded(k))
     leading = [c for c in _LEADING_COLUMNS if c in keys]
     return leading + sorted(keys - set(leading))
 

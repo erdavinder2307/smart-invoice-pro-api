@@ -72,6 +72,33 @@ class TestBuildExportZip:
         assert files["payments.csv"].splitlines()[0].startswith("direction,payment_id")
         assert "customers.csv: 0 rows" in files["README.txt"]
 
+    def test_formula_like_text_is_escaped_but_numbers_are_not(self):
+        customer = {"id": "cust-002", "display_name": "=1+1", "email": "+2+3", "notes": "@SUM(A1)",
+                    "city": "-Delhi", "balance": -250.5}
+        invoice = dict(INVOICE, payment_history=[
+            {"id": "pay-3", "payment_date": "2026-09-06", "amount": -10, "payment_mode": "UPI",
+             "reference": "=HYPERLINK(\"http://example.com\")"},
+        ])
+        files = _read_zip(build_export_zip([customer], [invoice], [], "t"))
+        row = _csv_rows(files["customers.csv"])[0]
+        assert row["display_name"] == "'=1+1"
+        assert row["email"] == "'+2+3"
+        assert row["notes"] == "'@SUM(A1)"
+        assert row["city"] == "'-Delhi"
+        assert row["balance"] == "-250.5"
+        payment = _csv_rows(files["payments.csv"])[0]
+        assert payment["reference"].startswith("'=HYPERLINK")
+        assert payment["amount"] == "-10"
+
+    def test_secret_like_field_names_are_left_out(self):
+        customer = dict(CUSTOMER, api_secret="s-not-for-export", login_otp="123456", Reset_Token="r-not-for-export")
+        files = _read_zip(build_export_zip([customer], [], [], "t"))
+        header = files["customers.csv"].splitlines()[0].split(",")
+        for field in ("api_secret", "login_otp", "Reset_Token"):
+            assert field not in header
+        assert "not-for-export" not in files["customers.csv"]
+        assert "123456" not in files["customers.csv"]
+
 
 class TestPaymentRows:
     def test_received_and_made_sorted_by_date(self):
