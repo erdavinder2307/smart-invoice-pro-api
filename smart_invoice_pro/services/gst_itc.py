@@ -54,7 +54,7 @@ def build_itc_summary(bills, vendors_by_id, buyer_gstin, year, month):
         if not bill_date.startswith(prefix):
             continue
         if str(bill.get('payment_status') or '') in EXCLUDED_PAYMENT_STATUSES or \
-                str(bill.get('lifecycle_status') or '').upper() == 'ARCHIVED':
+                str(bill.get('lifecycle_status') or bill.get('status') or '').upper() == 'ARCHIVED':
             continue
         number = str(bill.get('bill_number') or bill.get('id') or '')
 
@@ -93,6 +93,11 @@ def build_itc_summary(bills, vendors_by_id, buyer_gstin, year, month):
                     unregistered[k] += r[k]
             continue
 
+        stored_igst, stored_cgst = _num(bill.get('igst_amount')), _num(bill.get('cgst_amount'))
+        if (inter_state and stored_cgst > 0) or (not inter_state and stored_igst > 0):
+            flag(f"Bill was saved with {'CGST/SGST' if inter_state else 'IGST'} but the vendor is "
+                 f"{'out of' if inter_state else 'in'} state; this summary uses "
+                 f"{'IGST' if inter_state else 'CGST/SGST'}.")
         for rt, r in rate_rows.items():
             for k in r:
                 itc_by_rate[rt][k] += r[k]

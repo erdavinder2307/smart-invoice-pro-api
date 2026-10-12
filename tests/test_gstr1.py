@@ -81,7 +81,7 @@ class TestTables:
         assert 'b2cs' not in payload
 
     def test_b2cl_limit_is_strictly_above_one_lakh(self):
-        inv = _inv('INV-4', 'c-retail', 'Delhi', [_line('Steel Bracket', 1, B2CL_LIMIT, 0)], B2CL_LIMIT)
+        inv = _inv('INV-4', 'c-retail', 'Delhi', [_line('Steel Bracket', 1, 80000, 25)], B2CL_LIMIT)
         payload, _, _ = _build([inv])
         assert 'b2cl' not in payload
         assert payload['b2cs'][0]['sply_ty'] == 'INTER'
@@ -96,6 +96,43 @@ class TestTables:
         assert payload['b2cs'] == [{'sply_ty': 'INTRA', 'pos': '03', 'typ': 'OE', 'rt': 18.0,
                                     'txval': 2000.0, 'iamt': 0.0, 'camt': 180.0, 'samt': 180.0,
                                     'csamt': 0}]
+
+    def test_zero_rated_lines_go_to_nil_table_not_b2b_or_b2cs(self):
+        invs = [
+            _inv('INV-20', 'c-pb', 'Punjab', [_line('Steel Bracket', 1, 1000, 18),
+                                              _line('Steel Bracket', 1, 300, 0)], 1480),
+            _inv('INV-21', 'c-retail', 'Delhi', [_line('Steel Bracket', 1, 500, 0)], 500),
+        ]
+        payload, issues, count = _build(invs)
+        assert count == 2
+        assert [i['rt'] for i in payload['b2b'][0]['inv'][0]['itms'] for i in [i['itm_det']]] == [18.0]
+        assert 'b2cs' not in payload
+        assert payload['nil'] == {'inv': [
+            {'sply_ty': 'INTRAB2B', 'expt_amt': 0, 'nil_amt': 300.0, 'ngsup_amt': 0},
+            {'sply_ty': 'INTRB2C', 'expt_amt': 0, 'nil_amt': 500.0, 'ngsup_amt': 0},
+        ]}
+        assert any('nil-rated' in i['problem'] for i in issues)
+
+    def test_no_nil_table_without_zero_rated_lines(self):
+        payload, issues, _ = _build([_inv('INV-22', 'c-pb', 'Punjab', [_line('Steel Bracket', 1, 100, 18)], 118)])
+        assert 'nil' not in payload and issues == []
+
+    def test_stored_tax_split_contradicting_place_of_supply_is_reported(self):
+        # Seller in Punjab, place of supply Punjab (intra-state), but the invoice was saved with IGST.
+        intra_with_igst = _inv('INV-23', 'c-retail', 'Punjab',
+                               [_line('Steel Bracket', 1, 1000, 18, igst=180, cgst=0, sgst=0)], 1180)
+        inter_with_cgst = _inv('INV-24', 'c-dl', 'Delhi',
+                               [_line('Steel Bracket', 1, 1000, 18, igst=0, cgst=90, sgst=90)], 1180)
+        payload, issues, count = _build([intra_with_igst, inter_with_cgst])
+        assert count == 0
+        assert 'b2cs' not in payload and 'b2b' not in payload
+        assert [i['invoice'] for i in issues] == ['INV-23', 'INV-24']
+
+    def test_stored_tax_split_matching_place_of_supply_is_exported(self):
+        inv = _inv('INV-25', 'c-dl', 'Delhi', [_line('Steel Bracket', 1, 1000, 18, igst=180, cgst=0, sgst=0)], 1180)
+        payload, issues, _ = _build([inv])
+        assert issues == []
+        assert payload['b2b'][0]['inv'][0]['itms'][0]['itm_det']['iamt'] == 180
 
 
 class TestHsn:

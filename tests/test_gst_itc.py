@@ -93,6 +93,23 @@ class TestItc:
         _, issues, _ = build_itc_summary([], VENDORS, '', 2026, 9)
         assert issues == [{'bill': None, 'problem': 'Organisation GSTIN is missing or invalid.'}]
 
+    def test_bill_archived_by_status_is_left_out(self):
+        _, _, count = _build([_bill('B-9', 'v-pb', [_line(1, 100, 18)], 118, status='Unpaid')
+                              | {'status': 'ARCHIVED'}])
+        assert count == 0
+
+    def test_stored_split_contradicting_vendor_state_is_reported(self):
+        # Delhi vendor (inter-state) but the bill form saved CGST/SGST halves.
+        summary, issues, _ = _build([_bill('B-10', 'v-dl', [_line(1, 1000, 18)], 1180,
+                                           igst_amount=0, cgst_amount=90, sgst_amount=90)])
+        assert summary['itc']['total']['iamt'] == 180
+        assert [i['bill'] for i in issues] == ['B-10']
+
+    def test_stored_split_matching_vendor_state_is_not_reported(self):
+        _, issues, _ = _build([_bill('B-11', 'v-pb', [_line(1, 1000, 18)], 1180,
+                                     igst_amount=0, cgst_amount=90, sgst_amount=90)])
+        assert issues == []
+
 
 class TestEndpoint:
     def test_requires_month(self, client, headers_a):

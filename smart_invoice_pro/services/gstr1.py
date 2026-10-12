@@ -7,6 +7,8 @@ GST portal's GSTR-1 offline tool imports:
     b2b   registered buyers (buyer has a GSTIN), one entry per buyer
     b2cl  unregistered buyers, inter-state, invoice value above B2CL_LIMIT
     b2cs  every other unregistered sale, summed by place of supply and rate
+    nil   Table 8, lines taxed at 0% (Books does not record nil-rated vs
+          exempt, so they are reported as nil-rated with an issue to check)
     hsn   Table 12, split into hsn_b2b and hsn_b2c
 
 Pure functions only: callers load the invoices, customers, products and the
@@ -117,6 +119,7 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
     b2b = defaultdict(list)
     b2cl = defaultdict(list)
     b2cs = defaultdict(lambda: {'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0})
+    nil = defaultdict(float)
     hsn = {'b2b': defaultdict(lambda: {'qty': 0.0, 'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0}),
            'b2c': defaultdict(lambda: {'qty': 0.0, 'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0})}
     counted = 0
@@ -155,14 +158,28 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
         inter_state = pos != seller_state
 
         lines = [it for it in (inv.get('items') or []) if isinstance(it, dict)]
+        if not lines:
+            flag('Invoice has no lines.')
+            continue
+        amounts = [_line_amounts(item, inter_state) for item in lines]
+        # Stored IGST on an intra-state supply (or CGST/SGST on an inter-state one) means the
+        # invoice was taxed for a different place of supply than the one derived here.
+        if any((not inter_state and iamt > 0) or (inter_state and (camt > 0 or samt > 0))
+               for _, _, _, iamt, camt, samt in amounts):
+            flag(f"Invoice is {'inter' if inter_state else 'intra'}-state for place of supply {pos} "
+                 f"but was taxed as {'CGST/SGST' if inter_state else 'IGST'}; not included.")
+            continue
+
         rate_rows = defaultdict(lambda: {'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0})
-        for item in lines:
-            qty, txval, rt, iamt, camt, samt = _line_amounts(item, inter_state)
-            row = rate_rows[rt]
-            row['txval'] += txval
-            row['iamt'] += iamt
-            row['camt'] += camt
-            row['samt'] += samt
+        for item, (qty, txval, rt, iamt, camt, samt) in zip(lines, amounts):
+            if rt == 0:
+                nil[('INTR' if inter_state else 'INTRA') + ('B2B' if registered else 'B2C')] += txval
+            else:
+                row = rate_rows[rt]
+                row['txval'] += txval
+                row['iamt'] += iamt
+                row['camt'] += camt
+                row['samt'] += samt
 
             code, unit = _line_hsn(item, products_by_name)
             if not _HSN_RE.match(code):
@@ -177,10 +194,9 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
             h['camt'] += camt
             h['samt'] += samt
 
-        if not rate_rows:
-            flag('Invoice has no lines.')
-            continue
         counted += 1
+        if not rate_rows:
+            continue
         value = _r2(_num(inv.get('total_amount')))
         itms = [
             {'num': i, 'itm_det': {'rt': rt, 'txval': _r2(r['txval']), 'iamt': _r2(r['iamt']),
@@ -219,9 +235,16 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
              'iamt': _r2(r['iamt']), 'camt': _r2(r['camt']), 'samt': _r2(r['samt']), 'csamt': 0}
             for (sply, pos, rt), r in sorted(b2cs.items())
         ],
+        'nil': {'inv': [{'sply_ty': sply, 'expt_amt': 0, 'nil_amt': _r2(amt), 'ngsup_amt': 0}
+                        for sply, amt in sorted(nil.items())]},
         'hsn': {'hsn_b2b': hsn_rows(hsn['b2b']), 'hsn_b2c': hsn_rows(hsn['b2c'])},
     }
+    if nil:
+        issues.append({'invoice': None, 'problem': 'Lines taxed at 0% are reported as nil-rated in Table 8; '
+                                                   'Books does not record exempt or non-GST supplies, so check them.'})
     for table in ('b2b', 'b2cl', 'b2cs'):
         if not payload[table]:
             del payload[table]
+    if not nil:
+        del payload['nil']
     return payload, issues, counted
