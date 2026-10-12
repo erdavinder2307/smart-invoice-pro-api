@@ -19,7 +19,7 @@ OTHER_TENANT = "tenant-other-9"
 
 CA_USER = {
     "id": "user-ca-1", "tenant_id": CA_TENANT, "username": "ca",
-    "email": "CA@Example.com", "role": "Admin", "is_super_admin": True,
+    "email": "CA@Example.com", "email_verified": True, "role": "Admin", "is_super_admin": True,
     "password": "hash",
 }
 CLIENT_ADMIN = {
@@ -191,6 +191,30 @@ class TestMemberSide:
         switch = client.post("/api/auth/switch-organization", headers=_h(UNVERIFIED),
                              json={"tenant_id": CLIENT_TENANT})
         assert switch.status_code == 403
+
+    def test_account_without_verified_flag_cannot_claim(self, client, world):
+        legacy = dict(CA_USER, id="user-legacy", tenant_id=OTHER_TENANT, is_super_admin=False)
+        del legacy["email_verified"]
+        world["users"].items.append(legacy)
+        world["members"].items.append(_membership())
+        resp = client.get("/api/auth/organizations", headers=_h(legacy))
+        assert [o["tenant_id"] for o in resp.get_json()] == [OTHER_TENANT]
+        assert world["members"].items[0]["user_id"] is None
+
+    def test_fresh_sign_up_with_the_shared_email_cannot_claim(self, client, world):
+        world["members"].items.append(_membership())
+        with patch("smart_invoice_pro.utils.tenant_service.ensure_tenant_exists"):
+            reg = client.post("/api/auth/register",
+                              json={"username": "ca@example.com", "password": "secret123"})
+        assert reg.status_code == 201
+        new_user = reg.get_json()["user"]
+        headers = _h(new_user)
+        orgs = client.get("/api/auth/organizations", headers=headers)
+        assert [o["tenant_id"] for o in orgs.get_json()] == [new_user["tenant_id"]]
+        switch = client.post("/api/auth/switch-organization", headers=headers,
+                             json={"tenant_id": CLIENT_TENANT})
+        assert switch.status_code == 403
+        assert world["members"].items[0]["user_id"] is None
 
     def test_switch_issues_tokens_with_the_membership_role(self, client, world):
         world["members"].items.append(_membership())

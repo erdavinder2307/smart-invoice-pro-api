@@ -4,7 +4,7 @@ memberships.py
 Access for users from another organisation (e.g. a CA firm) to a tenant's books.
 
 A membership is granted by a tenant Admin to an email address. It binds to the
-Books account with that (verified) email the first time that user lists or
+Books account with that email, once its email is verified, the first time that user lists or
 switches organisations. While it is active, the user can switch into the
 tenant and works there with the membership's role, never with the role they
 hold in their own organisation.
@@ -43,8 +43,14 @@ def normalize_email(value) -> str:
 
 
 def can_bind(user: dict) -> bool:
-    """Only accounts whose email is not marked unverified can claim a membership."""
-    return bool(normalize_email(user.get("email"))) and user.get("email_verified") is not False
+    """
+    Only an account that has proved it owns its email can claim a membership.
+
+    Sign-up does not check emails (anyone can register with the CA's address),
+    and accounts without the flag cannot be told apart from those, so the flag
+    must be explicitly True.
+    """
+    return bool(normalize_email(user.get("email"))) and user.get("email_verified") is True
 
 
 def get_membership(membership_id: str, tenant_id: str) -> dict | None:
