@@ -123,12 +123,23 @@ def _demo_rate_limit_exceeded() -> bool:
     return False
 
 
-def _issue_auth_tokens(user_doc: dict):
-    """Create refresh token record + JWT access token for an authenticated user."""
+def _issue_auth_tokens(user_doc: dict, membership: dict | None = None):
+    """Create refresh token record + JWT access token for an authenticated user.
+
+    With `membership`, the tokens open that membership's tenant with its role.
+    """
     jwt_secret = get_jwt_secret()
     tenant_id = user_doc.get("tenant_id") or user_doc.get("id")
     user_id = user_doc["id"]
     is_demo = bool(user_doc.get("is_demo_user"))
+    role = user_doc.get("role", "")
+    role_id = user_doc.get("role_id", "")
+    is_super_admin = bool(user_doc.get("is_super_admin", False))
+    if membership:
+        tenant_id = membership["tenant_id"]
+        role = membership.get("role", "")
+        role_id = membership.get("role_id", "")
+        is_super_admin = False
 
     refresh_token_value = secrets.token_urlsafe(48)
     refresh_token_expires = datetime.datetime.utcnow() + datetime.timedelta(
@@ -156,6 +167,8 @@ def _issue_auth_tokens(user_doc: dict):
         "ip_address": client_ip,
         "is_demo": is_demo,
     }
+    if membership:
+        refresh_token_record["membership_id"] = membership["id"]
     refresh_tokens_container.create_item(body=refresh_token_record)
 
     token_payload = {
@@ -163,13 +176,15 @@ def _issue_auth_tokens(user_doc: dict):
         "user_id": user_id,
         "tenant_id": tenant_id,
         "username": user_doc.get("username", ""),
-        "role": user_doc.get("role", ""),
-        "role_id": user_doc.get("role_id", ""),
-        "is_super_admin": bool(user_doc.get("is_super_admin", False)),
+        "role": role,
+        "role_id": role_id,
+        "is_super_admin": is_super_admin,
         "is_demo": is_demo,
         "session_id": token_record_id,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
     }
+    if membership:
+        token_payload["membership_id"] = membership["id"]
     access_token = jwt.encode(token_payload, jwt_secret, algorithm="HS256")
     return access_token, refresh_token_value, tenant_id, user_id
 
@@ -643,6 +658,25 @@ def refresh_token():
 
     user = user_items[0]
     is_demo = bool(record.get("is_demo") or user.get("is_demo_user"))
+    role = user.get('role', '')
+    role_id = user.get('role_id', '')
+    is_super_admin = bool(user.get('is_super_admin', False))
+    membership_id = record.get('membership_id')
+    if membership_id:
+        # Session in another organisation's books: only while the membership lasts.
+        from smart_invoice_pro.utils.memberships import get_membership, is_active_for
+        membership = get_membership(membership_id, record['tenant_id'])
+        if not is_active_for(membership, record['user_id'], record['tenant_id']):
+            try:
+                refresh_tokens_container.delete_item(
+                    item=record['id'], partition_key=record['user_id']
+                )
+            except Exception:
+                pass
+            return jsonify({"error": "Access to this organisation has ended"}), 401
+        role = membership.get('role', '')
+        role_id = membership.get('role_id', '')
+        is_super_admin = False
     # Rotate refresh token — preserve device metadata, update last_active_at
     new_refresh_value = secrets.token_urlsafe(48)
     refresh_hours = 4 if is_demo else 24 * 30
@@ -674,24 +708,24 @@ def refresh_token():
         "device_name": record.get('device_name', ''),
         "ip_address": record.get('ip_address', ''),
         "is_demo": is_demo,
+        **({"membership_id": membership_id} if membership_id else {}),
     })
 
-    new_access_token = jwt.encode(
-        {
-            "id": record['user_id'],
-            "user_id": record['user_id'],
-            "tenant_id": record['tenant_id'],
-            "username": user.get('username', ''),
-            "role": user.get('role', ''),
-            "role_id": user.get('role_id', ''),
-            "is_super_admin": bool(user.get('is_super_admin', False)),
-            "is_demo": is_demo,
-            "session_id": new_token_record_id,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
-        },
-        jwt_secret,
-        algorithm="HS256"
-    )
+    new_payload = {
+        "id": record['user_id'],
+        "user_id": record['user_id'],
+        "tenant_id": record['tenant_id'],
+        "username": user.get('username', ''),
+        "role": role,
+        "role_id": role_id,
+        "is_super_admin": is_super_admin,
+        "is_demo": is_demo,
+        "session_id": new_token_record_id,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+    }
+    if membership_id:
+        new_payload["membership_id"] = membership_id
+    new_access_token = jwt.encode(new_payload, jwt_secret, algorithm="HS256")
 
     return jsonify({
         "access_token": new_access_token,

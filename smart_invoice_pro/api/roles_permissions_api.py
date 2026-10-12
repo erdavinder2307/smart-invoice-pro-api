@@ -371,6 +371,8 @@ def get_my_permissions():
         user = fetch_account_user(user_id)
         if not user:
             return jsonify({'error': 'User not found'}), 404
+        from smart_invoice_pro.utils.memberships import tenant_role_view
+        user = tenant_role_view(user, tenant_id) or user
 
         is_admin, perms = resolve_user_permissions(user_id, tenant_id)
         if is_admin:
