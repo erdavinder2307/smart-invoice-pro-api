@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from smart_invoice_pro.services.gstr1 import B2CL_LIMIT, build_gstr1, state_code
+from smart_invoice_pro.services.gstr1 import B2CL_LIMIT, build_gstr1, state_code, uqc_code
 from tests.conftest import TENANT_A
 
 SELLER = '03AAACS1234A1Z1'          # Punjab
@@ -81,7 +81,7 @@ class TestTables:
         assert 'b2cs' not in payload
 
     def test_b2cl_limit_is_strictly_above_one_lakh(self):
-        inv = _inv('INV-4', 'c-retail', 'Delhi', [_line('Steel Bracket', 1, 80000, 25)], B2CL_LIMIT)
+        inv = _inv('INV-4', 'c-retail', 'Delhi', [_line('Steel Bracket', 1, 78125, 28)], B2CL_LIMIT)
         payload, _, _ = _build([inv])
         assert 'b2cl' not in payload
         assert payload['b2cs'][0]['sply_ty'] == 'INTER'
@@ -111,7 +111,7 @@ class TestTables:
             {'sply_ty': 'INTRAB2B', 'expt_amt': 0, 'nil_amt': 300.0, 'ngsup_amt': 0},
             {'sply_ty': 'INTRB2C', 'expt_amt': 0, 'nil_amt': 500.0, 'ngsup_amt': 0},
         ]}
-        assert any('nil-rated' in i['problem'] for i in issues)
+        assert [i['invoice'] for i in issues if 'nil-rated' in i['problem']] == ['INV-20', 'INV-21']
 
     def test_no_nil_table_without_zero_rated_lines(self):
         payload, issues, _ = _build([_inv('INV-22', 'c-pb', 'Punjab', [_line('Steel Bracket', 1, 100, 18)], 118)])
@@ -160,6 +160,30 @@ class TestHsn:
         payload, issues, _ = _build([inv])
         assert issues == [{'invoice': 'INV-10', 'problem': "Line 'Unknown widget': HSN/SAC code is missing or invalid."}]
         assert payload['hsn']['hsn_b2b'][0]['hsn_sc'] == 'MISSING'
+
+
+class TestPortalCodes:
+    @pytest.mark.parametrize('unit,code', [('nos', ('NOS', True)), ('Pieces', ('PCS', True)),
+                                           ('kg', ('KGS', True)), ('ltr.', ('LTR', True)),
+                                           ('', ('OTH', True)), ('bucket', ('OTH', False))])
+    def test_units_map_to_uqc_codes(self, unit, code):
+        assert uqc_code(unit) == code
+
+    def test_unknown_unit_is_reported_as_oth(self):
+        products = {**PRODUCTS, 'paint': {'name': 'Paint', 'hsn_sac': '32091010', 'unit': 'bucket'}}
+        inv = _inv('INV-30', 'c-pb', 'Punjab', [_line('Paint', 2, 100, 18)], 236)
+        payload, issues, _ = build_gstr1([inv], CUSTOMERS, products, SELLER, 2026, 9)
+        assert payload['hsn']['hsn_b2b'][0]['uqc'] == 'OTH'
+        assert issues == [{'invoice': 'INV-30', 'problem': "Line 'Paint': unit 'BUCKET' has no GST unit code; reported as OTH."}]
+
+    def test_invoice_number_too_long_or_with_spaces_is_reported(self):
+        line = [_line('Steel Bracket', 1, 100, 18)]
+        invs = [_inv('INV/2026-27/000001', 'c-pb', 'Punjab', line, 118),
+                _inv('INV 7', 'c-pb', 'Punjab', line, 118),
+                _inv('INV/26-27/0007', 'c-pb', 'Punjab', line, 118)]
+        _, issues, count = _build(invs)
+        assert [i['invoice'] for i in issues] == ['INV/2026-27/000001', 'INV 7']
+        assert count == 3
 
 
 class TestFiltering:

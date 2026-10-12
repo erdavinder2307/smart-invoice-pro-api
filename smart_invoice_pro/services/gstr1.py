@@ -48,6 +48,38 @@ STATE_CODES = {
 
 _HSN_RE = re.compile(r'^[0-9]{4,8}$')
 
+# GST portal unit codes (UQC) and the free-text units Books users type for them.
+UQC_CODES = {
+    'BAG', 'BAL', 'BDL', 'BKL', 'BOU', 'BOX', 'BTL', 'BUN', 'CAN', 'CBM', 'CCM', 'CMS', 'CTN', 'DOZ',
+    'DRM', 'GGK', 'GMS', 'GRS', 'GYD', 'KGS', 'KLR', 'KME', 'LTR', 'MLT', 'MTR', 'MTS', 'NOS', 'OTH',
+    'PAC', 'PCS', 'PRS', 'QTL', 'ROL', 'SET', 'SQF', 'SQM', 'SQY', 'TBS', 'TGM', 'THD', 'TON', 'TUB',
+    'UGS', 'UNT', 'YDS',
+}
+UNIT_ALIASES = {
+    'PC': 'PCS', 'PIECE': 'PCS', 'PIECES': 'PCS', 'NO': 'NOS', 'NUMBER': 'NOS', 'NUMBERS': 'NOS',
+    'EACH': 'NOS', 'EA': 'NOS', 'KG': 'KGS', 'KILOGRAM': 'KGS', 'KILOGRAMS': 'KGS', 'G': 'GMS',
+    'GM': 'GMS', 'GRAM': 'GMS', 'GRAMS': 'GMS', 'L': 'LTR', 'LITRE': 'LTR', 'LITRES': 'LTR',
+    'LITER': 'LTR', 'LITERS': 'LTR', 'ML': 'MLT', 'M': 'MTR', 'METER': 'MTR', 'METERS': 'MTR',
+    'METRE': 'MTR', 'METRES': 'MTR', 'CM': 'CMS', 'BOXES': 'BOX', 'DOZEN': 'DOZ', 'PACK': 'PAC',
+    'PACKET': 'PAC', 'PACKETS': 'PAC', 'SETS': 'SET', 'PAIR': 'PRS', 'PAIRS': 'PRS', 'BOTTLE': 'BTL',
+    'BOTTLES': 'BTL', 'BAGS': 'BAG', 'UNIT': 'UNT', 'UNITS': 'UNT', 'TONNE': 'TON', 'TONNES': 'TON',
+    'SQFT': 'SQF', 'SQ FT': 'SQF', 'SQMT': 'SQM', 'SQ M': 'SQM', 'ROLL': 'ROL', 'ROLLS': 'ROL',
+    'CARTON': 'CTN', 'CARTONS': 'CTN', 'QUINTAL': 'QTL',
+}
+
+# GSTR-1 invoice numbers: at most 16 characters, letters, digits, '-' and '/' (Rule 46(b)).
+_INUM_RE = re.compile(r'^[A-Za-z0-9/-]{1,16}$')
+
+
+def uqc_code(unit):
+    """Free-text unit -> (UQC code, known). Empty or unknown units become 'OTH'."""
+    text = str(unit or '').strip().upper().rstrip('.')
+    if text in UQC_CODES:
+        return text, True
+    if text in UNIT_ALIASES:
+        return UNIT_ALIASES[text], True
+    return 'OTH', not text
+
 
 def _num(value):
     try:
@@ -138,6 +170,9 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
         def flag(problem):
             issues.append({'invoice': number, 'problem': problem})
 
+        if not _INUM_RE.match(number):
+            flag('Invoice number must be 1-16 characters (letters, digits, "-" or "/") for the GST portal.')
+
         if inv.get('gst_treatment') in ZERO_RATED_TREATMENTS:
             flag('Export/SEZ supply: not included (EXP/SEZ tables are not built yet).')
             continue
@@ -186,7 +221,10 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
                 flag(f"Line '{item.get('name', '')}': HSN/SAC code is missing or invalid.")
                 code = code or 'MISSING'
             is_service = code.startswith('99')
-            key = (code, 'NA' if is_service else (unit or 'OTH'), rt)
+            uqc, known = ('NA', True) if is_service else uqc_code(unit)
+            if not known:
+                flag(f"Line '{item.get('name', '')}': unit '{unit}' has no GST unit code; reported as OTH.")
+            key = (code, uqc, rt)
             h = hsn['b2b' if registered else 'b2c'][key]
             h['qty'] += 0.0 if is_service else qty
             h['txval'] += txval
@@ -194,6 +232,9 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
             h['camt'] += camt
             h['samt'] += samt
 
+        if any(rt == 0 for _, _, rt, _, _, _ in amounts):
+            flag('Lines taxed at 0% are reported as nil-rated in Table 8; '
+                 'Books does not record exempt or non-GST supplies, so check them.')
         counted += 1
         if not rate_rows:
             continue
@@ -239,9 +280,6 @@ def build_gstr1(invoices, customers_by_id, products_by_name, seller_gstin, year,
                         for sply, amt in sorted(nil.items())]},
         'hsn': {'hsn_b2b': hsn_rows(hsn['b2b']), 'hsn_b2c': hsn_rows(hsn['b2c'])},
     }
-    if nil:
-        issues.append({'invoice': None, 'problem': 'Lines taxed at 0% are reported as nil-rated in Table 8; '
-                                                   'Books does not record exempt or non-GST supplies, so check them.'})
     for table in ('b2b', 'b2cl', 'b2cs'):
         if not payload[table]:
             del payload[table]
