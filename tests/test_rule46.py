@@ -52,6 +52,30 @@ class TestRule46:
         assert rule46_issues(inv, {**CONSUMER, 'billing_city': 'Mohali'}, PRODUCTS) == []
         assert rule46_issues(_inv(gst_treatment='consumer', total_amount=49999), CONSUMER, PRODUCTS) == []
 
+    def test_address_limit_uses_taxable_value_not_total(self):
+        # Rs 45,000 + 18% = Rs 53,100 total, but the taxable value is under Rs 50,000.
+        under = _inv(gst_treatment='consumer', subtotal=45000, total_tax=8100, total_amount=53100)
+        assert rule46_issues(under, CONSUMER, PRODUCTS) == []
+        over = _inv(gst_treatment='consumer', subtotal=50000, total_tax=9000, total_amount=59000)
+        assert _fields(rule46_issues(over, CONSUMER, PRODUCTS)) == ['customer.billing_address']
+        # An invoice-level discount lowers the taxable value.
+        discounted = _inv(gst_treatment='consumer', subtotal=50500, invoice_discount=1000, total_amount=58410)
+        assert rule46_issues(discounted, CONSUMER, PRODUCTS) == []
+        # Without a subtotal, total less tax is used.
+        assert rule46_issues(_inv(gst_treatment='consumer', total_amount=53100, total_tax=8100),
+                             CONSUMER, PRODUCTS) == []
+
+    def test_registered_buyer_without_gstin_is_flagged(self):
+        no_gstin = {'id': 'c-3', 'gst_treatment': 'regular'}
+        assert _fields(rule46_issues(_inv(), no_gstin, PRODUCTS)) == ['customer.gst_number']
+        # A B2B buyer is not treated as unregistered: no address warning, only the GSTIN one.
+        big = _inv(subtotal=60000, total_amount=70800)
+        assert _fields(rule46_issues(big, no_gstin, PRODUCTS)) == ['customer.gst_number']
+        assert _fields(rule46_issues(_inv(gst_treatment='composition'), no_gstin, PRODUCTS)) == ['customer.gst_number']
+        # Consumers and invoices with no treatment set need no GSTIN.
+        assert rule46_issues(_inv(gst_treatment='consumer'), CONSUMER, PRODUCTS) == []
+        assert rule46_issues(_inv(gst_treatment=None), no_gstin, PRODUCTS) == []
+
 
 class TestInvoiceApiWarnings:
     @patch("smart_invoice_pro.api.invoices.products_container")

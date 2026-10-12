@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, jsonify, make_response, current_app
 from smart_invoice_pro.utils.cosmos_client import invoices_container, customers_container, products_container, get_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
@@ -230,7 +230,8 @@ def _gst_warnings(invoice, tenant_id):
             customers[0] if customers else {},
             {str(p.get('name') or '').strip().lower(): p for p in products},
         )
-    except Exception:
+    except Exception as exc:
+        current_app.logger.warning("gst_warnings lookup failed tenant_id=%s: %s", tenant_id, type(exc).__name__)
         return []
 
 

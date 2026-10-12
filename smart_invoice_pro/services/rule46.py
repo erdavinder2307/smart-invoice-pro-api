@@ -16,8 +16,11 @@ from smart_invoice_pro.services.gstr1 import state_code, _line_hsn, _HSN_RE
 # Rule 46(b): at most 16 characters, letters, digits, '-' and '/' only.
 INVOICE_NUMBER_RE = re.compile(r'^[A-Za-z0-9/-]{1,16}$')
 
-# Rule 46(e): unregistered buyer, invoice value of Rs 50,000 or more needs name and address.
+# Rule 46(e): unregistered buyer, taxable value of Rs 50,000 or more needs name and address.
 UNREGISTERED_ADDRESS_LIMIT = 50000.0
+
+# Treatments whose buyer is GST-registered, so Rule 46(e) needs the buyer's GSTIN.
+REGISTERED_TREATMENTS = {'regular', 'composition', 'special_economic_zone', 'deemed_export'}
 
 
 def _num(value):
@@ -25,6 +28,13 @@ def _num(value):
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _taxable_value(invoice):
+    """Value of the supply before tax: subtotal less the invoice-level discount."""
+    if invoice.get('subtotal') is not None:
+        return _num(invoice.get('subtotal')) - _num(invoice.get('invoice_discount'))
+    return _num(invoice.get('total_amount')) - _num(invoice.get('total_tax'))
 
 
 def _has_address(customer):
@@ -50,12 +60,16 @@ def rule46_issues(invoice, customer, products_by_name):
         flag('invoice_number', 'Invoice number must be 1-16 characters: letters, digits, "-" or "/" only.')
 
     gstin = str(customer.get('gst_number') or customer.get('gstin') or '').strip().upper()
-    unregistered = invoice.get('gst_treatment') in ('unregistered', 'consumer')
+    treatment = invoice.get('gst_treatment')
+    unregistered = treatment in ('unregistered', 'consumer')
+    registered = treatment in REGISTERED_TREATMENTS
     if gstin and not unregistered and not validate_gstin_format(gstin):
         flag('customer.gst_number', f'Customer GSTIN {gstin} is not a valid GSTIN.')
+    elif not gstin and registered:
+        flag('customer.gst_number', 'Registered (B2B) buyer: the buyer GSTIN is missing.')
     # The buyer name is already required by validate_invoice_payload.
-    if (not gstin or unregistered) and _num(invoice.get('total_amount')) >= UNREGISTERED_ADDRESS_LIMIT \
-            and not _has_address(customer):
+    if (unregistered or (not gstin and not registered)) \
+            and _taxable_value(invoice) >= UNREGISTERED_ADDRESS_LIMIT and not _has_address(customer):
         flag('customer.billing_address',
              'Unregistered buyer, value Rs 50,000 or more: the buyer address is required.')
 
