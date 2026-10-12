@@ -17,11 +17,13 @@ DEFAULT_TENANT_PLAN = "trial"
 VALID_TENANT_STATUSES = frozenset({"active", "inactive", "suspended"})
 VALID_TENANT_TYPES = frozenset({"PRODUCTION", "DEMO", "INTERNAL"})
 DEFAULT_TENANT_TYPE = "PRODUCTION"
-PARTNER_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,31}$")
 
 
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
+
+
+PARTNER_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,31}$")
 
 
 def normalize_partner_code(raw) -> str | None:
