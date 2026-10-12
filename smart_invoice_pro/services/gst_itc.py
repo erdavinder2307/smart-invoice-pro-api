@@ -70,7 +70,8 @@ def build_itc_summary(bills, vendors_by_id, buyer_gstin, year, month):
         if not vendor:
             flag('Vendor not found.')
         ctin = str(vendor.get('gst_number') or vendor.get('gstin') or '').strip().upper()
-        if ctin and not validate_gstin_format(ctin):
+        invalid_gstin = bool(ctin) and not validate_gstin_format(ctin)
+        if invalid_gstin:
             flag(f'Vendor GSTIN {ctin} is not a valid GSTIN; no input tax credit taken.')
             ctin = ''
 
@@ -86,7 +87,7 @@ def build_itc_summary(bills, vendors_by_id, buyer_gstin, year, month):
         counted += 1
 
         if not ctin:
-            if vendor:
+            if vendor and not invalid_gstin:
                 flag('Vendor has no GSTIN: no input tax credit.')
             for r in rate_rows.values():
                 for k in unregistered:

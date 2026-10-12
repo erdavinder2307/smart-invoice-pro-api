@@ -72,8 +72,8 @@ class TestItc:
     def test_invalid_vendor_gstin_is_flagged_not_credited(self):
         summary, issues, _ = _build([_bill('B-4', 'v-bad', [_line(1, 100, 18)], 118)])
         assert summary['b2b'] == []
-        assert issues[0] == {'bill': 'B-4', 'problem':
-                             'Vendor GSTIN 03XYZ is not a valid GSTIN; no input tax credit taken.'}
+        assert issues == [{'bill': 'B-4', 'problem':
+                             'Vendor GSTIN 03XYZ is not a valid GSTIN; no input tax credit taken.'}]
 
     def test_other_months_drafts_and_archived_are_left_out(self):
         summary, issues, count = _build([
