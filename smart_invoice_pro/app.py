@@ -26,6 +26,7 @@ from smart_invoice_pro.api.bills_api import bills_blueprint
 from smart_invoice_pro.api.expenses_api import expenses_blueprint
 from smart_invoice_pro.api.cron_jobs import cron_blueprint
 from smart_invoice_pro.api.reports_api import reports_blueprint
+from smart_invoice_pro.api.data_export_api import data_export_blueprint
 from smart_invoice_pro.api.payments_api import payments_blueprint
 from smart_invoice_pro.api.bank_reconciliation_api import bank_reconciliation_blueprint
 from smart_invoice_pro.api.roles_api import roles_blueprint
@@ -206,6 +207,7 @@ def create_app():
     app.register_blueprint(expenses_blueprint, url_prefix="/api")
     app.register_blueprint(cron_blueprint, url_prefix="/api")
     app.register_blueprint(reports_blueprint, url_prefix="/api")
+    app.register_blueprint(data_export_blueprint, url_prefix="/api")
     app.register_blueprint(payments_blueprint, url_prefix="/api")
     app.register_blueprint(bank_reconciliation_blueprint, url_prefix="/api")
     app.register_blueprint(roles_blueprint, url_prefix="/api")
