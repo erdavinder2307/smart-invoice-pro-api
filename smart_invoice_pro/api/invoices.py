@@ -1,5 +1,5 @@
-from flask import Blueprint, request, jsonify, make_response
-from smart_invoice_pro.utils.cosmos_client import invoices_container, customers_container, get_container
+from flask import Blueprint, request, jsonify, make_response, current_app
+from smart_invoice_pro.utils.cosmos_client import invoices_container, customers_container, products_container, get_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
@@ -33,6 +33,7 @@ from smart_invoice_pro.utils.stock_utils import validate_stock_out
 from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.api.auth_middleware import get_customer_jwt_secret
 from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
+from smart_invoice_pro.services.rule46 import rule46_issues
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -206,6 +207,32 @@ def validate_invoice_patch(data):
                               "Use the /record-payment endpoint.")
         # Optionally add more type checks here
     return errors
+
+
+def _gst_warnings(invoice, tenant_id):
+    """Rule 46 fields the saved invoice misses (see services/rule46.py). Never blocks a save."""
+    if not invoice.get('is_gst_applicable') or invoice.get('status') in ('Draft', 'Cancelled'):
+        return []
+    try:
+        params = [{"name": "@tid", "value": tenant_id}]
+        customers = list(customers_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @cid AND c.tenant_id = @tid",
+            parameters=params + [{"name": "@cid", "value": str(invoice.get('customer_id'))}],
+            enable_cross_partition_query=True,
+        ))
+        products = list(products_container.query_items(
+            query="SELECT c.name, c.hsn_sac, c.unit FROM c WHERE c.tenant_id = @tid",
+            parameters=params,
+            enable_cross_partition_query=True,
+        ))
+        return rule46_issues(
+            invoice,
+            customers[0] if customers else {},
+            {str(p.get('name') or '').strip().lower(): p for p in products},
+        )
+    except Exception as exc:
+        current_app.logger.warning("gst_warnings lookup failed tenant_id=%s: %s", tenant_id, type(exc).__name__)
+        return []
 
 
 # ── Stock helper: create a stock transaction for each line item ───────────────
@@ -499,7 +526,7 @@ def create_invoice():
     )
     log_audit("invoice", "create", item["id"], None, item,
               user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
-    return jsonify(sanitize_item(item)), 201
+    return jsonify({**sanitize_item(item), 'gst_warnings': _gst_warnings(item, request.tenant_id)}), 201
 
 @api_blueprint.route('/invoices/bulk', methods=['POST'])
 @api_blueprint.route('/invoices/bulk-archive', methods=['POST'])
@@ -1181,7 +1208,7 @@ def update_invoice(invoice_id):
         payload={"invoice_id": item["id"], "invoice_number": item.get("invoice_number"),
                  "status": item.get("status")},
     )
-    return jsonify(sanitize_item(item))
+    return jsonify({**sanitize_item(item), 'gst_warnings': _gst_warnings(item, request.tenant_id)})
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['DELETE'])
 @require_permission('invoices', 'delete')
