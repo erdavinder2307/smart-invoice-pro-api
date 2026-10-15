@@ -168,6 +168,24 @@ class TestUpdateUserRole:
                               json={"role": "Manager"}, headers=headers_a)
         assert resp.status_code == 404
 
+    def test_other_tenant_user_not_found(self, client, headers_a):
+        """An Admin of tenant A cannot change a tenant B user's role."""
+        other_tenant_user = {**SALES_USER, "tenant_id": TENANT_B}
+        p1, p2, p3 = _patch_roles_containers()
+        with p1 as mock_users, p2, p3:
+            mock_users.query_items.side_effect = [
+                [ADMIN_USER],          # require_role → _fetch_user
+                [other_tenant_user],   # target lookup
+            ]
+            resp = client.put(f"/api/users/{USER_B}/role",
+                              json={"role": "Admin"}, headers=headers_a)
+            target_call = mock_users.query_items.call_args_list[1]
+        assert resp.status_code == 404
+        mock_users.upsert_item.assert_not_called()
+        params = {p["name"]: p["value"] for p in target_call.kwargs["parameters"]}
+        assert params == {"@uid": USER_B, "@tid": TENANT_A}
+        assert "@tid" in target_call.kwargs["query"]
+
 
 class TestPendingApprovals:
     """GET /api/approvals/pending"""
