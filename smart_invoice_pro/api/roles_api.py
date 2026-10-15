@@ -41,11 +41,19 @@ def _fetch_user(user_id):
     return items[0] if items else None
 
 def _get_role(user_id):
-    """Return the role string for a user, defaulting to 'Sales'."""
+    """Return the user's role in the request's tenant, defaulting to 'Sales'.
+
+    Outside their own tenant this is the role of their active membership, or ''
+    (no role) when they have none.
+    """
     user = _fetch_user(user_id)
     if not user:
         return None
-    return user.get('role', 'Sales')
+    from smart_invoice_pro.utils.memberships import tenant_role_view
+    view = tenant_role_view(user, getattr(request, 'tenant_id', None))
+    if view is None:
+        return ''
+    return view.get('role', 'Sales')
 
 
 def _is_archived(item):
@@ -85,7 +93,7 @@ def get_my_role():
     return jsonify({
         'user_id': uid,
         'username': user.get('username', ''),
-        'role': user.get('role', 'Sales'),
+        'role': _get_role(uid),
     }), 200
 
 

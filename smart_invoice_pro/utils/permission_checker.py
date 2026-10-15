@@ -91,3 +91,26 @@ def check_permission(module: str, action: str) -> bool:
         return bool(permissions.get(module, {}).get(action, False))
     except Exception:
         return False
+
+
+def require_admin(fn):
+    """Decorator: allow the request only for the tenant's Admin (no module permission is enough)."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user_id   = getattr(request, 'user_id',   None)
+        tenant_id = getattr(request, 'tenant_id', None)
+
+        if not user_id or not tenant_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        try:
+            is_admin, _ = _get_user_permissions(user_id, tenant_id)
+        except Exception as exc:
+            logger.error(f"permission_checker: error fetching permissions user={user_id} (admin check): {exc}")
+            return jsonify({'error': 'Permission check failed'}), 500
+
+        if not is_admin:
+            return jsonify({'error': 'Forbidden — only an Admin can do this'}), 403
+
+        return fn(*args, **kwargs)
+    return wrapper
