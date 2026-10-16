@@ -168,6 +168,24 @@ class TestUpdateUserRole:
                               json={"role": "Manager"}, headers=headers_a)
         assert resp.status_code == 404
 
+    def test_other_tenant_user_not_found(self, client, headers_a):
+        """An Admin of tenant A cannot change a tenant B user's role."""
+        other_tenant_user = {**SALES_USER, "tenant_id": TENANT_B}
+        p1, p2, p3 = _patch_roles_containers()
+        with p1 as mock_users, p2, p3:
+            mock_users.query_items.side_effect = [
+                [ADMIN_USER],          # require_role → _fetch_user
+                [other_tenant_user],   # target lookup
+            ]
+            resp = client.put(f"/api/users/{USER_B}/role",
+                              json={"role": "Admin"}, headers=headers_a)
+            target_call = mock_users.query_items.call_args_list[1]
+        assert resp.status_code == 404
+        mock_users.upsert_item.assert_not_called()
+        params = {p["name"]: p["value"] for p in target_call.kwargs["parameters"]}
+        assert params == {"@uid": USER_B, "@tid": TENANT_A}
+        assert "@tid" in target_call.kwargs["query"]
+
 
 class TestPendingApprovals:
     """GET /api/approvals/pending"""
@@ -330,3 +348,32 @@ class TestPOApprovalWorkflow:
             resp = client.post("/api/purchase-orders/po-001/reject",
                                json={"reason": "test"}, headers=headers_a)
         assert resp.status_code == 400
+
+
+class TestApprovalTenantScope:
+    """An approver of tenant A cannot move tenant B's invoices or POs."""
+
+    CASES = [
+        ("invoice", "/api/invoices/inv-001/submit-for-approval", DRAFT_INVOICE),
+        ("invoice", "/api/invoices/inv-002/approve", PENDING_INVOICE),
+        ("invoice", "/api/invoices/inv-002/reject", PENDING_INVOICE),
+        ("po", "/api/purchase-orders/po-001/submit-for-approval", DRAFT_PO),
+        ("po", "/api/purchase-orders/po-002/approve", PENDING_PO),
+        ("po", "/api/purchase-orders/po-002/reject", PENDING_PO),
+    ]
+
+    @pytest.mark.parametrize("kind,url,record", CASES)
+    def test_other_tenant_record_not_found(self, client, headers_a, kind, url, record):
+        other_tenant_record = {**record, "tenant_id": TENANT_B}
+        p1, p2, p3 = _patch_roles_containers()
+        with p1 as mock_users, p2 as mock_inv, p3 as mock_po:
+            container = mock_inv if kind == "invoice" else mock_po
+            mock_users.query_items.return_value = [ADMIN_USER]
+            container.query_items.return_value = [other_tenant_record]
+            resp = client.post(url, json={"reason": "x"}, headers=headers_a)
+            lookup = container.query_items.call_args
+        assert resp.status_code == 404
+        container.upsert_item.assert_not_called()
+        params = {p["name"]: p["value"] for p in lookup.kwargs["parameters"]}
+        assert params == {"@id": record["id"], "@tid": TENANT_A}
+        assert record["id"] not in lookup.kwargs["query"]
