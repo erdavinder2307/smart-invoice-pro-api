@@ -260,10 +260,30 @@ def get_pending_approvals():
 
 
 # ── Invoice approval workflow ─────────────────────────────────────────────────
+def _fetch_tenant_record(container, record_id):
+    """Return the record with this id in the request's tenant, or None.
+
+    A record of another tenant must look exactly like a missing one (404).
+    """
+    tenant_id = getattr(request, 'tenant_id', None)
+    if not record_id or not tenant_id:
+        return None
+    items = container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@id", "value": record_id},
+            {"name": "@tid", "value": tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    )
+    for item in items:
+        if item.get('tenant_id') == tenant_id:
+            return item
+    return None
+
+
 def _get_invoice(invoice_id):
-    query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-    items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
-    return items[0] if items else None
+    return _fetch_tenant_record(invoices_container, invoice_id)
 
 
 @roles_blueprint.route('/invoices/<invoice_id>/submit-for-approval', methods=['POST'])
@@ -374,9 +394,7 @@ def reject_invoice(invoice_id):
 
 # ── Purchase Order approval workflow ─────────────────────────────────────────
 def _get_po(po_id):
-    query = f"SELECT * FROM c WHERE c.id = '{po_id}'"
-    items = list(purchase_orders_container.query_items(query=query, enable_cross_partition_query=True))
-    return items[0] if items else None
+    return _fetch_tenant_record(purchase_orders_container, po_id)
 
 
 @roles_blueprint.route('/purchase-orders/<po_id>/submit-for-approval', methods=['POST'])
