@@ -1885,12 +1885,16 @@ def void_invoice(invoice_id):
 def send_invoice_email(invoice_id):
     """Send an invoice to the customer via Azure Communication Services."""
     import os
-    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
-
-    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    from smart_invoice_pro.utils.email_client import (
+        SenderNotConfigured, email_configured, get_email_client, resolve_sender,
+    )
 
     if not email_configured():
         return jsonify({'error': 'Email service not configured on the server'}), 503
+    try:
+        sender_address = resolve_sender(request.tenant_id)
+    except SenderNotConfigured as e:
+        return jsonify({'error': str(e)}), 503
 
     data       = request.get_json() or {}
     attach_pdf = bool(data.get('attach_pdf', False))
@@ -2092,7 +2096,6 @@ def get_invoice_pdf(invoice_id):
 @require_permission('invoices', 'edit')
 def send_invoice_reminder(invoice_id):
     """Send a payment reminder email for an outstanding invoice."""
-    import os
 
     items = list(invoices_container.query_items(
         query="SELECT * FROM c WHERE c.id = @id",
@@ -2115,10 +2118,15 @@ def send_invoice_reminder(invoice_id):
     if not recipient_email:
         return jsonify({'error': 'No customer email on invoice. Pass recipient_email in body.'}), 400
 
-    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
-    sender   = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    from smart_invoice_pro.utils.email_client import (
+        SenderNotConfigured, email_configured, get_email_client, resolve_sender,
+    )
     if not email_configured():
         return jsonify({'error': 'Email service not configured on server.'}), 503
+    try:
+        sender = resolve_sender(inv.get('tenant_id') or request.tenant_id)
+    except SenderNotConfigured as e:
+        return jsonify({'error': str(e)}), 503
 
     inv_number  = inv.get('invoice_number', '')
     balance_due = float(inv.get('balance_due', inv.get('total_amount', 0)))

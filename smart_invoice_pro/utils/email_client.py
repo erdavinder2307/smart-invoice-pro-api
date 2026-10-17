@@ -52,3 +52,51 @@ def get_email_client():
     if connection_string:
         return EmailClient.from_connection_string(connection_string)
     return None
+
+
+NO_SENDER_MESSAGE = "No sender address is set. Add one in Settings → Integrations and save."
+
+
+class SenderNotConfigured(RuntimeError):
+    """Raised when no sender address can be found; never send with an empty one."""
+
+    def __init__(self, message=NO_SENDER_MESSAGE):
+        super().__init__(message)
+
+
+def _tenant_sender(tenant_id):
+    """The sender saved in the tenant's Settings → Integrations, or ''."""
+    try:
+        from smart_invoice_pro.utils.cosmos_client import settings_container
+        items = list(settings_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+            parameters=[
+                {"name": "@id", "value": f"{tenant_id}:integrations_settings"},
+                {"name": "@tid", "value": tenant_id},
+            ],
+            enable_cross_partition_query=True,
+        ))
+    except Exception:
+        return ''
+    if not items or not isinstance(items[0], dict):
+        return ''
+    email_cfg = items[0].get('email') or {}
+    return str(email_cfg.get('sender_email') or '').strip()
+
+
+def resolve_sender(tenant_id=None, preferred=None):
+    """Return the sender address for an email.
+
+    Order: ``preferred`` (e.g. the value on screen) → the tenant's saved sender →
+    ``AZURE_SENDER_EMAIL`` → ``SENDER_EMAIL`` (older name). Raises
+    ``SenderNotConfigured`` when all are empty.
+    """
+    candidates = [preferred]
+    if tenant_id:
+        candidates.append(_tenant_sender(tenant_id))
+    candidates += [os.getenv('AZURE_SENDER_EMAIL'), os.getenv('SENDER_EMAIL')]
+    for candidate in candidates:
+        value = str(candidate or '').strip()
+        if value:
+            return value
+    raise SenderNotConfigured()

@@ -552,12 +552,18 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
     import os
     import logging
 
-    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
-    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
+    from smart_invoice_pro.utils.email_client import (
+        SenderNotConfigured, email_configured, get_email_client, resolve_sender,
+    )
     app_url           = os.getenv('APP_URL', 'https://app.solidevbooks.com')
 
     if not email_configured():
         logging.warning("invite_user: email service not configured — skipping invite email")
+        return
+    try:
+        sender_address = resolve_sender(tenant_id)
+    except SenderNotConfigured:
+        logging.warning("invite_user: no sender address set — skipping invite email")
         return
 
     try:

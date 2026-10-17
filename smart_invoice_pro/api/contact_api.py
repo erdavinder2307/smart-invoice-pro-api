@@ -1,10 +1,9 @@
 from flask import Blueprint, request, jsonify
 from flasgger import swag_from
-from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client, resolve_sender
 
 contact_blueprint = Blueprint('contact', __name__)
 
-SENDER_ADDRESS = "admin@solidevelectrosoft.com"
 RECIPIENT_ADDRESS = "davinder@solidevelectrosoft.com"
 
 @contact_blueprint.route('/contact', methods=['POST'])
@@ -72,10 +71,11 @@ def send_message():
              print("WARNING: email service not configured. Email will NOT be sent.")
              return jsonify({"message": "Message received (Email simulation only - email service not configured)!"}), 200
 
+        sender_address = resolve_sender()
         client = get_email_client()
 
         email_message = {
-            "senderAddress": SENDER_ADDRESS,
+            "senderAddress": sender_address,
             "recipients": {
                 "to": [{"address": RECIPIENT_ADDRESS}],
             },

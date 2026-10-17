@@ -7,16 +7,13 @@ For each unpaid invoice (status Issued or Partially Paid, balance_due > 0):
   - Sends email via Azure Communication Services (same pattern as cron_jobs.py)
   - Appends entry to invoice.reminder_log and saves back to Cosmos DB
 """
-import os
 import logging
 from datetime import datetime, date, timedelta
 
-from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client, resolve_sender
 from smart_invoice_pro.utils.notifications import create_notification
 
 logger = logging.getLogger(__name__)
-
-SENDER_ADDRESS    = os.getenv('SENDER_EMAIL', 'admin@solidevelectrosoft.com')
 
 # Statuses that should receive reminders
 REMINDER_STATUSES = {'Issued', 'Partially Paid'}
@@ -165,9 +162,10 @@ def _send_reminder_email(invoice, days_label):
     """
 
     try:
+        sender_address = resolve_sender(invoice.get('tenant_id'))
         client = get_email_client()
         poller = client.begin_send({
-            "senderAddress": SENDER_ADDRESS,
+            "senderAddress": sender_address,
             "recipients": {"to": [{"address": recipient}]},
             "content": {"subject": subject, "html": html_body},
         })

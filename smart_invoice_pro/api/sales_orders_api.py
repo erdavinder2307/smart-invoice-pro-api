@@ -998,12 +998,16 @@ def get_so_pdf(so_id):
 @token_required
 def send_so_email(so_id):
     """Send a sales order to the customer via Azure Communication Services."""
-    import os
-    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+    from smart_invoice_pro.utils.email_client import (
+        SenderNotConfigured, email_configured, get_email_client, resolve_sender,
+    )
 
-    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
     if not email_configured():
         return jsonify({'error': 'Email service not configured on the server'}), 503
+    try:
+        sender_address = resolve_sender(request.tenant_id)
+    except SenderNotConfigured as e:
+        return jsonify({'error': str(e)}), 503
 
     data = request.get_json() or {}
     attach_pdf = bool(data.get('attach_pdf', False))

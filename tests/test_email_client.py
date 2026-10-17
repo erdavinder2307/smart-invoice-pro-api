@@ -81,3 +81,53 @@ class TestGetEmailClient:
         with pytest.raises(RuntimeError, match="azure-identity"):
             ec.get_email_client()
         mock_cls.assert_not_called()
+
+
+class TestResolveSender:
+    @pytest.fixture(autouse=True)
+    def _clear_sender_env(self, monkeypatch):
+        monkeypatch.delenv("AZURE_SENDER_EMAIL", raising=False)
+        monkeypatch.delenv("SENDER_EMAIL", raising=False)
+
+    def test_raises_when_nothing_set(self):
+        with patch.object(ec, "_tenant_sender", return_value=""):
+            with pytest.raises(ec.SenderNotConfigured) as err:
+                ec.resolve_sender("tenant-1")
+        assert str(err.value) == ec.NO_SENDER_MESSAGE
+
+    def test_blank_values_count_as_unset(self, monkeypatch):
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "  ")
+        monkeypatch.setenv("SENDER_EMAIL", "")
+        with pytest.raises(ec.SenderNotConfigured):
+            ec.resolve_sender(preferred="   ")
+
+    def test_order_preferred_tenant_azure_older_name(self, monkeypatch):
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "azure@example.com")
+        monkeypatch.setenv("SENDER_EMAIL", "old@example.com")
+        with patch.object(ec, "_tenant_sender", return_value="tenant@example.com"):
+            assert ec.resolve_sender("t", preferred="typed@example.com") == "typed@example.com"
+            assert ec.resolve_sender("t") == "tenant@example.com"
+        with patch.object(ec, "_tenant_sender", return_value=""):
+            assert ec.resolve_sender("t") == "azure@example.com"
+        monkeypatch.delenv("AZURE_SENDER_EMAIL")
+        assert ec.resolve_sender() == "old@example.com"
+
+    def test_no_tenant_skips_lookup(self, monkeypatch):
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "azure@example.com")
+        with patch.object(ec, "_tenant_sender") as lookup:
+            assert ec.resolve_sender() == "azure@example.com"
+        lookup.assert_not_called()
+
+    def test_tenant_lookup_reads_saved_sender(self):
+        doc = {"id": "t:integrations_settings", "email": {"sender_email": " bills@example.com "}}
+        with patch("smart_invoice_pro.utils.cosmos_client.settings_container") as ctr:
+            ctr.query_items.return_value = [doc]
+            assert ec._tenant_sender("t") == "bills@example.com"
+        params = ctr.query_items.call_args.kwargs["parameters"]
+        assert {"name": "@id", "value": "t:integrations_settings"} in params
+
+    def test_tenant_lookup_error_falls_back(self, monkeypatch):
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "azure@example.com")
+        with patch("smart_invoice_pro.utils.cosmos_client.settings_container") as ctr:
+            ctr.query_items.side_effect = Exception("cosmos down")
+            assert ec.resolve_sender("t") == "azure@example.com"
