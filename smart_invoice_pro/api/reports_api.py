@@ -3,7 +3,7 @@ from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.cosmos_client import (
     invoices_container, expenses_container, bills_container,
     products_container, bank_accounts_container, customers_container,
-    settings_container, vendors_container
+    settings_container, vendors_container, credit_notes_container
 )
 from smart_invoice_pro.services.gst_itc import build_itc_summary
 from smart_invoice_pro.services.gstr1 import build_gstr1
@@ -13,6 +13,26 @@ import os
 from collections import defaultdict
 
 reports_blueprint = Blueprint('reports', __name__)
+
+
+def _period_notes(tenant_id, start_iso, end_iso):
+    """Issued credit/debit notes dated within [start_iso, end_iso] (YYYY-MM-DD, inclusive)."""
+    try:
+        return [n for n in credit_notes_container.query_items(
+            query=("SELECT * FROM c WHERE c.tenant_id = @tid AND c.note_date >= @start "
+                   "AND c.note_date <= @end AND c.status = 'Issued'"),
+            parameters=[{'name': '@tid', 'value': tenant_id}, {'name': '@start', 'value': start_iso},
+                        {'name': '@end', 'value': end_iso}],
+            enable_cross_partition_query=True,
+        ) if isinstance(n, dict)]
+    except Exception:
+        return []
+
+
+def _signed(note, field):
+    """A debit note adds to a figure, a credit note takes from it."""
+    value = float(note.get(field) or 0)
+    return value if note.get('note_type') == 'debit' else -value
 
 
 def parse_date(date_str):
@@ -763,14 +783,32 @@ def get_sales_summary():
 
         avg_invoice = (total_revenue / len(invoices)) if invoices else 0
 
+        # Credit notes reduce (and debit notes raise) the period's sales, by the
+        # note's date, whichever month the original invoice was in.
+        notes = _period_notes(tenant_id, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+        credit_total = round(sum(float(n.get('total_amount') or 0) for n in notes if n.get('note_type') != 'debit'), 2)
+        debit_total = round(sum(float(n.get('total_amount') or 0) for n in notes if n.get('note_type') == 'debit'), 2)
+        note_by_customer = defaultdict(float)
+        for n in notes:
+            note_by_customer[n.get('customer_id')] += _signed(n, 'total_amount')
+        for row in customer_summary:
+            adj = note_by_customer.get(row['customer_id'], 0.0)
+            if adj:
+                row['credit_notes'] = round(-adj, 2)
+                row['net_amount'] = round(row['total_amount'] + adj, 2)
+
         return jsonify({
             'period': {
                 'start_date': start_date.strftime('%Y-%m-%d'),
                 'end_date': end_date.strftime('%Y-%m-%d')
             },
             'total_revenue': round(total_revenue, 2),
+            'credit_notes_total': credit_total,
+            'debit_notes_total': debit_total,
+            'net_revenue': round(total_revenue - credit_total + debit_total, 2),
             'total_paid': round(total_paid, 2),
             'invoice_count': len(invoices),
+            'credit_note_count': len(notes),
             'avg_invoice_value': round(avg_invoice, 2),
             'customer_summary': customer_summary,
             'monthly_breakdown': monthly_breakdown
@@ -837,6 +875,23 @@ def get_gst_tax_summary():
 
             totals['invoice_count'] += 1
 
+        # Net off credit/debit notes dated in the period, rate by rate (as GSTR-1 Table 9B
+        # and the HSN summary do), so the summary is the liability actually owed.
+        notes = _period_notes(tenant_id, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+        for note in notes:
+            for item in note.get('items') or []:
+                if not isinstance(item, dict):
+                    continue
+                key = f"{float(item.get('tax', 0)):.0f}%"
+                for field, amount in (('taxable_value', 'taxable_value'), ('cgst', 'cgst'),
+                                      ('sgst', 'sgst'), ('igst', 'igst')):
+                    rate_groups[key][field] += _signed(item, amount)
+                    totals[field] += _signed(item, amount)
+                tax = _signed(item, 'cgst') + _signed(item, 'sgst') + _signed(item, 'igst')
+                rate_groups[key]['total_tax'] += tax
+                totals['total_tax'] += tax
+        totals['credit_note_count'] = len(notes)
+
         tax_breakdown = sorted(
             [
                 {
@@ -864,7 +919,8 @@ def get_gst_tax_summary():
                 'sgst': round(totals['sgst'], 2),
                 'igst': round(totals['igst'], 2),
                 'total_tax': round(totals['total_tax'], 2),
-                'invoice_count': totals['invoice_count']
+                'invoice_count': totals['invoice_count'],
+                'credit_note_count': totals['credit_note_count']
             }
         }), 200
 
@@ -908,13 +964,36 @@ def get_gstr1():
         ))
         seller_gstin = (profiles[0].get('gstin') if profiles else '') or ''
 
+        # Table 9B: the month's notes, with their original invoices, which may be from an
+        # earlier month and so are not in `invoices`.
+        notes = [n for n in credit_notes_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tid AND STARTSWITH(c.note_date, @month)",
+            parameters=params + [{'name': '@month', 'value': period.strftime('%Y-%m')}],
+            enable_cross_partition_query=True,
+        ) if isinstance(n, dict)]
+        invoices_by_id = {str(inv.get('id')): inv for inv in invoices if inv.get('id')}
+        missing = sorted({str(n.get('invoice_id')) for n in notes
+                          if n.get('invoice_id') and str(n.get('invoice_id')) not in invoices_by_id})
+        if missing:
+            originals = invoices_container.query_items(
+                query="SELECT * FROM c WHERE c.tenant_id = @tid AND ARRAY_CONTAINS(@ids, c.id)",
+                parameters=params + [{'name': '@ids', 'value': missing}],
+                enable_cross_partition_query=True,
+            )
+            for inv in originals:
+                if isinstance(inv, dict) and inv.get('id'):
+                    invoices_by_id[str(inv['id'])] = inv
+
+        stats = {}
         payload, issues, count = build_gstr1(
             invoices,
             {str(c.get('id')): c for c in customers},
             {str(p.get('name') or '').strip().lower(): p for p in products},
             seller_gstin, period.year, period.month,
+            credit_notes=notes, invoices_by_id=invoices_by_id, stats=stats,
         )
-        return jsonify({'gstr1': payload, 'issues': issues, 'invoice_count': count}), 200
+        return jsonify({'gstr1': payload, 'issues': issues, 'invoice_count': count,
+                        'note_count': stats.get('notes', 0)}), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

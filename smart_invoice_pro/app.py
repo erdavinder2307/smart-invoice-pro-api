@@ -9,6 +9,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from smart_invoice_pro.api.routes import auth_blueprint, api_blueprint
 from smart_invoice_pro.api.invoices import api_blueprint as invoices_blueprint
+from smart_invoice_pro.api.credit_notes_api import credit_notes_blueprint
 from smart_invoice_pro.api.customers_api import customers_blueprint
 from smart_invoice_pro.api.invoice_generation import invoice_generation_blueprint
 from smart_invoice_pro.api.product_api import product_blueprint
@@ -190,6 +191,7 @@ def create_app():
     app.register_blueprint(auth_blueprint, url_prefix="/api")
     app.register_blueprint(api_blueprint, url_prefix="/api")
     app.register_blueprint(invoices_blueprint, url_prefix="/api")
+    app.register_blueprint(credit_notes_blueprint, url_prefix="/api")
     app.register_blueprint(customers_blueprint, url_prefix="/api")
     app.register_blueprint(invoice_generation_blueprint, url_prefix="/api")
     app.register_blueprint(product_blueprint, url_prefix="/api")
