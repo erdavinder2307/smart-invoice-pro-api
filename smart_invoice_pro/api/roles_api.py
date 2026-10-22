@@ -36,16 +36,49 @@ def _fetch_user(user_id):
     """Return the user document from Cosmos or None."""
     if not user_id:
         return None
-    query = f"SELECT * FROM c WHERE c.id = '{user_id}'"
-    items = list(users_container.query_items(query=query, enable_cross_partition_query=True))
+    items = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @uid",
+        parameters=[{"name": "@uid", "value": user_id}],
+        enable_cross_partition_query=True,
+    ))
     return items[0] if items else None
 
+def _fetch_tenant_user(user_id, tenant_id):
+    """Return the login account with this id in the given tenant, or None.
+
+    Used for the target of an Admin action: a user of another tenant must look
+    exactly like a missing user (404), so ids from other tenants reveal nothing.
+    """
+    if not user_id or not tenant_id:
+        return None
+    from smart_invoice_pro.utils.rbac_resolver import _is_account_user
+    items = users_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @uid AND c.tenant_id = @tid",
+        parameters=[
+            {"name": "@uid", "value": user_id},
+            {"name": "@tid", "value": tenant_id},
+        ],
+        enable_cross_partition_query=True,
+    )
+    for item in items:
+        if item.get('tenant_id') == tenant_id and _is_account_user(item):
+            return item
+    return None
+
 def _get_role(user_id):
-    """Return the role string for a user, defaulting to 'Sales'."""
+    """Return the user's role in the request's tenant, defaulting to 'Sales'.
+
+    Outside their own tenant this is the role of their active membership, or ''
+    (no role) when they have none.
+    """
     user = _fetch_user(user_id)
     if not user:
         return None
-    return user.get('role', 'Sales')
+    from smart_invoice_pro.utils.memberships import tenant_role_view
+    view = tenant_role_view(user, getattr(request, 'tenant_id', None))
+    if view is None:
+        return ''
+    return view.get('role', 'Sales')
 
 
 def _is_archived(item):
@@ -85,7 +118,7 @@ def get_my_role():
     return jsonify({
         'user_id': uid,
         'username': user.get('username', ''),
-        'role': user.get('role', 'Sales'),
+        'role': _get_role(uid),
     }), 200
 
 
@@ -126,13 +159,14 @@ def update_user_role(target_user_id):
     if new_role not in VALID_ROLES:
         return jsonify({'error': f'Invalid role. Choose from: {", ".join(VALID_ROLES)}'}), 400
 
-    user = _fetch_user(target_user_id)
+    tenant_id = getattr(request, 'tenant_id', None)
+    user = _fetch_tenant_user(target_user_id, tenant_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
 
-    # Prevent removing the last Admin in this tenant
+    # Prevent removing the last Admin in this tenant (the target's tenant,
+    # which is the caller's after the scoped fetch above)
     if user.get('role') == 'Admin' and new_role != 'Admin':
-        tenant_id = getattr(request, 'tenant_id', None)
         admins = list(users_container.query_items(
             query="SELECT * FROM c WHERE c.role = 'Admin' AND c.tenant_id = @tid",
             parameters=[{"name": "@tid", "value": tenant_id}],
