@@ -7,6 +7,7 @@ from datetime import datetime
 import uuid
 import logging
 from smart_invoice_pro.services.reminder_job import process_payment_reminders
+from smart_invoice_pro.services.trial_scheduler import check_trial_expirations, send_activation_nudges
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -198,6 +199,29 @@ def start_scheduler(app):
         minute=5,
         id='payment_reminder_job',
         name='Send Payment Reminders',
+        replace_existing=True
+    )
+
+    # Daily trial expiry check — runs at 07:00 UTC (12:30 PM IST)
+    scheduler.add_job(
+        func=check_trial_expirations,
+        trigger='cron',
+        hour=7,
+        minute=0,
+        id='trial_expiry_job',
+        name='Check Trial Expirations',
+        replace_existing=True
+    )
+
+    # Weekly activation nudge — runs every Monday at 08:00 UTC
+    scheduler.add_job(
+        func=send_activation_nudges,
+        trigger='cron',
+        day_of_week='mon',
+        hour=8,
+        minute=0,
+        id='activation_nudge_job',
+        name='Send Activation Nudges',
         replace_existing=True
     )
     

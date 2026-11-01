@@ -10,6 +10,7 @@ roles_permissions_api.get_my_permissions / _check_permission.
 from __future__ import annotations
 
 from smart_invoice_pro.utils.cosmos_client import users_container, get_container
+from smart_invoice_pro.utils.redis_client import cache, permission_cache_key, PERMISSION_CACHE_TTL
 
 _ADMIN_ROLE_NAMES = frozenset({'Admin'})
 
@@ -100,7 +101,18 @@ def resolve_user_permissions(user_id: str, tenant_id: str) -> tuple[bool, dict]:
 
     is_admin          – bypass all module checks when True
     permissions_dict  – {module: {action: bool}} from the role document
+
+    Results are cached in Redis (key: permissions:{tenant_id}:{user_id}, TTL 5 min)
+    to eliminate per-request Cosmos DB reads. Cache is invalidated on role changes.
     """
+    # ── Redis cache check ─────────────────────────────────────────────────────
+    if user_id and tenant_id:
+        rkey = permission_cache_key(tenant_id, user_id)
+        cached = cache.get(rkey)
+        if cached is not None:
+            return cached.get('is_admin', False), cached.get('permissions', {})
+
+    # ── Cosmos DB resolution (cache miss) ─────────────────────────────────────
     user = fetch_account_user(user_id)
     if not user:
         return False, {}
@@ -114,10 +126,35 @@ def resolve_user_permissions(user_id: str, tenant_id: str) -> tuple[bool, dict]:
         return False, {}
 
     if is_admin_user(user, tenant_id):
+        if user_id and tenant_id:
+            cache.set(permission_cache_key(tenant_id, user_id),
+                      {'is_admin': True, 'permissions': {}},
+                      ttl=PERMISSION_CACHE_TTL)
         return True, {}
 
     role_doc = _resolve_role_doc(user, tenant_id)
     if not role_doc:
         return False, {}
 
-    return False, role_doc.get('permissions') or {}
+    permissions = role_doc.get('permissions') or {}
+    if user_id and tenant_id:
+        cache.set(permission_cache_key(tenant_id, user_id),
+                  {'is_admin': False, 'permissions': permissions},
+                  ttl=PERMISSION_CACHE_TTL)
+    return False, permissions
+
+
+def invalidate_user_permission_cache(tenant_id: str, user_id: str) -> None:
+    """Remove the cached permission entry for one user. Call on role assignment."""
+    if tenant_id and user_id:
+        cache.delete(permission_cache_key(tenant_id, user_id))
+
+
+def invalidate_tenant_permission_cache(tenant_id: str) -> None:
+    """
+    Remove ALL permission cache entries for a tenant.
+    Call when a role document's permissions are edited (all users with that
+    role need a fresh resolution on their next request).
+    """
+    if tenant_id:
+        cache.delete_pattern(f"permissions:{tenant_id}:*")

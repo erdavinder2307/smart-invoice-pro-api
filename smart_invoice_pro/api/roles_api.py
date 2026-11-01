@@ -11,6 +11,8 @@ Approval workflow
 from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import users_container, invoices_container, purchase_orders_container
 from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
+from smart_invoice_pro.utils.rbac_resolver import invalidate_user_permission_cache
+from smart_invoice_pro.utils.permission_checker import require_permission
 from datetime import datetime
 import copy
 from functools import wraps
@@ -36,8 +38,11 @@ def _fetch_user(user_id):
     """Return the user document from Cosmos or None."""
     if not user_id:
         return None
-    query = f"SELECT * FROM c WHERE c.id = '{user_id}'"
-    items = list(users_container.query_items(query=query, enable_cross_partition_query=True))
+    items = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @uid",
+        parameters=[{"name": "@uid", "value": user_id}],
+        enable_cross_partition_query=True,
+    ))
     return items[0] if items else None
 
 def _get_role(user_id):
@@ -89,9 +94,9 @@ def get_my_role():
     }), 200
 
 
-# ── GET /api/users (Admin only) ───────────────────────────────────────────────
+# ── GET /api/users (user_management.view) ────────────────────────────────────
 @roles_blueprint.route('/users', methods=['GET'])
-@require_role('Admin')
+@require_permission('user_management', 'view')
 def list_users():
     """List all users with their roles."""
     tenant_id = getattr(request, 'tenant_id', None)
@@ -116,9 +121,9 @@ def list_users():
     return jsonify(safe), 200
 
 
-# ── PUT /api/users/<user_id>/role (Admin only) ────────────────────────────────
+# ── PUT /api/users/<user_id>/role (user_management.edit) ─────────────────────
 @roles_blueprint.route('/users/<target_user_id>/role', methods=['PUT'])
-@require_role('Admin')
+@require_permission('user_management', 'edit')
 def update_user_role(target_user_id):
     """Update a user's role."""
     data = request.get_json() or {}
@@ -150,6 +155,10 @@ def update_user_role(target_user_id):
               {"id": target_user_id, "role": new_role},
               user_id=getattr(request, 'user_id', None),
               tenant_id=getattr(request, 'tenant_id', None))
+    # Invalidate cached permissions for the affected user
+    invalidate_user_permission_cache(
+        getattr(request, 'tenant_id', None), target_user_id
+    )
     return jsonify({'id': target_user_id, 'role': new_role}), 200
 
 
@@ -227,12 +236,16 @@ def get_pending_approvals():
 
 # ── Invoice approval workflow ─────────────────────────────────────────────────
 def _get_invoice(invoice_id):
-    query = f"SELECT * FROM c WHERE c.id = '{invoice_id}'"
-    items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+    items = list(invoices_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": invoice_id}],
+        enable_cross_partition_query=True,
+    ))
     return items[0] if items else None
 
 
 @roles_blueprint.route('/invoices/<invoice_id>/submit-for-approval', methods=['POST'])
+@require_permission('invoices', 'edit')
 def submit_invoice_for_approval(invoice_id):
     """Submit a Draft invoice for manager approval."""
     uid = _get_user_id()
@@ -269,7 +282,7 @@ def submit_invoice_for_approval(invoice_id):
 
 
 @roles_blueprint.route('/invoices/<invoice_id>/approve', methods=['POST'])
-@require_role('Admin', 'Manager', 'Accountant')
+@require_permission('invoices', 'approve')
 def approve_invoice(invoice_id):
     """Approve a pending invoice → status becomes Issued."""
     uid = _get_user_id()
@@ -303,7 +316,7 @@ def approve_invoice(invoice_id):
 
 
 @roles_blueprint.route('/invoices/<invoice_id>/reject', methods=['POST'])
-@require_role('Admin', 'Manager', 'Accountant')
+@require_permission('invoices', 'approve')
 def reject_invoice(invoice_id):
     """Reject a pending invoice → status returns to Draft."""
     uid = _get_user_id()
@@ -340,12 +353,16 @@ def reject_invoice(invoice_id):
 
 # ── Purchase Order approval workflow ─────────────────────────────────────────
 def _get_po(po_id):
-    query = f"SELECT * FROM c WHERE c.id = '{po_id}'"
-    items = list(purchase_orders_container.query_items(query=query, enable_cross_partition_query=True))
+    items = list(purchase_orders_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": po_id}],
+        enable_cross_partition_query=True,
+    ))
     return items[0] if items else None
 
 
 @roles_blueprint.route('/purchase-orders/<po_id>/submit-for-approval', methods=['POST'])
+@require_permission('purchase_orders', 'edit')
 def submit_po_for_approval(po_id):
     """Submit a Draft PO for manager approval."""
     uid = _get_user_id()
@@ -381,7 +398,7 @@ def submit_po_for_approval(po_id):
 
 
 @roles_blueprint.route('/purchase-orders/<po_id>/approve', methods=['POST'])
-@require_role('Admin', 'Manager')
+@require_permission('purchase_orders', 'approve')
 def approve_po(po_id):
     """Approve a pending PO → status becomes Sent."""
     uid = _get_user_id()
@@ -415,7 +432,7 @@ def approve_po(po_id):
 
 
 @roles_blueprint.route('/purchase-orders/<po_id>/reject', methods=['POST'])
-@require_role('Admin', 'Manager')
+@require_permission('purchase_orders', 'approve')
 def reject_po(po_id):
     """Reject a pending PO → status returns to Draft."""
     uid = _get_user_id()

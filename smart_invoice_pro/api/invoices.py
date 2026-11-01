@@ -312,6 +312,17 @@ def _adjust_stock(items, invoice_number, invoice_id, tenant_id, direction, credi
     }
 })
 def create_invoice():
+    from smart_invoice_pro.utils.entitlement_checker import check_entitlement
+    from flask import g
+    _tenant = getattr(g, "tenant_id", None) or getattr(request, "tenant_id", None)
+    if _tenant:
+        from smart_invoice_pro.services.subscription_service import get_entitlements, increment_usage
+        _ent = get_entitlements(_tenant)
+        if _ent.get("read_only") or _ent.get("upgrade_required"):
+            return jsonify({"error": "subscription_expired", "message": "Your trial has ended. Please upgrade.", "upgrade_url": "/settings/billing/upgrade"}), 402
+        if not _ent.get("can_create_invoice", True):
+            return jsonify({"error": "limit_reached", "resource": "invoices", "message": "Monthly invoice limit reached. Please upgrade.", "upgrade_url": "/settings/billing/upgrade"}), 429
+
     data = request.get_json() or {}
 
     validation_errors = validate_invoice_payload(data)
@@ -1270,6 +1281,7 @@ def restore_invoice(invoice_id):
 
 
 @api_blueprint.route('/invoices/<invoice_id>', methods=['PATCH'])
+@require_permission('invoices', 'edit')
 @swag_from({
     'tags': ['Invoices'],
     'parameters': [

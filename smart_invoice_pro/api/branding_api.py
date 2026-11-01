@@ -25,6 +25,7 @@ from flask import Blueprint, request, jsonify
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.api.organization_profile_api import _get_profile, _safe
 from smart_invoice_pro.utils.audit_logger import log_audit
 
@@ -68,6 +69,7 @@ def _extract_branding(profile: dict) -> dict:
 
 # ── GET /api/settings/branding ────────────────────────────────────────────────
 @branding_blueprint.route('/settings/branding', methods=['GET'])
+@require_permission('settings', 'view')
 def get_branding():
     """Return branding settings for the current tenant."""
     try:
@@ -79,7 +81,7 @@ def get_branding():
 
 # ── PUT /api/settings/branding ────────────────────────────────────────────────
 @branding_blueprint.route('/settings/branding', methods=['PUT'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 @forbid_demo_settings_mutation()
 def update_branding():
     """Update branding settings for the current tenant (Admin only)."""
@@ -153,6 +155,7 @@ def update_branding():
 
 # ── GET /api/settings/branding/preview ───────────────────────────────────────
 @branding_blueprint.route('/settings/branding/preview', methods=['GET'])
+@require_permission('settings', 'view')
 def preview_branding_pdf():
     """
     Return a sample invoice PDF rendered with the current tenant branding.

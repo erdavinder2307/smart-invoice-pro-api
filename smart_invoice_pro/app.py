@@ -43,6 +43,10 @@ from smart_invoice_pro.api.admin_api import admin_blueprint
 from smart_invoice_pro.api.search_api import search_blueprint
 from smart_invoice_pro.api.me_api import me_blueprint
 from smart_invoice_pro.api.lifecycle_api import lifecycle_blueprint
+from smart_invoice_pro.api.plans_api import plans_blueprint
+from smart_invoice_pro.api.subscription_api import subscription_blueprint
+from smart_invoice_pro.api.billing_api import billing_blueprint
+from smart_invoice_pro.api.customer_portal_api import customer_portal_blueprint
 from smart_invoice_pro.api.auth_middleware import enforce_api_auth
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
@@ -97,17 +101,24 @@ def create_app():
 
     Swagger(app)
 
-    # Rate limiting (uses in-memory storage by default; switch to Redis in production)
+    # Rate limiting.
+    # Uses Redis when REDIS_URL is set; falls back to in-memory storage so the
+    # app continues to work without Redis configured.
+    _redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_CONNECTION_STRING") or ""
+    _limiter_storage = _redis_url.strip() if _redis_url.strip() else "memory://"
+
     limiter = Limiter(
         app=app,
         key_func=get_remote_address,
         default_limits=[],
-        storage_uri="memory://"
+        storage_uri=_limiter_storage,
     )
 
-    # Apply 5 attempts per minute to the login endpoint
+    # Apply 5 attempts per minute to the login endpoints
     from smart_invoice_pro.api.routes import login_user
     limiter.limit("5 per minute")(login_user)
+    from smart_invoice_pro.api.customers_api import customer_login
+    limiter.limit("5 per minute")(customer_login)
 
     allowed_origins = _get_allowed_origins()
     cors_origins = sorted(allowed_origins) + [
@@ -211,6 +222,10 @@ def create_app():
     app.register_blueprint(search_blueprint, url_prefix="/api")
     app.register_blueprint(me_blueprint, url_prefix="/api")
     app.register_blueprint(lifecycle_blueprint, url_prefix="/api")
+    app.register_blueprint(plans_blueprint, url_prefix="/api")
+    app.register_blueprint(subscription_blueprint, url_prefix="/api")
+    app.register_blueprint(billing_blueprint, url_prefix="/api")
+    app.register_blueprint(customer_portal_blueprint, url_prefix="/api")
 
     # Start the background scheduler for recurring invoices outside test runs.
     if _should_start_scheduler():

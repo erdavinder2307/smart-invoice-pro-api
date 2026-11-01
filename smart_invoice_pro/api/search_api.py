@@ -23,16 +23,20 @@ MAX_HISTORY_LIMIT = 10
 
 
 FEATURE_SEARCH_TARGETS = [
-    {"title": "Invoices", "subtitle": "Create, edit and track invoices", "path": "/invoices", "entity_type": "feature"},
-    {"title": "Customers", "subtitle": "Manage customer records", "path": "/customers", "entity_type": "feature"},
-    {"title": "Products", "subtitle": "Manage catalog and stock-ready items", "path": "/products", "entity_type": "feature"},
-    {"title": "Quotes", "subtitle": "Prepare and send quote proposals", "path": "/quotes", "entity_type": "feature"},
-    {"title": "Sales Orders", "subtitle": "Track confirmed sales", "path": "/sales-orders", "entity_type": "feature"},
-    {"title": "Vendors", "subtitle": "Manage vendor relationships", "path": "/vendors", "entity_type": "feature"},
-    {"title": "Bills", "subtitle": "Track vendor bills", "path": "/bills", "entity_type": "feature"},
-    {"title": "Expenses", "subtitle": "Capture and categorize expenses", "path": "/expenses", "entity_type": "feature"},
-    {"title": "Reports", "subtitle": "Profit/loss, tax and cash reports", "path": "/reports", "entity_type": "feature"},
-    {"title": "Settings", "subtitle": "Configure organization and billing defaults", "path": "/settings", "entity_type": "feature"},
+    {"title": "Invoices",      "subtitle": "Create, edit and track invoices",         "path": "/invoices",         "entity_type": "feature", "permission": ("invoices",        "view")},
+    {"title": "Customers",     "subtitle": "Manage customer records",                 "path": "/customers",        "entity_type": "feature", "permission": ("customers",       "view")},
+    {"title": "Products",      "subtitle": "Manage catalog and stock-ready items",    "path": "/products",         "entity_type": "feature", "permission": ("products",        "view")},
+    {"title": "Quotes",        "subtitle": "Prepare and send quote proposals",        "path": "/quotes",           "entity_type": "feature", "permission": ("quotes",          "view")},
+    {"title": "Sales Orders",  "subtitle": "Track confirmed sales",                   "path": "/sales-orders",     "entity_type": "feature", "permission": ("purchase_orders", "view")},
+    {"title": "Vendors",       "subtitle": "Manage vendor relationships",             "path": "/vendors",          "entity_type": "feature", "permission": ("vendors",         "view")},
+    {"title": "Purchase Orders","subtitle": "Track purchase orders",                  "path": "/purchase-orders",  "entity_type": "feature", "permission": ("purchase_orders", "view")},
+    {"title": "Bills",         "subtitle": "Track vendor bills",                      "path": "/bills",            "entity_type": "feature", "permission": ("bills",           "view")},
+    {"title": "Expenses",      "subtitle": "Capture and categorize expenses",         "path": "/expenses",         "entity_type": "feature", "permission": ("expenses",        "view")},
+    {"title": "Banking",       "subtitle": "Bank accounts and reconciliation",        "path": "/bank-accounts",    "entity_type": "feature", "permission": ("banking",         "view")},
+    {"title": "Reports",       "subtitle": "Profit/loss, tax and cash reports",       "path": "/reports",          "entity_type": "feature", "permission": ("reports",         "view")},
+    {"title": "Settings",      "subtitle": "Configure organization and billing",      "path": "/settings",         "entity_type": "feature", "permission": ("settings",        "view")},
+    {"title": "Audit Log",     "subtitle": "View activity history",                  "path": "/activity",         "entity_type": "feature", "permission": ("audit_logs",      "view")},
+    {"title": "Billing",       "subtitle": "Manage subscription and billing",         "path": "/settings/billing", "entity_type": "feature", "permission": ("billing",         "view")},
 ]
 
 
@@ -167,6 +171,9 @@ def _search_features(term, limit):
     needle = term.lower()
     scored = []
     for target in FEATURE_SEARCH_TARGETS:
+        perm = target.get("permission")
+        if perm and not check_permission(*perm):
+            continue
         haystack = f"{target['title']} {target['subtitle']}"
         score = _fuzzy_score(needle, haystack)
         if score > 0.3:

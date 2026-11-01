@@ -39,6 +39,7 @@ from werkzeug.utils import secure_filename
 
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.demo_guard import (
     forbid_demo_settings_mutation,
     request_is_demo_mode,
@@ -106,6 +107,7 @@ def _safe(doc: dict) -> dict:
 
 # ── GET /api/settings/organization-profile ────────────────────────────────────
 @org_profile_blueprint.route('/settings/organization-profile', methods=['GET'])
+@require_permission('settings', 'view')
 def get_org_profile():
     """Fetch the organization profile for the current tenant."""
     try:
@@ -117,7 +119,7 @@ def get_org_profile():
 
 # ── PUT /api/settings/organization-profile ────────────────────────────────────
 @org_profile_blueprint.route('/settings/organization-profile', methods=['PUT'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 @forbid_demo_settings_mutation()
 def update_org_profile():
     """Create or update the organization profile for the current tenant (Admin only)."""
@@ -216,6 +218,7 @@ def update_org_profile():
 
 # ── GET /api/settings/gst-config ────────────────────────────────────────────
 @org_profile_blueprint.route('/settings/gst-config', methods=['GET'])
+@require_permission('settings', 'view')
 def get_gst_config():
     """Return tenant GST configuration needed by the tax calculation engine."""
     try:
@@ -246,7 +249,7 @@ def get_gst_config():
 
 # ── POST /api/settings/upload-logo ───────────────────────────────────────────
 @org_profile_blueprint.route('/settings/upload-logo', methods=['POST'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 @forbid_demo_settings_mutation("Logo uploads are disabled in the Interactive Workspace.")
 def upload_org_logo():
     """Upload the organization logo. Accepts { logo_filename, logo_base64 } (Admin only)."""

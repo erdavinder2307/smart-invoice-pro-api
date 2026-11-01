@@ -285,6 +285,17 @@ def register_user():
     except Exception:
         pass
 
+    # Create 30-day trial subscription for new tenant (idempotent)
+    try:
+        from smart_invoice_pro.services.subscription_service import (
+            get_subscription,
+            create_trial_subscription,
+        )
+        if not get_subscription(tenant_id):
+            create_trial_subscription(tenant_id)
+    except Exception:
+        pass
+
     return jsonify({
         "message": "User registered successfully!",
         "user": {
@@ -374,6 +385,11 @@ def login_user():
         tenant_id = items[0].get('tenant_id') or items[0].get('id')
         user_id = items[0]['id']
 
+        # CPB-003/004: resolve workspace from user_type
+        user_type = items[0].get('user_type', 'staff')
+        workspace = 'portal' if user_type == 'customer' else 'financial'
+        linked_customer_id = items[0].get('linked_customer_id')
+
         # Generate and store refresh token (30-day expiry) with device metadata
         refresh_token_value = secrets.token_urlsafe(48)
         refresh_token_expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
@@ -411,6 +427,10 @@ def login_user():
                 "role_id": items[0].get('role_id', ''),
                 "is_super_admin": bool(items[0].get('is_super_admin', False)),
                 "session_id": token_record_id,
+                # CPB-004: workspace routing fields
+                "user_type": user_type,
+                "workspace": workspace,
+                "linked_customer_id": linked_customer_id,
                 "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
             },
             jwt_secret,
@@ -453,7 +473,11 @@ def login_user():
                 "username": items[0]['username'],
                 "name": profile_name or items[0].get('name', ''),
                 "role": items[0].get('role', 'Sales'),
-                "is_super_admin": bool(items[0].get('is_super_admin', False))
+                "is_super_admin": bool(items[0].get('is_super_admin', False)),
+                # CPB-003/004: workspace routing fields
+                "user_type": user_type,
+                "workspace": workspace,
+                "linked_customer_id": linked_customer_id,
             },
             "token": access_token,
             "access_token": access_token,

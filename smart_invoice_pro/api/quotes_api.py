@@ -127,8 +127,18 @@ def validate_quote_data(data, is_update=False):
 })
 def create_quote():
     """Create a new quote"""
+    from flask import g
+    _tenant = getattr(g, "tenant_id", None) or getattr(request, "tenant_id", None)
+    if _tenant:
+        from smart_invoice_pro.services.subscription_service import get_entitlements
+        _ent = get_entitlements(_tenant)
+        if _ent.get("read_only") or _ent.get("upgrade_required"):
+            return jsonify({"error": "subscription_expired", "message": "Your trial has ended. Please upgrade.", "upgrade_url": "/settings/billing/upgrade"}), 402
+        if not _ent.get("can_create_quote", True):
+            return jsonify({"error": "limit_reached", "resource": "quotes", "message": "Monthly quote limit reached. Please upgrade.", "upgrade_url": "/settings/billing/upgrade"}), 429
+
     data = request.get_json()
-    
+
     # Validate data
     errors = validate_quote_data(data)
     if errors:

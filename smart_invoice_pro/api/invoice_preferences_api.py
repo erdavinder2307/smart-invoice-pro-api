@@ -26,6 +26,7 @@ from flask import Blueprint, request, jsonify
 
 from smart_invoice_pro.utils.cosmos_client import settings_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.utils.audit_logger import log_audit
 import copy
 
@@ -182,8 +183,9 @@ def peek_next_invoice_number(tenant_id: str) -> str:
 
 # ── GET /api/settings/invoice-preferences ────────────────────────────────────
 @invoice_preferences_blueprint.route('/settings/invoice-preferences', methods=['GET'])
+@require_permission('settings', 'view')
 def get_invoice_preferences():
-    """Return invoice preferences for the current tenant (any authenticated user)."""
+    """Return invoice preferences for the current tenant."""
     try:
         prefs = _get_prefs(request.tenant_id)
         return jsonify(_safe_prefs(prefs)), 200
@@ -193,7 +195,7 @@ def get_invoice_preferences():
 
 # ── PUT /api/settings/invoice-preferences ───────────────────────────────────
 @invoice_preferences_blueprint.route('/settings/invoice-preferences', methods=['PUT'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 def update_invoice_preferences():
     """Update invoice preferences (Admin only)."""
     try:

@@ -33,6 +33,7 @@ from flask import Blueprint, request, jsonify
 
 from smart_invoice_pro.utils.cosmos_client import get_container
 from smart_invoice_pro.api.roles_api import require_role
+from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.api.gst_api import extract_state_from_gstin, validate_gstin_format
 from smart_invoice_pro.utils.org_tax_mode import get_org_gst_mode, must_suppress_sales_tax, FULL_GST
 from smart_invoice_pro.utils.audit_logger import log_audit
@@ -244,6 +245,7 @@ def _get_customer_state(tenant_id: str, customer_id: str) -> tuple:
 # ── API Endpoints ─────────────────────────────────────────────────────────────
 
 @tax_rates_blueprint.route('/settings/taxes', methods=['GET'])
+@require_permission('settings', 'view')
 def list_tax_rates():
     """
     List all active tax rates for the current tenant. Seeds defaults on first call.
@@ -263,7 +265,7 @@ def list_tax_rates():
 
 
 @tax_rates_blueprint.route('/settings/taxes', methods=['POST'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 def create_tax_rate():
     """Create a new tax rate (Admin only)."""
     try:
@@ -322,7 +324,7 @@ def create_tax_rate():
 
 
 @tax_rates_blueprint.route('/settings/taxes/<rate_id>', methods=['PUT'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 def update_tax_rate(rate_id):
     """Update an existing tax rate (Admin only)."""
     try:
@@ -389,7 +391,7 @@ def update_tax_rate(rate_id):
 
 
 @tax_rates_blueprint.route('/settings/taxes/<rate_id>', methods=['DELETE'])
-@require_role('Admin')
+@require_permission('settings', 'edit')
 def delete_tax_rate(rate_id):
     """Soft-delete a tax rate (Admin only)."""
     try:

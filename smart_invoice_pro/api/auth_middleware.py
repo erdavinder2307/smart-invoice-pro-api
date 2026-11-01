@@ -16,6 +16,13 @@ EXEMPT_PATHS = {
     "/api/auth/demo-roles",
     "/api/ping",
     "/api/payments/webhook",
+    "/api/billing/webhook",
+    "/api/plans",
+    # Customer portal — auth handled by token_required decorator in customers_api.py
+    "/api/customer/login",
+    "/api/customer/invoices",
+    # Invitation acceptance is public — customer has no token yet
+    "/api/portal/accept-invite",
 }
 
 

@@ -196,6 +196,16 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.admin_api.users_container",
     "smart_invoice_pro.api.admin_api.feature_flags_container",
     "smart_invoice_pro.api.admin_api.audit_logs_container",
+    # Subscription & billing containers
+    "smart_invoice_pro.services.subscription_service.subscriptions_container",
+    "smart_invoice_pro.services.subscription_service.subscription_events_container",
+    "smart_invoice_pro.services.subscription_service.usage_records_container",
+    "smart_invoice_pro.services.subscription_service.plans_container",
+    "smart_invoice_pro.services.subscription_service.tenants_container",
+    "smart_invoice_pro.services.subscription_service.trial_extension_requests_container",
+    "smart_invoice_pro.api.subscription_api.subscriptions_container",
+    "smart_invoice_pro.api.subscription_api.trial_extension_requests_container",
+    "smart_invoice_pro.api.billing_api.billing_invoices_container",
     # Search API
     "smart_invoice_pro.api.search_api.search_history_container",
     "smart_invoice_pro.api.search_api.recently_viewed_container",

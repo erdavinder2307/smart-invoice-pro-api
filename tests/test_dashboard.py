@@ -307,3 +307,88 @@ class TestDashboardRecentInvoices:
             resp = client.get("/api/dashboard/recent-invoices", headers=headers_a)
             assert resp.status_code == 200
             assert resp.get_json() == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis cache behaviour in dashboard/summary
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDashboardSummaryRedisCache:
+    """Verify the Redis cache integration in GET /api/dashboard/summary."""
+
+    def test_redis_cache_hit_returns_cached_payload_without_cosmos(self, app, client, headers_a):
+        """When Redis returns a payload, no Cosmos containers should be queried."""
+        cached = {"total_customers": 99, "total_products": 5, "metrics": {}}
+
+        with patch("smart_invoice_pro.api.dashboard_api.cache") as mock_cache, \
+             patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust:
+            mock_cache.get.return_value = cached
+
+            app.config["TESTING"] = False
+            try:
+                resp = client.get("/api/dashboard/summary", headers=headers_a)
+            finally:
+                app.config["TESTING"] = True
+
+            assert resp.status_code == 200
+            assert resp.get_json()["total_customers"] == 99
+            # Redis hit should short-circuit before any Cosmos reads
+            mock_cust.read_all_items.assert_not_called()
+
+    def test_redis_cache_miss_queries_cosmos_and_writes_cache(self, app, client, headers_a):
+        """On a cache miss, Cosmos is queried and the result is stored in Redis."""
+        import datetime
+        yr = datetime.date.today().year
+
+        with patch("smart_invoice_pro.api.dashboard_api.cache") as mock_cache, \
+             patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
+             patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
+             patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills, \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container") as mock_exp:
+
+            # Simulate cache miss
+            mock_cache.get.return_value = None
+
+            mock_cust.read_all_items.return_value = [
+                {"id": "c1", "tenant_id": TENANT_A, "created_at": f"{yr}-01-10"}
+            ]
+            mock_prod.read_all_items.return_value = []
+            mock_inv.read_all_items.return_value = []
+            mock_bills.read_all_items.return_value = []
+            mock_exp.read_all_items.return_value = []
+
+            app.config["TESTING"] = False
+            try:
+                resp = client.get("/api/dashboard/summary", headers=headers_a)
+            finally:
+                app.config["TESTING"] = True
+
+            assert resp.status_code == 200
+            # Result must be written to Redis
+            mock_cache.set.assert_called_once()
+            cache_key = mock_cache.set.call_args[0][0]
+            assert f"{TENANT_A}" in cache_key
+
+    def test_cache_disabled_in_testing_mode(self, client, headers_a):
+        """In TESTING mode (use_cache=False), Redis cache is never consulted."""
+        with patch("smart_invoice_pro.api.dashboard_api.cache") as mock_cache, \
+             patch("smart_invoice_pro.api.dashboard_api.customers_container") as mock_cust, \
+             patch("smart_invoice_pro.api.dashboard_api.products_container") as mock_prod, \
+             patch("smart_invoice_pro.api.dashboard_api.invoices_container") as mock_inv, \
+             patch("smart_invoice_pro.api.dashboard_api.bills_container") as mock_bills, \
+             patch("smart_invoice_pro.api.dashboard_api.expenses_container") as mock_exp:
+
+            mock_cust.read_all_items.return_value = []
+            mock_prod.read_all_items.return_value = []
+            mock_inv.read_all_items.return_value = []
+            mock_bills.read_all_items.return_value = []
+            mock_exp.read_all_items.return_value = []
+
+            # TESTING=True is the default — app fixture already sets it
+            resp = client.get("/api/dashboard/summary", headers=headers_a)
+
+            assert resp.status_code == 200
+            # In TESTING mode cache is never touched
+            mock_cache.get.assert_not_called()
+            mock_cache.set.assert_not_called()

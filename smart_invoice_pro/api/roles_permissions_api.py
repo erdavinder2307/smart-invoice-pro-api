@@ -52,22 +52,27 @@ from werkzeug.security import generate_password_hash
 from smart_invoice_pro.utils.cosmos_client import users_container, get_container
 from smart_invoice_pro.api.roles_api import require_role
 from smart_invoice_pro.utils.demo_guard import forbid_demo_settings_mutation
-from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
+from smart_invoice_pro.utils.rbac_resolver import (
+    invalidate_user_permission_cache,
+    invalidate_tenant_permission_cache,
+)
+from smart_invoice_pro.utils.permission_checker import require_permission
 import copy
 
 roles_permissions_blueprint = Blueprint('roles_permissions', __name__)
 
 # ── Permission modules & actions ──────────────────────────────────────────────
 PERMISSION_MODULES = {
-    'invoices':        ['view', 'create', 'edit', 'delete'],
-    'quotes':          ['view', 'create', 'edit', 'delete'],
-    'customers':       ['view', 'create', 'edit', 'delete'],
-    'products':        ['view', 'create', 'edit', 'delete'],
-    'vendors':         ['view', 'create', 'edit', 'delete'],
-    'purchase_orders': ['view', 'create', 'edit', 'delete'],
-    'bills':           ['view', 'create', 'edit', 'delete'],
-    'expenses':        ['view', 'create', 'edit', 'delete'],
-    'banking':         ['view', 'create', 'edit'],
+    'invoices':        ['view', 'create', 'edit', 'delete', 'approve', 'export'],
+    'quotes':          ['view', 'create', 'edit', 'delete', 'approve', 'export'],
+    'customers':       ['view', 'create', 'edit', 'delete', 'export'],
+    'products':        ['view', 'create', 'edit', 'delete', 'export', 'import'],
+    'vendors':         ['view', 'create', 'edit', 'delete', 'export'],
+    'purchase_orders': ['view', 'create', 'edit', 'delete', 'approve', 'export'],
+    'bills':           ['view', 'create', 'edit', 'delete', 'export'],
+    'expenses':        ['view', 'create', 'edit', 'delete', 'export'],
+    'banking':         ['view', 'create', 'edit', 'delete'],
     'reports':         ['view'],
     'settings':        ['view', 'edit'],
     'user_management': ['view', 'invite', 'edit', 'suspend'],
@@ -75,6 +80,9 @@ PERMISSION_MODULES = {
     'audit_logs':      ['view'],
     'automation':      ['view', 'edit'],
     'integrations':    ['view', 'edit'],
+    # Billing is a privileged module — only Owner / Admin / Finance roles should
+    # receive billing.view or billing.manage. Non-admin roles default to all False.
+    'billing':         ['view', 'manage'],
 }
 
 # ── Default permissions for each system role ──────────────────────────────────
@@ -90,34 +98,37 @@ def _new_modules_none():
         'audit_logs':      _none(PERMISSION_MODULES['audit_logs']),
         'automation':      _none(PERMISSION_MODULES['automation']),
         'integrations':    _none(PERMISSION_MODULES['integrations']),
+        'billing':         _none(PERMISSION_MODULES['billing']),
     }
 
 SYSTEM_ROLE_DEFAULTS = {
+    # Admin bypasses permission checks at runtime, but explicit grants are stored
+    # so the role editor UI can display them and admins can inspect defaults.
     'Admin': {m: _all(a) for m, a in PERMISSION_MODULES.items()},
     'Manager': {
         'invoices':        _all(PERMISSION_MODULES['invoices']),
         'quotes':          _all(PERMISSION_MODULES['quotes']),
-        'customers':       _some(PERMISSION_MODULES['customers'],    ['view', 'create', 'edit']),
-        'products':        _some(PERMISSION_MODULES['products'],     ['view', 'create', 'edit']),
-        'vendors':         _some(PERMISSION_MODULES['vendors'],      ['view', 'create', 'edit']),
-        'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit']),
-        'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
-        'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
-        'banking':         _some(PERMISSION_MODULES['banking'],      ['view']),
+        'customers':       _all(PERMISSION_MODULES['customers']),
+        'products':        _all(PERMISSION_MODULES['products']),
+        'vendors':         _some(PERMISSION_MODULES['vendors'],         ['view', 'create', 'edit', 'delete', 'export']),
+        'purchase_orders': _all(PERMISSION_MODULES['purchase_orders']),
+        'bills':           _all(PERMISSION_MODULES['bills']),
+        'expenses':        _all(PERMISSION_MODULES['expenses']),
+        'banking':         _some(PERMISSION_MODULES['banking'],         ['view']),
         'reports':         _all(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
         **{k: v for k, v in _new_modules_none().items()
            if k not in ('banking',)},
     },
     'Sales': {
-        'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view', 'create', 'edit']),
-        'quotes':          _some(PERMISSION_MODULES['quotes'],       ['view', 'create', 'edit']),
-        'customers':       _some(PERMISSION_MODULES['customers'],    ['view', 'create', 'edit']),
-        'products':        _some(PERMISSION_MODULES['products'],     ['view']),
+        'invoices':        _some(PERMISSION_MODULES['invoices'],        ['view', 'create', 'edit', 'export']),
+        'quotes':          _some(PERMISSION_MODULES['quotes'],          ['view', 'create', 'edit', 'export']),
+        'customers':       _some(PERMISSION_MODULES['customers'],       ['view', 'create', 'edit', 'export']),
+        'products':        _some(PERMISSION_MODULES['products'],        ['view']),
         'vendors':         _none(PERMISSION_MODULES['vendors']),
         'purchase_orders': _none(PERMISSION_MODULES['purchase_orders']),
         'bills':           _none(PERMISSION_MODULES['bills']),
-        'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'expenses':        _some(PERMISSION_MODULES['expenses'],        ['view', 'create', 'edit']),
         'banking':         _none(PERMISSION_MODULES['banking']),
         'reports':         _none(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
@@ -125,35 +136,42 @@ SYSTEM_ROLE_DEFAULTS = {
            if k not in ('banking',)},
     },
     'Accountant': {
-        'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view', 'create', 'edit']),
-        'quotes':          _some(PERMISSION_MODULES['quotes'],       ['view']),
-        'customers':       _some(PERMISSION_MODULES['customers'],    ['view']),
-        'products':        _some(PERMISSION_MODULES['products'],     ['view']),
-        'vendors':         _some(PERMISSION_MODULES['vendors'],      ['view']),
-        'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view']),
-        'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
-        'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
-        'banking':         _some(PERMISSION_MODULES['banking'],      ['view']),
+        'invoices':        _some(PERMISSION_MODULES['invoices'],        ['view', 'create', 'edit', 'approve', 'export']),
+        'quotes':          _some(PERMISSION_MODULES['quotes'],          ['view', 'export']),
+        'customers':       _some(PERMISSION_MODULES['customers'],       ['view', 'export']),
+        'products':        _some(PERMISSION_MODULES['products'],        ['view']),
+        'vendors':         _some(PERMISSION_MODULES['vendors'],         ['view', 'export']),
+        'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'export']),
+        'bills':           _some(PERMISSION_MODULES['bills'],           ['view', 'create', 'edit', 'export']),
+        'expenses':        _some(PERMISSION_MODULES['expenses'],        ['view', 'create', 'edit', 'export']),
+        'banking':         _some(PERMISSION_MODULES['banking'],         ['view', 'edit']),
         'reports':         _all(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
+        # Accountant can view billing invoices and subscription status
+        'billing':         _some(PERMISSION_MODULES['billing'],         ['view']),
         **{k: v for k, v in _new_modules_none().items()
-           if k not in ('banking',)},
+           if k not in ('banking', 'billing')},
     },
     'Purchaser': {
-        'invoices':        _some(PERMISSION_MODULES['invoices'],     ['view']),
+        'invoices':        _some(PERMISSION_MODULES['invoices'],        ['view']),
         'quotes':          _none(PERMISSION_MODULES['quotes']),
-        'customers':       _some(PERMISSION_MODULES['customers'],    ['view']),
-        'products':        _some(PERMISSION_MODULES['products'],     ['view', 'create', 'edit']),
-        'vendors':         _some(PERMISSION_MODULES['vendors'],      ['view', 'create', 'edit']),
-        'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit']),
-        'bills':           _some(PERMISSION_MODULES['bills'],        ['view', 'create', 'edit']),
-        'expenses':        _some(PERMISSION_MODULES['expenses'],     ['view', 'create', 'edit']),
+        'customers':       _some(PERMISSION_MODULES['customers'],       ['view']),
+        'products':        _some(PERMISSION_MODULES['products'],        ['view', 'create', 'edit', 'import']),
+        'vendors':         _some(PERMISSION_MODULES['vendors'],         ['view', 'create', 'edit', 'export']),
+        'purchase_orders': _some(PERMISSION_MODULES['purchase_orders'], ['view', 'create', 'edit', 'approve', 'export']),
+        'bills':           _some(PERMISSION_MODULES['bills'],           ['view', 'create', 'edit', 'export']),
+        'expenses':        _some(PERMISSION_MODULES['expenses'],        ['view', 'create', 'edit', 'export']),
         'banking':         _none(PERMISSION_MODULES['banking']),
         'reports':         _none(PERMISSION_MODULES['reports']),
         'settings':        _none(PERMISSION_MODULES['settings']),
         **{k: v for k, v in _new_modules_none().items()
            if k not in ('banking',)},
     },
+    'Finance Manager': {m: _all(a) for m, a in PERMISSION_MODULES.items()
+                        if m in ('invoices', 'bills', 'expenses', 'banking', 'reports', 'billing')
+                       } | {m: _none(a) for m, a in PERMISSION_MODULES.items()
+                            if m not in ('invoices', 'bills', 'expenses', 'banking', 'reports', 'billing')},
+    'Read Only': {m: _some(a, ['view']) for m, a in PERMISSION_MODULES.items()},
 }
 
 
@@ -409,7 +427,7 @@ def list_roles():
 
 
 @roles_permissions_blueprint.route('/settings/roles', methods=['POST'])
-@require_role('Admin')
+@require_permission('roles', 'edit')
 @forbid_demo_settings_mutation("Custom roles cannot be created in the Interactive Workspace.")
 def create_role():
     """Create a new custom role (Admin only)."""
@@ -447,7 +465,7 @@ def create_role():
 
 
 @roles_permissions_blueprint.route('/settings/roles/<role_id>', methods=['PUT'])
-@require_role('Admin')
+@require_permission('roles', 'edit')
 def update_role(role_id):
     """Update role name (custom) or permissions (all roles). Admin only."""
     try:
@@ -475,15 +493,30 @@ def update_role(role_id):
                         for a in actions
                     }
 
+        before_snapshot = {k: v for k, v in role_doc.items() if not k.startswith('_')}
         role_doc['updated_at'] = datetime.utcnow().isoformat()
         _get_roles_container().upsert_item(role_doc)
+        # Invalidate permissions for every user in this tenant — their effective
+        # permissions may have changed now that the role document has been updated.
+        invalidate_tenant_permission_cache(request.tenant_id)
+        log_audit_event({
+            "action": "ROLE_PERMISSIONS_UPDATED",
+            "entity": "role",
+            "entity_id": role_id,
+            "entity_label": role_doc.get("name"),
+            "category": "admin",
+            "before": before_snapshot,
+            "after": {k: v for k, v in role_doc.items() if not k.startswith('_')},
+            "user_id": getattr(request, "user_id", None),
+            "tenant_id": request.tenant_id,
+        })
         return jsonify({k: v for k, v in role_doc.items() if not k.startswith('_')}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @roles_permissions_blueprint.route('/settings/roles/<role_id>', methods=['DELETE'])
-@require_role('Admin')
+@require_permission('roles', 'edit')
 def delete_role(role_id):
     """Delete a custom role (Admin only). System roles cannot be deleted."""
     try:
@@ -520,7 +553,7 @@ def delete_role(role_id):
 # ── Users CRUD (tenant scoped) ────────────────────────────────────────────────
 
 @roles_permissions_blueprint.route('/settings/users', methods=['GET'])
-@require_role('Admin')
+@require_permission('user_management', 'view')
 def list_settings_users():
     """List all users for the current tenant (Admin only)."""
     try:
@@ -659,7 +692,7 @@ def _send_invite_email(to_email: str, to_name: str, username: str,
 
 
 @roles_permissions_blueprint.route('/settings/users', methods=['POST'])
-@require_role('Admin')
+@require_permission('user_management', 'invite')
 @forbid_demo_settings_mutation("User invitations are disabled in the Interactive Workspace.")
 def invite_user():
     """
@@ -759,7 +792,7 @@ def invite_user():
 
 
 @roles_permissions_blueprint.route('/settings/users/<target_user_id>', methods=['PUT'])
-@require_role('Admin')
+@require_permission('user_management', 'edit')
 def update_settings_user(target_user_id):
     """Update a user's name, role, or active status (Admin only)."""
     try:
@@ -812,13 +845,15 @@ def update_settings_user(target_user_id):
         users_container.upsert_item(user)
         log_audit("user", "update", target_user_id, before_snapshot, user,
                   user_id=getattr(request, 'user_id', None), tenant_id=request.tenant_id)
+        # Invalidate the permission cache entry for this specific user.
+        invalidate_user_permission_cache(request.tenant_id, target_user_id)
         return jsonify(_safe_user(user)), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @roles_permissions_blueprint.route('/settings/users/<target_user_id>', methods=['DELETE'])
-@require_role('Admin')
+@require_permission('user_management', 'suspend')
 def deactivate_user(target_user_id):
     """Deactivate (soft-delete) a user. Cannot deactivate yourself or last Admin."""
     try:

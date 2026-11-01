@@ -508,3 +508,239 @@ def system_stats():
         "total_tenants": total_tenants,
     }), 200
 
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SUBSCRIPTION MANAGEMENT (admin)
+# ═════════════════════════════════════════════════════════════════════════════
+
+from smart_invoice_pro.utils.cosmos_client import (
+    subscriptions_container as _subs_container,
+    trial_extension_requests_container as _ext_requests_container,
+    billing_invoices_container as _billing_invoices_container,
+)
+
+
+def _clean_sub(doc: dict) -> dict:
+    cosmos_keys = {"_rid", "_self", "_etag", "_attachments", "_ts"}
+    return {k: v for k, v in doc.items() if k not in cosmos_keys}
+
+
+@admin_blueprint.route("/admin/subscriptions", methods=["GET"])
+@super_admin_required
+def list_subscriptions():
+    """List all subscriptions with optional status/plan filters."""
+    status_filter = request.args.get("status", "").strip()
+    plan_filter = request.args.get("plan", "").strip()
+    page = max(0, int(request.args.get("page", 0)))
+    limit = min(100, max(1, int(request.args.get("limit", 50))))
+
+    conditions = []
+    if status_filter:
+        conditions.append(f"c.status = '{status_filter}'")
+    if plan_filter:
+        conditions.append(f"c.plan_id = '{plan_filter}'")
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    query = f"SELECT * FROM c {where} ORDER BY c.created_at DESC OFFSET {page * limit} LIMIT {limit}"
+
+    try:
+        items = list(_subs_container.query_items(
+            query=query, enable_cross_partition_query=True
+        ))
+        return jsonify({"subscriptions": [_clean_sub(s) for s in items], "count": len(items)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/subscriptions/<tenant_id>", methods=["GET"])
+@super_admin_required
+def get_subscription_admin(tenant_id: str):
+    """Get subscription details for a specific tenant."""
+    try:
+        items = list(_subs_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tid ORDER BY c.created_at DESC OFFSET 0 LIMIT 1",
+            parameters=[{"name": "@tid", "value": tenant_id}],
+            partition_key=tenant_id,
+        ))
+        if not items:
+            return jsonify({"error": "No subscription found"}), 404
+        return jsonify(_clean_sub(items[0]))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/subscriptions/<tenant_id>", methods=["PATCH"])
+@super_admin_required
+def update_subscription_admin(tenant_id: str):
+    """Manually update a subscription (plan_id, status, trial_ends_at)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        items = list(_subs_container.query_items(
+            query="SELECT * FROM c WHERE c.tenant_id = @tid OFFSET 0 LIMIT 1",
+            parameters=[{"name": "@tid", "value": tenant_id}],
+            partition_key=tenant_id,
+        ))
+        if not items:
+            return jsonify({"error": "No subscription found"}), 404
+
+        sub = items[0]
+        allowed = {"plan_id", "status", "trial_ends_at", "billing_cycle", "amount_inr"}
+        for key in allowed:
+            if key in data:
+                sub[key] = data[key]
+        sub["updated_at"] = datetime.utcnow().isoformat()
+        _subs_container.replace_item(item=sub["id"], body=sub)
+        return jsonify(_clean_sub(sub))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/subscriptions/<tenant_id>/grant-extension", methods=["POST"])
+@super_admin_required
+def admin_grant_extension(tenant_id: str):
+    """Manually grant extra trial days to a tenant."""
+    data = request.get_json(silent=True) or {}
+    days = int(data.get("days", 30))
+    reason = (data.get("reason") or "").strip()
+    admin_user_id = _admin_user_id()
+
+    try:
+        from smart_invoice_pro.services.subscription_service import grant_admin_extension
+        sub = grant_admin_extension(tenant_id, days, admin_user_id, reason)
+        _log_platform_audit("subscription", "admin_extension_granted", tenant_id, None, {"days": days, "reason": reason})
+        return jsonify({"status": "granted", "days": days, "new_trial_ends_at": sub.get("trial_ends_at")})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/subscriptions/<tenant_id>/founding-customer", methods=["POST"])
+@super_admin_required
+def admin_grant_founding_customer(tenant_id: str):
+    """Grant Founding Customer status — extends trial to 180 days from signup."""
+    data = request.get_json(silent=True) or {}
+    notes = (data.get("notes") or "").strip()
+    admin_user_id = _admin_user_id()
+
+    try:
+        from smart_invoice_pro.services.subscription_service import grant_founding_customer
+        sub = grant_founding_customer(tenant_id, admin_user_id, notes)
+
+        # Send founding customer email
+        try:
+            from smart_invoice_pro.services.trial_scheduler import _send_email
+            _send_email(tenant_id, "founding_customer", {"trial_ends_at": sub.get("trial_ends_at", "")})
+        except Exception:
+            pass
+
+        _log_platform_audit("subscription", "founding_customer_granted", tenant_id, None, {"notes": notes})
+        return jsonify({"status": "granted", "trial_ends_at": sub.get("trial_ends_at")})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/trial-extension-requests", methods=["GET"])
+@super_admin_required
+def list_extension_requests():
+    """List pending or all trial extension requests."""
+    status_filter = request.args.get("status", "pending").strip()
+    query = (
+        f"SELECT * FROM c WHERE c.status = '{status_filter}' ORDER BY c.requested_at DESC"
+        if status_filter else
+        "SELECT * FROM c ORDER BY c.requested_at DESC OFFSET 0 LIMIT 100"
+    )
+    try:
+        items = list(_ext_requests_container.query_items(
+            query=query, enable_cross_partition_query=True
+        ))
+        return jsonify({"requests": [_clean_sub(r) for r in items], "count": len(items)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/trial-extension-requests/<request_id>", methods=["PATCH"])
+@super_admin_required
+def review_extension_request(request_id: str):
+    """Approve or deny a trial Extension 2 request."""
+    data = request.get_json(silent=True) or {}
+    approved = bool(data.get("approved", False))
+    admin_note = (data.get("admin_note") or "").strip()
+    admin_user_id = _admin_user_id()
+
+    try:
+        # Find the request to get the tenant_id
+        items = list(_ext_requests_container.query_items(
+            query="SELECT * FROM c WHERE c.id = @rid OFFSET 0 LIMIT 1",
+            parameters=[{"name": "@rid", "value": request_id}],
+            enable_cross_partition_query=True,
+        ))
+        if not items:
+            return jsonify({"error": "Request not found"}), 404
+
+        req = items[0]
+        tenant_id = req["tenant_id"]
+
+        from smart_invoice_pro.services.subscription_service import approve_extension_2
+        result = approve_extension_2(tenant_id, request_id, admin_user_id, approved, admin_note)
+
+        # Send outcome email
+        try:
+            from smart_invoice_pro.services.trial_scheduler import _send_email
+            template = "extension_2_approved" if approved else "extension_2_denied"
+            import os
+            frontend_url = os.getenv("FRONTEND_URL", "https://app.solidevbooks.com")
+            _send_email(tenant_id, template, {
+                "trial_ends_at": result.get("new_trial_ends_at", ""),
+                "upgrade_url": f"{frontend_url}/settings/billing/upgrade",
+            })
+        except Exception:
+            pass
+
+        _log_platform_audit("subscription", "extension_2_reviewed", tenant_id, None, result)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_blueprint.route("/admin/billing/summary", methods=["GET"])
+@super_admin_required
+def billing_summary():
+    """High-level billing metrics: active trials, paid subscribers, recent invoices."""
+    try:
+        trial_statuses = ("trial", "trial_extension_1", "trial_extension_2", "founding_customer")
+        status_filter = " OR ".join([f"c.status = '{s}'" for s in trial_statuses])
+
+        active_trials = list(_subs_container.query_items(
+            query=f"SELECT VALUE COUNT(1) FROM c WHERE ({status_filter})",
+            enable_cross_partition_query=True,
+        ))
+        active_paid = list(_subs_container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.status = 'active'",
+            enable_cross_partition_query=True,
+        ))
+        expired = list(_subs_container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.status = 'expired'",
+            enable_cross_partition_query=True,
+        ))
+        founding = list(_subs_container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.is_founding_customer = true",
+            enable_cross_partition_query=True,
+        ))
+        pending_ext2 = list(_ext_requests_container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.status = 'pending'",
+            enable_cross_partition_query=True,
+        ))
+
+        return jsonify({
+            "active_trials": int(active_trials[0]) if active_trials else 0,
+            "active_paid": int(active_paid[0]) if active_paid else 0,
+            "expired_trials": int(expired[0]) if expired else 0,
+            "founding_customers": int(founding[0]) if founding else 0,
+            "pending_extension_2_requests": int(pending_ext2[0]) if pending_ext2 else 0,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

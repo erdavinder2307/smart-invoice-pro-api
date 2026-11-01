@@ -67,6 +67,24 @@ def require_permission(module: str, action: str):
                 return fn(*args, **kwargs)
 
             if not permissions.get(module, {}).get(action, False):
+                try:
+                    from smart_invoice_pro.utils.audit_logger import log_audit_event
+                    log_audit_event({
+                        "action": "PERMISSION_DENIED",
+                        "entity": module,
+                        "entity_id": None,
+                        "category": "security",
+                        "metadata": {
+                            "module": module,
+                            "action": action,
+                            "path": request.path,
+                            "method": request.method,
+                        },
+                        "user_id": user_id,
+                        "tenant_id": tenant_id,
+                    })
+                except Exception:
+                    pass
                 return jsonify({
                     'error': f'Forbidden — {module}.{action} permission required',
                     'module': module,

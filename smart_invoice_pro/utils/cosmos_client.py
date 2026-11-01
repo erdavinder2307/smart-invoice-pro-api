@@ -48,3 +48,11 @@ bank_import_rows_container = get_container("bank_import_rows", "/tenant_id")
 bank_import_artifacts_container = get_container("bank_import_artifacts", "/tenant_id")
 webhook_logs_container = get_container("webhook_logs", "/tenant_id")
 
+# ── Subscription / billing containers ────────────────────────────────────────
+plans_container = get_container("plans", "/id")
+subscriptions_container = get_container("subscriptions", "/tenant_id")
+subscription_events_container = get_container("subscription_events", "/tenant_id")
+usage_records_container = get_container("usage_records", "/tenant_id")
+billing_invoices_container = get_container("billing_invoices", "/tenant_id")
+trial_extension_requests_container = get_container("trial_extension_requests", "/tenant_id")
+

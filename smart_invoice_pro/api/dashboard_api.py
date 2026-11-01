@@ -9,12 +9,15 @@ from smart_invoice_pro.utils.cosmos_client import (
     expenses_container,
     stock_container,
 )
-
+from smart_invoice_pro.utils.redis_client import cache, dashboard_cache_key, DASHBOARD_CACHE_TTL
 from smart_invoice_pro.utils.permission_checker import require_permission
 
 dashboard_blueprint = Blueprint('dashboard', __name__)
 
-_SUMMARY_CACHE = {}
+# Fallback in-process cache used when Redis is unavailable.
+# NOTE: This was previously broken (cache_get never returned the value).
+#       Kept as a degraded fallback only.
+_SUMMARY_CACHE: dict = {}
 _SUMMARY_CACHE_TTL_SECONDS = 180
 
 OPEN_INVOICE_STATUSES = {'issued', 'partially paid', 'overdue', 'sent'}
@@ -144,12 +147,14 @@ def _summary_cache_key(tenant_id, range_type, args):
 
 
 def _summary_cache_get(key):
+    """Fallback in-process cache reader (used when Redis is unavailable)."""
     cached = _SUMMARY_CACHE.get(key)
     if not cached:
         return None
     if cached['expires_at'] < datetime.utcnow().timestamp():
         _SUMMARY_CACHE.pop(key, None)
         return None
+    return cached['payload']  # previously missing — cache was never used
 
 
 # ── Revenue chart helpers ─────────────────────────────────────────────────────
@@ -210,14 +215,25 @@ def _revenue_by_chart_buckets(invoices, buckets):
                 totals[key] += amount
                 break
     return totals
-    return cached['payload']
 
 
 def _summary_cache_set(key, payload):
+    """Fallback in-process cache writer (used when Redis is unavailable)."""
     _SUMMARY_CACHE[key] = {
         'payload': payload,
         'expires_at': datetime.utcnow().timestamp() + _SUMMARY_CACHE_TTL_SECONDS,
     }
+
+
+def _redis_dashboard_cache_key(tenant_id, range_type, args) -> str:
+    """Build the Redis key for a dashboard summary response."""
+    return dashboard_cache_key(
+        tenant_id or 'public',
+        range_type,
+        args.get('start_date') or '',
+        args.get('end_date') or '',
+    )
+
 
 @dashboard_blueprint.route('/dashboard/summary', methods=['GET'])
 @require_permission('reports', 'view')
@@ -247,9 +263,17 @@ def dashboard_summary():
         today = datetime.utcnow().date()
         tenant_id = getattr(request, 'tenant_id', None)
         use_cache = not bool(current_app.config.get('TESTING'))
-        cache_key = _summary_cache_key(tenant_id, range_type, request.args)
+
+        # ── Cache lookup (Redis first, in-process fallback) ────────────────────
+        redis_key = _redis_dashboard_cache_key(tenant_id, range_type, request.args)
+        inproc_key = _summary_cache_key(tenant_id, range_type, request.args)
         if use_cache:
-            cached_payload = _summary_cache_get(cache_key)
+            # Try Redis
+            cached_payload = cache.get(redis_key)
+            if cached_payload is not None:
+                return jsonify(cached_payload)
+            # Fallback: in-process (covers Redis-unavailable scenarios)
+            cached_payload = _summary_cache_get(inproc_key)
             if cached_payload:
                 return jsonify(cached_payload)
 
@@ -376,7 +400,9 @@ def dashboard_summary():
             'total_payables': payables_current,
         }
         if use_cache:
-            _summary_cache_set(cache_key, payload)
+            # Write to Redis (preferred) and the in-process fallback
+            cache.set(redis_key, payload, ttl=DASHBOARD_CACHE_TTL)
+            _summary_cache_set(inproc_key, payload)
         return jsonify(payload)
     except Exception as e:
         return jsonify({'error': f'Error fetching dashboard summary: {str(e)}'}), 500

@@ -7,7 +7,8 @@ from smart_invoice_pro.utils.cosmos_client import quotes_container
 from smart_invoice_pro.utils.response_sanitizer import sanitize_item, sanitize_items
 from smart_invoice_pro.utils.webhook_dispatcher import dispatch_webhook_event
 from smart_invoice_pro.utils.notifications import create_notification
-from smart_invoice_pro.utils.audit_logger import log_audit
+from smart_invoice_pro.utils.audit_logger import log_audit, log_audit_event
+from smart_invoice_pro.api.auth_middleware import JWT_SECRET_KEY
 from smart_invoice_pro.utils.dependency_checker import check_entity_dependencies
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
@@ -1188,71 +1189,100 @@ def customer_login():
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Request must be JSON'}), 400
-    
-    email = data.get('email')
-    password = data.get('password')
-    
+
+    email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
+
     if not email or not password:
         return jsonify({'error': 'Email and password are required'}), 400
-    
-    # Query customer by email
-    query = f"SELECT * FROM c WHERE c.email = '{email}'"
-    items = list(customers_container.query_items(query=query, enable_cross_partition_query=True))
-    
+
+    # CPA-002: parameterized query — no f-string interpolation
+    items = list(customers_container.query_items(
+        query="SELECT * FROM c WHERE LOWER(c.email) = @email AND c.portal_enabled = true",
+        parameters=[{"name": "@email", "value": email}],
+        enable_cross_partition_query=True,
+    ))
+
     if not items:
         return jsonify({'message': 'Invalid email or password.'}), 401
-    
+
     customer = items[0]
-    
-    # Check if customer has a password field (for existing customers without auth)
-    if 'password' not in customer:
-        return jsonify({'message': 'Account not set up for login. Please contact administrator.'}), 401
-    
-    # Verify password
-    if check_password_hash(customer['password'], password):
-        # Generate JWT token
-        token = jwt.encode(
-            {
-                "id": customer['id'],
-                "email": customer['email'],
-                "name": customer['name'],
-                "exp": datetime.utcnow() + timedelta(hours=24)
-            },
-            "customer_secret_key",  # Use a different secret for customer tokens
-            algorithm="HS256"
-        )
-        
-        return jsonify({
-            "message": "Login successful!",
-            "customer": {
-                "id": customer['id'],
-                "name": customer['name'],
-                "email": customer['email']
-            },
-            "token": token
-        }), 200
-    else:
-        return jsonify({"message": "Invalid email or password."}), 401
+
+    # CPA-004: create_customer() stores the hash under portal_password, not password
+    if 'portal_password' not in customer:
+        return jsonify({'message': 'Account not set up for portal login. Please contact administrator.'}), 401
+
+    if not check_password_hash(customer['portal_password'], password):
+        log_audit_event({
+            "action": "CUSTOMER_LOGIN_FAILED",
+            "entity": "customer",
+            "entity_id": customer.get('id'),
+            "before": None,
+            "after": {"login": "failed", "email_attempt": email},
+            "tenant_id": customer.get('tenant_id'),
+            "user_id": customer.get('id'),
+            "user_email": email,
+        })
+        return jsonify({'message': 'Invalid email or password.'}), 401
+
+    # CPA-003: use shared JWT_SECRET_KEY from env, never a hardcoded literal
+    # CPA-005: include tenant_id so multi-tenant isolation is preserved
+    token = jwt.encode(
+        {
+            "id": customer['id'],
+            "email": customer['email'],
+            "name": customer.get('name', ''),
+            "tenant_id": customer.get('tenant_id'),
+            "user_type": "customer",
+            "exp": datetime.utcnow() + timedelta(hours=24),
+        },
+        JWT_SECRET_KEY,
+        algorithm="HS256",
+    )
+
+    # CPA-008: audit successful login
+    log_audit_event({
+        "action": "CUSTOMER_LOGIN",
+        "entity": "customer",
+        "entity_id": customer['id'],
+        "before": None,
+        "after": {"login": "success", "email": customer['email']},
+        "tenant_id": customer.get('tenant_id'),
+        "user_id": customer['id'],
+        "user_email": customer['email'],
+    })
+
+    return jsonify({
+        "message": "Login successful!",
+        "customer": {
+            "id": customer['id'],
+            "name": customer.get('name', ''),
+            "email": customer['email'],
+            "tenant_id": customer.get('tenant_id'),
+        },
+        "token": token,
+    }), 200
 
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header:
             return jsonify({'message': 'Token is missing!'}), 401
-        
+
+        token = auth_header[7:] if auth_header.startswith('Bearer ') else auth_header
+
         try:
-            # Remove 'Bearer ' prefix if present
-            if token.startswith('Bearer '):
-                token = token[7:]
-            
-            data = jwt.decode(token, "customer_secret_key", algorithms=["HS256"])
+            # CPA-003: use shared JWT_SECRET_KEY — no hardcoded literal
+            data = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+            if data.get('user_type') != 'customer':
+                return jsonify({'message': 'Token is invalid!'}), 401
             current_customer = data
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired!'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'message': 'Token is invalid!'}), 401
-        
+
         return f(current_customer, *args, **kwargs)
     return decorated
 
@@ -1292,9 +1322,16 @@ def token_required(f):
 })
 def get_customer_invoices(current_customer):
     try:
-        # Query invoices for the current customer by email
-        query = f"SELECT * FROM c WHERE c.customer_email = '{current_customer['email']}'"
-        items = list(invoices_container.query_items(query=query, enable_cross_partition_query=True))
+        # CPA-002: parameterized query — no f-string interpolation; also scope to tenant
+        query_params = [{"name": "@email", "value": current_customer['email']}]
+        query_str = "SELECT * FROM c WHERE c.customer_email = @email"
+        tenant_id = current_customer.get('tenant_id')
+        if tenant_id:
+            query_str += " AND c.tenant_id = @tid"
+            query_params.append({"name": "@tid", "value": tenant_id})
+        items = list(invoices_container.query_items(
+            query=query_str, parameters=query_params, enable_cross_partition_query=True
+        ))
         
         # Format invoices for frontend display
         formatted_invoices = []

@@ -28,3 +28,6 @@ anthropic>=0.40.0
 openpyxl>=3.0.0
 pdfplumber>=0.9.0
 msoffcrypto-tool>=5.0.0
+# Redis — optional but recommended for permission cache, dashboard cache, and rate limiting.
+# App runs without this installed; caching degrades gracefully to Cosmos reads + in-memory.
+redis>=5.0.0

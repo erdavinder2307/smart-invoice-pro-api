@@ -1,0 +1,36 @@
+# Redis local development stack for Solidev Books
+# Usage:
+#   Start:  docker compose -f docker-compose.redis.yml up -d
+#   Stop:   docker compose -f docker-compose.redis.yml down
+#   Logs:   docker compose -f docker-compose.redis.yml logs -f
+#   Health: docker compose -f docker-compose.redis.yml ps
+#   CLI:    docker compose -f docker-compose.redis.yml exec redis redis-cli ping
+#
+# This file is for LOCAL development only. Never commit real passwords or keys.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: solidev_redis_dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --loglevel notice
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Uncomment to persist data across restarts in development
+    # volumes:
+    #   - redis_dev_data:/data
+
+# volumes:
+#   redis_dev_data:
