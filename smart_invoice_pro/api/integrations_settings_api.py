@@ -235,7 +235,9 @@ def save_integrations_settings():
 def test_email_connection():
     """Send a test email to the authenticated user's address via Azure ACS."""
     try:
-        from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+        from smart_invoice_pro.utils.email_client import (
+            SenderNotConfigured, email_configured, get_email_client, resolve_sender,
+        )
 
         # Validate recipient first — before any infrastructure checks
         body = request.get_json(silent=True) or {}
@@ -246,10 +248,15 @@ def test_email_connection():
         if not email_configured():
             return jsonify({"error": "Email service is not configured on the server."}), 503
 
+        # The sender shown on screen may not be saved yet: use it first.
+        try:
+            sender = resolve_sender(request.tenant_id,
+                                    preferred=str(body.get("sender_email") or "").strip())
+        except SenderNotConfigured as e:
+            return jsonify({"error": str(e)}), 503
+
         doc = _get_doc(request.tenant_id)
-        email_cfg = doc.get("email", {})
-        sender = email_cfg.get("sender_email") or os.getenv("AZURE_SENDER_EMAIL", "")
-        sender_name = email_cfg.get("sender_name") or "Solidev Books"
+        sender_name = (doc.get("email") or {}).get("sender_name") or "Solidev Books"
 
         client = get_email_client()
         poller = client.begin_send({

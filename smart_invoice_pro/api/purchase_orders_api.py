@@ -946,12 +946,16 @@ def get_po_pdf(po_id):
 @require_permission('purchase_orders', 'edit')
 def send_po_email(po_id):
     """Send a purchase order to the vendor via Azure Communication Services."""
-    import os
-    from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+    from smart_invoice_pro.utils.email_client import (
+        SenderNotConfigured, email_configured, get_email_client, resolve_sender,
+    )
 
-    sender_address    = os.getenv('SENDER_EMAIL', 'noreply@solidevelectrosoft.com')
     if not email_configured():
         return jsonify({'error': 'Email service not configured on the server'}), 503
+    try:
+        sender_address = resolve_sender(request.tenant_id)
+    except SenderNotConfigured as e:
+        return jsonify({'error': str(e)}), 503
 
     data = request.get_json() or {}
     attach_pdf = bool(data.get('attach_pdf', False))

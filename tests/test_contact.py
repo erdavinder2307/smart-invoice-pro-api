@@ -50,7 +50,8 @@ class TestSendMessage:
 
     @patch("smart_invoice_pro.api.contact_api.get_email_client")
     @patch("smart_invoice_pro.api.contact_api.email_configured", lambda: True)
-    def test_email_sent_successfully(self, mock_email_cls, client, headers_a):
+    def test_email_sent_successfully(self, mock_email_cls, client, headers_a, monkeypatch):
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "donotreply@example.com")
         mock_client = MagicMock()
         mock_poller = MagicMock()
         mock_poller.result.return_value = {"id": "msg-1"}
@@ -61,6 +62,7 @@ class TestSendMessage:
         assert resp.status_code == 200
         assert "successfully" in resp.get_json()["message"].lower()
         mock_client.begin_send.assert_called_once()
+        assert mock_client.begin_send.call_args[0][0]["senderAddress"] == "donotreply@example.com"
 
     @patch("smart_invoice_pro.api.contact_api.get_email_client")
     @patch("smart_invoice_pro.api.contact_api.email_configured", lambda: True)
