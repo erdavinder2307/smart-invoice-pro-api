@@ -161,6 +161,30 @@ class TestRegister:
         assert resp.status_code == 201
         assert resp.get_json()["user"]["role"] == "Sales"
 
+    @patch("smart_invoice_pro.utils.tenant_service.tenants_container")
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_register_with_partner_code_tags_new_tenant(self, mock_users, mock_tenants, client):
+        mock_users.query_items.return_value = [0]
+        mock_tenants.query_items.return_value = []  # tenant does not exist yet
+        resp = client.post(
+            "/api/auth/register",
+            json={"username": "client1", "password": "secret123", "partner_code": " ca-sharma "},
+        )
+        assert resp.status_code == 201
+        tenant = mock_tenants.create_item.call_args.kwargs["body"]
+        assert tenant["partner_code"] == "CA-SHARMA"
+        assert tenant["id"] == resp.get_json()["user"]["tenant_id"]
+
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_register_with_bad_partner_code_returns_400_and_creates_nothing(self, mock_users, client):
+        resp = client.post(
+            "/api/auth/register",
+            json={"username": "client2", "password": "secret123", "partner_code": "=1+1"},
+        )
+        assert resp.status_code == 400
+        assert "partner_code" in resp.get_json()["error"]
+        mock_users.create_item.assert_not_called()
+
     def test_register_non_json_body_returns_400(self, client):
         resp = client.post(
             "/api/auth/register",

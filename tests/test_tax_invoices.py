@@ -332,7 +332,10 @@ class TestInvoiceEndpoints:
         assert billing_api.tax_invoices_container.read_item.call_args.kwargs["partition_key"] == TENANT_A
 
     def test_other_tenants_invoice_is_404(self, client, store):
+        from smart_invoice_pro.api import roles_api
         billing_api, _ = store
+        # An Admin of tenant B asks for tenant A's invoice id.
+        roles_api.users_container.query_items.return_value = [{"id": "u", "tenant_id": TENANT_B, "role": "Admin"}]
         billing_api.tax_invoices_container.read_item.side_effect = exceptions.CosmosResourceNotFoundError(
             status_code=404, message="missing")
         resp = client.get("/api/billing/invoices/tinv_pay_1/pdf", headers=auth_headers(tenant_id=TENANT_B))

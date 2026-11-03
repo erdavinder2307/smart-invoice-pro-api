@@ -178,7 +178,7 @@ class TestRoleChangeSeatLimit:
 
     def _role_put(self, client, headers, active_users, target, role):
         with patch("smart_invoice_pro.api.roles_api._get_role", return_value="Admin"), \
-                patch("smart_invoice_pro.api.roles_api._fetch_user", return_value=dict(target)), \
+                patch("smart_invoice_pro.api.roles_api._fetch_tenant_user", return_value=dict(target)), \
                 patch("smart_invoice_pro.api.roles_api.users_container") as mock_users, \
                 patch("smart_invoice_pro.utils.entitlements.get_tenant_by_id", return_value=_tenant("starter")), \
                 patch("smart_invoice_pro.api.roles_permissions_api._active_account_users",
