@@ -174,7 +174,7 @@ Add these to your `.env` file:
 
 ```bash
 # Azure Communication Service (Email)
-AZURE_EMAIL_CONNECTION_STRING=endpoint=https://solidev-email-send-resource-3.india.communication.azure.com/;accesskey=YOUR_ACCESS_KEY
+AZURE_EMAIL_ENDPOINT=https://<email-resource>.communication.azure.com
 SENDER_EMAIL=admin@solidevelectrosoft.com
 ALERT_EMAIL=davinder@solidevelectrosoft.com
 
@@ -373,7 +373,7 @@ curl -X POST http://localhost:5000/api/bills \
 ## Troubleshooting
 
 ### Email Not Sending
-- **Check Connection String**: Verify `AZURE_EMAIL_CONNECTION_STRING` in environment variables
+- **Check Email Settings**: Verify `AZURE_EMAIL_ENDPOINT` is set and the host's managed identity has the "Communication and Email Service Owner" role on the email resource
 - **Verify Domain**: Ensure solidevelectrosoft.com domain is verified in Azure Communication Services
 - **Check Sender**: Confirm `admin@solidevelectrosoft.com` is a valid sender in Azure portal
 - **View Logs**: Check Azure Function logs or backend API logs for email sending errors

@@ -4,7 +4,7 @@ from smart_invoice_pro.utils.notifications import create_notification
 from smart_invoice_pro.utils.audit_logger import log_audit
 from datetime import datetime, date
 from flasgger import swag_from
-from azure.communication.email import EmailClient
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client
 import os
 import uuid
 import secrets
@@ -12,18 +12,17 @@ import secrets
 cron_blueprint = Blueprint('cron', __name__)
 
 # Azure Communication Services configuration
-CONNECTION_STRING = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
 SENDER_ADDRESS = os.getenv('SENDER_EMAIL', "admin@solidevelectrosoft.com")
 ALERT_EMAIL = os.getenv('ALERT_EMAIL', "davinder@solidevelectrosoft.com")
 
 def send_low_stock_email(low_stock_products):
     """Send email alert for low stock products using Azure Communication Services"""
     try:
-        if not CONNECTION_STRING:
-            print("WARNING: AZURE_EMAIL_CONNECTION_STRING not configured. Email will NOT be sent.")
+        if not email_configured():
+            print("WARNING: email service not configured. Email will NOT be sent.")
             return False
         
-        client = EmailClient.from_connection_string(CONNECTION_STRING)
+        client = get_email_client()
         
         # Create email content
         subject = f'Low Stock Alert - {len(low_stock_products)} Products Need Restocking'
@@ -407,7 +406,7 @@ def get_schedule_info():
                 'description': 'Checks inventory levels and sends email alerts for low stock items',
                 'setup_instructions': {
                     'environment_variables': {
-                        'AZURE_EMAIL_CONNECTION_STRING': 'Azure Communication Services connection string',
+                        'AZURE_EMAIL_ENDPOINT': 'Azure Communication Services endpoint (sends with the host\'s managed identity)',
                         'SENDER_EMAIL': 'Sender address (default: admin@solidevelectrosoft.com)',
                         'ALERT_EMAIL': 'Email to receive low-stock alerts',
                     },

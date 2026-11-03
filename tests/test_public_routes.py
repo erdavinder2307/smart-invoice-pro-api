@@ -109,7 +109,7 @@ class TestContactWithoutToken:
         resp = client.post("/api/contact", json={"name": "A", "email": "a@example.com"})
         assert resp.status_code == 400
 
-    @patch("smart_invoice_pro.api.contact_api.CONNECTION_STRING", None)
+    @patch("smart_invoice_pro.api.contact_api.email_configured", lambda: False)
     def test_valid_message_is_accepted(self, client):
         resp = client.post("/api/contact", json={
             "name": "A", "email": "a@example.com", "subject": "Hi", "message": "Hello",
@@ -168,7 +168,7 @@ class TestPublicRouteHardening:
         resp = client.post("/api/customer/login", json=["a@example.com", "pw"])
         assert resp.status_code == 400
 
-    @patch("smart_invoice_pro.api.contact_api.CONNECTION_STRING", None)
+    @patch("smart_invoice_pro.api.contact_api.email_configured", lambda: False)
     def test_contact_is_rate_limited(self, client):
         payload = {"name": "A", "email": "a@example.com", "subject": "Hi", "message": "Hello"}
         resps = [client.post("/api/contact", json=payload) for _ in range(4)]
@@ -186,12 +186,12 @@ class TestPublicRouteHardening:
         })
         assert resp.status_code == 400
 
-    @patch("smart_invoice_pro.api.contact_api.EmailClient")
-    @patch("smart_invoice_pro.api.contact_api.CONNECTION_STRING", "endpoint=https://real.com;accesskey=REALKEY")
-    def test_contact_email_escapes_user_input(self, mock_email_cls, client):
+    @patch("smart_invoice_pro.api.contact_api.get_email_client")
+    @patch("smart_invoice_pro.api.contact_api.email_configured", lambda: True)
+    def test_contact_email_escapes_user_input(self, mock_get_client, client):
         mock_client = MagicMock()
         mock_client.begin_send.return_value.result.return_value = {"id": "msg-1"}
-        mock_email_cls.from_connection_string.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         resp = client.post("/api/contact", json={
             "name": "<b>Eve</b>", "email": "e@example.com", "subject": "Hi\r\nBcc: x@example.com",
@@ -205,10 +205,10 @@ class TestPublicRouteHardening:
         assert "<a href" not in content["html"]
         assert "\r" not in content["subject"] and "\n" not in content["subject"]
 
-    @patch("smart_invoice_pro.api.contact_api.EmailClient")
-    @patch("smart_invoice_pro.api.contact_api.CONNECTION_STRING", "endpoint=https://real.com;accesskey=REALKEY")
-    def test_contact_failure_hides_error_text(self, mock_email_cls, client):
-        mock_email_cls.from_connection_string.side_effect = Exception("internal host detail")
+    @patch("smart_invoice_pro.api.contact_api.get_email_client")
+    @patch("smart_invoice_pro.api.contact_api.email_configured", lambda: True)
+    def test_contact_failure_hides_error_text(self, mock_get_client, client):
+        mock_get_client.side_effect = Exception("internal host detail")
         resp = client.post("/api/contact", json={
             "name": "A", "email": "a@example.com", "subject": "Hi", "message": "Hello",
         })

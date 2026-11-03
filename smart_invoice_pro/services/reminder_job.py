@@ -11,12 +11,11 @@ import os
 import logging
 from datetime import datetime, date, timedelta
 
-from azure.communication.email import EmailClient
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client
 from smart_invoice_pro.utils.notifications import create_notification
 
 logger = logging.getLogger(__name__)
 
-CONNECTION_STRING = os.getenv('AZURE_EMAIL_CONNECTION_STRING')
 SENDER_ADDRESS    = os.getenv('SENDER_EMAIL', 'admin@solidevelectrosoft.com')
 
 # Statuses that should receive reminders
@@ -115,8 +114,8 @@ def _send_reminder_email(invoice, days_label):
         logger.warning(f"Invoice {invoice.get('invoice_number')} — no customer email, skipping.")
         return False
 
-    if not CONNECTION_STRING:
-        logger.warning("AZURE_EMAIL_CONNECTION_STRING not set. Email NOT sent.")
+    if not email_configured():
+        logger.warning("Email service not configured. Email NOT sent.")
         return False
 
     invoice_number = invoice.get('invoice_number', invoice.get('id', 'N/A'))
@@ -166,7 +165,7 @@ def _send_reminder_email(invoice, days_label):
     """
 
     try:
-        client = EmailClient.from_connection_string(CONNECTION_STRING)
+        client = get_email_client()
         poller = client.begin_send({
             "senderAddress": SENDER_ADDRESS,
             "recipients": {"to": [{"address": recipient}]},

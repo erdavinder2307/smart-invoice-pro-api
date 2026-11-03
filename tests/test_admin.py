@@ -73,6 +73,7 @@ class TestAdminAuth:
         ("POST", "/api/admin/feature-flags/t1"),
         ("PATCH", "/api/admin/feature-flags/t1"),
         ("GET",  "/api/admin/stats"),
+        ("GET",  "/api/admin/partner-report?month=2026-10"),
     ]
 
     @pytest.mark.parametrize("method,path", ADMIN_ENDPOINTS)
@@ -460,6 +461,82 @@ class TestUpdateFeatureFlags:
 # ═════════════════════════════════════════════════════════════════════════════
 # SYSTEM STATS TESTS
 # ═════════════════════════════════════════════════════════════════════════════
+
+class TestPartnerReport:
+    TENANTS = [
+        # signed up last month, still active -> listed, not new
+        {"id": "t-old", "name": "Old Client", "plan": "pro", "status": "active",
+         "partner_code": "CA-SHARMA", "created_at": "2026-09-20T10:00:00"},
+        # signed up this month -> listed, new
+        {"id": "t-new", "name": "=cmd|' /C calc'!A0", "plan": "trial", "status": "active",
+         "partner_code": "CA-SHARMA", "created_at": "2026-10-03T08:00:00"},
+        # other partner
+        {"id": "t-b", "name": "B Traders", "plan": "starter", "status": "active",
+         "partner_code": "AAA-1", "created_at": "2026-10-05T08:00:00"},
+        # deleted before the month started -> left out
+        {"id": "t-gone", "name": "Gone", "plan": "pro", "status": "deleted",
+         "partner_code": "CA-SHARMA", "created_at": "2026-08-01T00:00:00",
+         "deleted_at": "2026-09-15T00:00:00"},
+        # deleted during the month -> still listed for this month
+        {"id": "t-left", "name": "Left Mid Month", "plan": "pro", "status": "deleted",
+         "partner_code": "CA-SHARMA", "created_at": "2026-08-01T00:00:00",
+         "deleted_at": "2026-10-10T00:00:00"},
+        # demo tenant -> left out
+        {"id": "t-demo", "name": "Demo", "plan": "pro", "status": "active",
+         "partner_code": "CA-SHARMA", "created_at": "2026-10-01T00:00:00", "tenant_type": "DEMO"},
+    ]
+
+    def _get(self, client, url):
+        with patch("smart_invoice_pro.api.admin_api.tenants_container") as mock_ctr, \
+             patch("smart_invoice_pro.api.admin_api.log_audit_event") as mock_audit:
+            mock_ctr.query_items.return_value = [dict(t) for t in self.TENANTS]
+            resp = client.get(url, headers=super_admin_headers())
+        return resp, mock_ctr, mock_audit
+
+    def test_csv_rows_for_month(self, client):
+        resp, mock_ctr, mock_audit = self._get(client, "/api/admin/partner-report?month=2026-10")
+        assert resp.status_code == 200
+        assert resp.headers["Content-Type"].startswith("text/csv")
+        assert "partner-report-2026-10.csv" in resp.headers["Content-Disposition"]
+        lines = resp.get_data(as_text=True).strip().split("\n")
+        assert lines[0] == "partner_code,tenant_id,tenant_name,plan,status,signed_up_at,new_this_month"
+        ids = [line.split(",")[1] for line in lines[1:]]
+        assert ids == ["t-b", "t-left", "t-old", "t-new"]  # by partner code, then sign-up date
+        body = resp.get_data(as_text=True)
+        assert "t-gone" not in body and "t-demo" not in body
+        assert "AAA-1,t-b,B Traders,starter,active,2026-10-05T08:00:00,yes" in body
+        assert "CA-SHARMA,t-old,Old Client,pro,active,2026-09-20T10:00:00,no" in body
+
+        kwargs = mock_ctr.query_items.call_args.kwargs
+        assert {"name": "@end", "value": "2026-11-01"} in kwargs["parameters"]
+        audit = mock_audit.call_args[0][0]
+        assert audit["entity"] == "partner_report"
+        assert audit["after"]["rows"] == 4
+
+    def test_formula_in_tenant_name_is_neutralised(self, client):
+        resp, _, _ = self._get(client, "/api/admin/partner-report?month=2026-10")
+        assert ",t-new,'=cmd|' /C calc'!A0,trial," in resp.get_data(as_text=True)
+
+    def test_december_rolls_over_to_next_year(self, client):
+        _, mock_ctr, _ = self._get(client, "/api/admin/partner-report?month=2026-12")
+        assert {"name": "@end", "value": "2027-01-01"} in mock_ctr.query_items.call_args.kwargs["parameters"]
+
+    def test_filter_by_partner_code(self, client):
+        _, mock_ctr, _ = self._get(client, "/api/admin/partner-report?month=2026-10&partner_code=aaa-1")
+        kwargs = mock_ctr.query_items.call_args.kwargs
+        assert "c.partner_code = @code" in kwargs["query"]
+        assert {"name": "@code", "value": "AAA-1"} in kwargs["parameters"]
+
+    @pytest.mark.parametrize("query", ["", "?month=2026-13", "?month=2026-1", "?month=oct"])
+    def test_month_required(self, client, query):
+        resp = client.get(f"/api/admin/partner-report{query}", headers=super_admin_headers())
+        assert resp.status_code == 400
+
+    def test_bad_partner_code_filter(self, client):
+        resp = client.get("/api/admin/partner-report?month=2026-10&partner_code=a b",
+                          headers=super_admin_headers())
+        assert resp.status_code == 400
+
 
 class TestSystemStats:
     def test_stats_success(self, client):

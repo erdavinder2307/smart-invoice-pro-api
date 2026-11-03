@@ -170,19 +170,19 @@ class TestCheckLowStock:
 class TestSendLowStockEmail:
     """Unit tests for send_low_stock_email()."""
 
-    @patch("smart_invoice_pro.api.cron_jobs.CONNECTION_STRING", None)
-    def test_no_connection_string(self):
+    @patch("smart_invoice_pro.api.cron_jobs.email_configured", lambda: False)
+    def test_not_configured(self):
         from smart_invoice_pro.api.cron_jobs import send_low_stock_email
         assert send_low_stock_email([PRODUCT_A]) is False
 
-    @patch("smart_invoice_pro.api.cron_jobs.CONNECTION_STRING", "endpoint=https://x.com;accesskey=KEY")
-    @patch("smart_invoice_pro.api.cron_jobs.EmailClient")
+    @patch("smart_invoice_pro.api.cron_jobs.email_configured", lambda: True)
+    @patch("smart_invoice_pro.api.cron_jobs.get_email_client")
     def test_email_sent_successfully(self, mock_cls):
         mock_client = MagicMock()
         mock_poller = MagicMock()
         mock_poller.result.return_value = {"id": "msg-123"}
         mock_client.begin_send.return_value = mock_poller
-        mock_cls.from_connection_string.return_value = mock_client
+        mock_cls.return_value = mock_client
 
         low_stock = {
             "id": "prod-1", "name": "Widget", "current_stock": 5,
@@ -192,10 +192,10 @@ class TestSendLowStockEmail:
         assert send_low_stock_email([low_stock]) is True
         mock_client.begin_send.assert_called_once()
 
-    @patch("smart_invoice_pro.api.cron_jobs.CONNECTION_STRING", "endpoint=https://x.com;accesskey=KEY")
-    @patch("smart_invoice_pro.api.cron_jobs.EmailClient")
+    @patch("smart_invoice_pro.api.cron_jobs.email_configured", lambda: True)
+    @patch("smart_invoice_pro.api.cron_jobs.get_email_client")
     def test_email_send_failure(self, mock_cls):
-        mock_cls.from_connection_string.side_effect = Exception("Cannot connect")
+        mock_cls.side_effect = Exception("Cannot connect")
 
         low_stock = {
             "id": "prod-1", "name": "Widget", "current_stock": 5,
