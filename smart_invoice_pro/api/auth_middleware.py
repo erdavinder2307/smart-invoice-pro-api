@@ -32,9 +32,17 @@ EXEMPT_PATHS = {
     "/api/auth/demo-roles",
     "/api/ping",
     "/api/payments/webhook",
+    # Public pages for people who are not signed in as staff
+    "/api/contact",
+    "/api/customer/login",
     "/api/billing/plans",
     "/api/billing/webhook",
 }
+
+# Public routes with a path parameter: the customer's "view your invoice" link.
+EXEMPT_PREFIXES = (
+    "/api/portal/invoice/",
+)
 
 
 def _is_cron_path(path: str) -> bool:
@@ -129,6 +137,9 @@ def should_skip_auth(path, method):
         return True
 
     if path in EXEMPT_PATHS:
+        return True
+
+    if path.startswith(EXEMPT_PREFIXES):
         return True
 
     return not path.startswith("/api")
