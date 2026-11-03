@@ -60,7 +60,7 @@ azure-functions/
 
 Updated `.env` file with Azure credentials:
 ```bash
-AZURE_EMAIL_CONNECTION_STRING=endpoint=https://...;accesskey=...
+AZURE_EMAIL_ENDPOINT=https://<email-resource>.communication.azure.com
 SENDER_EMAIL=admin@solidevelectrosoft.com
 ALERT_EMAIL=davinder@solidevelectrosoft.com
 ```

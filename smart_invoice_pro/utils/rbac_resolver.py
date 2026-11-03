@@ -105,12 +105,15 @@ def resolve_user_permissions(user_id: str, tenant_id: str) -> tuple[bool, dict]:
     if not user:
         return False, {}
 
-    user_tenant = user.get('tenant_id')
-    if user_tenant and tenant_id and user_tenant != tenant_id:
-        return False, {}
-
     status = (user.get('status') or '').lower()
     if status == 'suspended' or user.get('is_active') is False:
+        return False, {}
+
+    # Outside their own tenant a user acts only through an active membership,
+    # with the membership's role.
+    from smart_invoice_pro.utils.memberships import tenant_role_view
+    user = tenant_role_view(user, tenant_id)
+    if not user:
         return False, {}
 
     if is_admin_user(user, tenant_id):

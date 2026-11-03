@@ -88,6 +88,18 @@ def authenticate_request_context():
     if not user_id or not tenant_id:
         return None, _unauthorized("Unauthorized")
 
+    # A token for another organisation's books is only good while the
+    # membership it was issued for is still active.
+    membership_id = payload.get("membership_id")
+    if membership_id:
+        from smart_invoice_pro.utils.memberships import get_membership, is_active_for
+        try:
+            membership = get_membership(membership_id, tenant_id)
+        except Exception:
+            membership = None
+        if not is_active_for(membership, user_id, tenant_id):
+            return None, _unauthorized("Unauthorized")
+
     _set_request_context(
         user_id,
         tenant_id,
