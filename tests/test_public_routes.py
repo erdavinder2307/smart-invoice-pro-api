@@ -21,6 +21,9 @@ PUBLIC_ROUTES = {
     ("/api/contact", "POST"),
     ("/api/customer/login", "POST"),
     ("/api/portal/invoice/<token>", "GET"),
+    # Razorpay plans list and its signed webhook (SE-4135).
+    ("/api/billing/plans", "GET"),
+    ("/api/billing/webhook", "POST"),
 }
 
 _PARAM = re.compile(r"<(?:(\w+):)?(\w+)>")
