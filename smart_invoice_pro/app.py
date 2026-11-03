@@ -26,6 +26,7 @@ from smart_invoice_pro.api.bills_api import bills_blueprint
 from smart_invoice_pro.api.expenses_api import expenses_blueprint
 from smart_invoice_pro.api.cron_jobs import cron_blueprint
 from smart_invoice_pro.api.reports_api import reports_blueprint
+from smart_invoice_pro.api.data_export_api import data_export_blueprint
 from smart_invoice_pro.api.payments_api import payments_blueprint
 from smart_invoice_pro.api.bank_reconciliation_api import bank_reconciliation_blueprint
 from smart_invoice_pro.api.roles_api import roles_blueprint
@@ -44,6 +45,7 @@ from smart_invoice_pro.api.admin_api import admin_blueprint
 from smart_invoice_pro.api.search_api import search_blueprint
 from smart_invoice_pro.api.me_api import me_blueprint
 from smart_invoice_pro.api.lifecycle_api import lifecycle_blueprint
+from smart_invoice_pro.api.memberships_api import memberships_blueprint
 from smart_invoice_pro.api.auth_middleware import enforce_api_auth, get_customer_jwt_secret, get_jwt_secret
 from smart_invoice_pro.services.scheduler import start_scheduler
 import atexit
@@ -205,6 +207,7 @@ def create_app():
     app.register_blueprint(expenses_blueprint, url_prefix="/api")
     app.register_blueprint(cron_blueprint, url_prefix="/api")
     app.register_blueprint(reports_blueprint, url_prefix="/api")
+    app.register_blueprint(data_export_blueprint, url_prefix="/api")
     app.register_blueprint(payments_blueprint, url_prefix="/api")
     app.register_blueprint(bank_reconciliation_blueprint, url_prefix="/api")
     app.register_blueprint(roles_blueprint, url_prefix="/api")
@@ -223,6 +226,7 @@ def create_app():
     app.register_blueprint(search_blueprint, url_prefix="/api")
     app.register_blueprint(me_blueprint, url_prefix="/api")
     app.register_blueprint(lifecycle_blueprint, url_prefix="/api")
+    app.register_blueprint(memberships_blueprint, url_prefix="/api")
 
     # Start the background scheduler for recurring invoices outside test runs.
     if _should_start_scheduler():

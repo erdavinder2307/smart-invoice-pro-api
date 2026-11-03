@@ -4,6 +4,9 @@ Super Admin API
 Endpoints under /api/admin/ for platform-wide tenant, user, feature-flag,
 and system stats management.  Every route requires ``is_super_admin`` in the JWT.
 """
+import csv
+import io
+import re
 import uuid
 from datetime import datetime
 from functools import wraps
@@ -23,7 +26,11 @@ from smart_invoice_pro.utils.activity_enrichment import enrich_admin_audit_entri
 from smart_invoice_pro.utils.audit_export import audit_rows_to_csv
 from smart_invoice_pro.utils.audit_query import parse_audit_filters, parse_pagination
 from smart_invoice_pro.utils.audit_retention import archive_expired_audit_logs, retention_days
-from smart_invoice_pro.utils.tenant_service import create_tenant_doc, VALID_TENANT_PLANS
+from smart_invoice_pro.utils.tenant_service import (
+    create_tenant_doc,
+    normalize_partner_code,
+    VALID_TENANT_PLANS,
+)
 
 admin_blueprint = Blueprint("admin", __name__)
 
@@ -223,6 +230,100 @@ def delete_tenant(tenant_id):
 
     _log_platform_audit("tenant", "soft_delete", tenant_id, before, tenant)
     return jsonify({"message": "Tenant deleted", "id": tenant_id}), 200
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PARTNER REPORT (CA / referral partners)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+PARTNER_REPORT_COLUMNS = [
+    "partner_code", "tenant_id", "tenant_name", "plan", "status",
+    "signed_up_at", "new_this_month",
+]
+
+
+def _csv_safe(value) -> str:
+    """Neutralise spreadsheet formulas in user-entered text (e.g. tenant names)."""
+    text = "" if value is None else str(value)
+    if text and text[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
+@admin_blueprint.route("/admin/partner-report", methods=["GET"])
+@super_admin_required
+def partner_report():
+    """CSV of tenants that signed up with a partner code, as of the end of ?month=YYYY-MM.
+
+    One row per tenant that existed by the month's end and was not deleted before it
+    started; new_this_month marks sign-ups inside the month. Payout amounts are
+    worked out outside the product.
+    """
+    from flask import make_response
+
+    match = _MONTH_RE.match((request.args.get("month") or "").strip())
+    if not match:
+        return jsonify({"error": "month is required as YYYY-MM"}), 400
+    year, month = int(match.group(1)), int(match.group(2))
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year + 1:04d}-01-01" if month == 12 else f"{year:04d}-{month + 1:02d}-01"
+
+    try:
+        only_code = normalize_partner_code(request.args.get("partner_code"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    query = (
+        "SELECT c.id, c.name, c.plan, c.status, c.partner_code, c.created_at, "
+        "c.deleted_at, c.tenant_type FROM c "
+        "WHERE IS_DEFINED(c.partner_code) AND c.created_at < @end"
+    )
+    params = [{"name": "@end", "value": end}]
+    if only_code:
+        query += " AND c.partner_code = @code"
+        params.append({"name": "@code", "value": only_code})
+
+    items = list(tenants_container.query_items(
+        query=query, parameters=params, enable_cross_partition_query=True,
+    ))
+
+    rows = []
+    for t in items:
+        if (t.get("tenant_type") or "PRODUCTION").upper() != "PRODUCTION":
+            continue
+        deleted_at = t.get("deleted_at") or ""
+        if deleted_at and deleted_at < start:
+            continue
+        created = t.get("created_at") or ""
+        rows.append({
+            "partner_code": t.get("partner_code") or "",
+            "tenant_id": t.get("id") or "",
+            "tenant_name": t.get("name") or "",
+            "plan": t.get("plan") or "",
+            "status": t.get("status") or "",
+            "signed_up_at": created,
+            "new_this_month": "yes" if created >= start else "no",
+        })
+    rows.sort(key=lambda r: (r["partner_code"], r["signed_up_at"], r["tenant_id"]))
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=PARTNER_REPORT_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: _csv_safe(v) for k, v in row.items()})
+
+    _log_platform_audit(
+        "partner_report", "export", f"{year:04d}-{month:02d}", None,
+        {"rows": len(rows), "partner_code": only_code},
+    )
+
+    response = make_response(buf.getvalue())
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=partner-report-{year:04d}-{month:02d}.csv"
+    )
+    return response
 
 
 # ═════════════════════════════════════════════════════════════════════════════
