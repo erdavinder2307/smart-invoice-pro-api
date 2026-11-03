@@ -6,6 +6,7 @@ Tenant provisioning helpers for registration and platform admin APIs.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timedelta
 
@@ -17,6 +18,23 @@ VALID_TENANT_STATUSES = frozenset({"active", "inactive", "suspended"})
 VALID_TENANT_TYPES = frozenset({"PRODUCTION", "DEMO", "INTERNAL"})
 DEFAULT_TENANT_TYPE = "PRODUCTION"
 TRIAL_DAYS = 30
+
+
+PARTNER_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,31}$")
+
+
+def normalize_partner_code(raw) -> str | None:
+    """Return the partner code in upper case, None when blank. Raises ValueError when malformed."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("partner_code must be text")
+    code = raw.strip().upper()
+    if not code:
+        return None
+    if not PARTNER_CODE_RE.match(code):
+        raise ValueError("partner_code must be 3-32 letters, digits or dashes")
+    return code
 
 
 def get_tenant_by_id(tenant_id: str) -> dict | None:
@@ -36,6 +54,7 @@ def create_tenant_doc(
     status: str = "active",
     owner_user_id: str | None = None,
     tenant_type: str | None = None,
+    partner_code: str | None = None,
 ) -> dict:
     """Create a tenant document. Raises ValueError on invalid input."""
     clean_name = (name or "").strip()
@@ -80,6 +99,9 @@ def create_tenant_doc(
         doc["trial_ends_at"] = (created + timedelta(days=TRIAL_DAYS)).isoformat()
     if owner_user_id:
         doc["owner_user_id"] = owner_user_id
+    clean_partner_code = normalize_partner_code(partner_code)
+    if clean_partner_code:
+        doc["partner_code"] = clean_partner_code
 
     tenants_container.create_item(body=doc)
     return doc
@@ -91,6 +113,7 @@ def ensure_tenant_exists(
     name: str | None = None,
     owner_user_id: str | None = None,
     plan: str | None = None,
+    partner_code: str | None = None,
 ) -> dict:
     """Idempotent tenant provisioning used during user registration."""
     existing = get_tenant_by_id(tenant_id)
@@ -104,4 +127,5 @@ def ensure_tenant_exists(
         owner_user_id=owner_user_id,
         plan=plan or DEFAULT_TENANT_PLAN,
         status="active",
+        partner_code=partner_code,
     )
