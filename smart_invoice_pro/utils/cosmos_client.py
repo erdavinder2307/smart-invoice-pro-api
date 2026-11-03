@@ -47,4 +47,6 @@ bank_import_jobs_container = get_container("bank_import_jobs", "/tenant_id")
 bank_import_rows_container = get_container("bank_import_rows", "/tenant_id")
 bank_import_artifacts_container = get_container("bank_import_artifacts", "/tenant_id")
 webhook_logs_container = get_container("webhook_logs", "/tenant_id")
+subscriptions_container = get_container("subscriptions", "/tenant_id")
+billing_events_container = get_container("billing_events", "/event_id")
 

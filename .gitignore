@@ -1,4 +1,12 @@
 venv/
+.venv/
 __pycache__/
 .env
+.env.*
+!.env.example
 function-appsettings.json
+local.settings.json
+*.zip
+build/
+dist/
+.python_packages/
