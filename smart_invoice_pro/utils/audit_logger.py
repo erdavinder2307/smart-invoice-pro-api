@@ -39,6 +39,7 @@ _AUDIT_SENSITIVE = {
 # Entity → Activity Center category
 _ENTITY_CATEGORY = {
     "invoice": "financial",
+    "credit_note": "financial",
     "payment": "financial",
     "quote": "financial",
     "bill": "financial",
@@ -107,7 +108,7 @@ _ENTITY_ACTION_RISK = {
 }
 
 _LABEL_KEYS = (
-    "invoice_number", "quote_number", "bill_number", "po_number", "so_number",
+    "invoice_number", "note_number", "quote_number", "bill_number", "po_number", "so_number",
     "purchase_order_number", "sales_order_number", "expense_number",
     "name", "username", "title", "filename", "account_name", "bank_name",
     "description",

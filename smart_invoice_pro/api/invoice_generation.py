@@ -25,6 +25,7 @@ _DOC_LABELS = {
     'sales_order':    'SALES ORDER',
     'bill':           'BILL',
     'credit_note':    'CREDIT NOTE',
+    'debit_note':     'DEBIT NOTE',
 }
 
 # ── Default branding colours (used when no tenant branding is configured) ─────
