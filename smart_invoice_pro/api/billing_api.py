@@ -8,15 +8,19 @@ Paid plans for Solidev Books through Razorpay Subscriptions.
   GET  /api/billing/subscription           Admin: current plan, period end and billing status
   POST /api/billing/subscriptions/cancel   Admin: cancel at the end of the paid period
   POST /api/billing/webhook                public: Razorpay events, signature-checked
+  GET  /api/billing/invoices               Admin: the tenant's GST tax invoices
+  GET  /api/billing/invoices/<id>/pdf      Admin: one tax invoice as a PDF
 
 The tenant's plan changes only through the signed webhook, never through the
-browser's success callback.
+browser's success callback. Every captured charge gets a GST tax invoice
+(utils/tax_invoices.py); checkout stays off until the seller settings it needs are set.
 
 Configuration (names only; values live in the app settings):
   BILLING_ENABLED             "true" to turn the paid endpoints on (default off → 503)
   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET
   RAZORPAY_PLAN_STARTER_MONTHLY, RAZORPAY_PLAN_STARTER_YEARLY,
   RAZORPAY_PLAN_GROWTH_MONTHLY, RAZORPAY_PLAN_GROWTH_YEARLY
+  SELLER_* and BILLING_SAC_CODE for tax invoices (see utils/tax_invoices.py)
 """
 
 from __future__ import annotations
@@ -30,14 +34,18 @@ from datetime import datetime, timezone
 
 import requests
 from azure.cosmos import exceptions
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, make_response, request
 
+from smart_invoice_pro.api.invoice_generation import build_tax_invoice_pdf
 from smart_invoice_pro.api.roles_api import _fetch_user, require_role
 from smart_invoice_pro.utils.cosmos_client import (
     billing_events_container,
+    settings_container,
     subscriptions_container,
+    tax_invoices_container,
     tenants_container,
 )
+from smart_invoice_pro.utils import tax_invoices
 from smart_invoice_pro.utils.entitlements import PLANS
 from smart_invoice_pro.utils.tenant_service import get_tenant_by_id
 
@@ -98,7 +106,8 @@ def _keys() -> tuple[str, str] | None:
 
 
 def _checkout_enabled() -> bool:
-    return _billing_enabled() and _keys() is not None
+    # No sale without the details a GST tax invoice needs.
+    return _billing_enabled() and _keys() is not None and not tax_invoices.missing_config()
 
 
 def _not_enabled():
@@ -256,7 +265,7 @@ def get_subscription():
             "cancel_at_period_end": bool(billing.get("cancel_at_period_end")),
         },
         "checkout_enabled": _checkout_enabled(),
-        "invoices": [],
+        "invoices": tax_invoices.list_for_tenant(tenant["id"]),
     }), 200
 
 
@@ -304,7 +313,25 @@ def _tenant_id_for(subscription: dict) -> str | None:
     return (subscription.get("notes") or {}).get("tenant_id")
 
 
-def _apply_event(event: str, subscription: dict) -> None:
+def _organization_profile(tenant_id: str) -> dict | None:
+    items = list(settings_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @id AND c.tenant_id = @tid",
+        parameters=[{"name": "@id", "value": f"{tenant_id}:organization_profile"},
+                    {"name": "@tid", "value": tenant_id}],
+        partition_key=tenant_id,
+    ))
+    return items[0] if items else None
+
+
+def _issue_tax_invoice(tenant: dict, subscription: dict, payment: dict, plan_code: str, period: str) -> None:
+    """A tax invoice for a captured charge. Storage errors propagate so Razorpay retries the event."""
+    if payment.get("status") != "captured" or not payment.get("id") or not payment.get("amount"):
+        return
+    tax_invoices.create_for_payment(tenant, _organization_profile(tenant["id"]), subscription, payment,
+                                    plan_code, period)
+
+
+def _apply_event(event: str, subscription: dict, payment: dict | None = None) -> None:
     """Update the tenant for one verified subscription event. Data problems are logged, not raised."""
     sub_id = subscription.get("id")
     tenant_id = _tenant_id_for(subscription)
@@ -349,6 +376,9 @@ def _apply_event(event: str, subscription: dict) -> None:
         subscriptions_container.replace_item(item=sub_id, body=stored)
     except exceptions.CosmosResourceNotFoundError:
         pass
+
+    if event in ACTIVE_EVENTS and payment:
+        _issue_tax_invoice(tenant, subscription, payment, billing["plan_code"], billing["period"])
     logger.info("billing webhook: %s applied to tenant %s (subscription %s)", event, tenant_id, sub_id)
 
 
@@ -387,6 +417,7 @@ def razorpay_webhook():
         return jsonify({"status": "already processed"}), 200
 
     subscription = ((payload.get("payload") or {}).get("subscription") or {}).get("entity") or {}
+    payment = ((payload.get("payload") or {}).get("payment") or {}).get("entity") or None
     if event not in ACTIVE_EVENTS and event not in STATUS_EVENTS:
         logger.info("billing webhook: event %s ignored", event)
         return jsonify({"status": "ignored"}), 200
@@ -395,8 +426,8 @@ def razorpay_webhook():
         return jsonify({"status": "ignored"}), 200
 
     try:
-        _apply_event(event, subscription)
-    except exceptions.CosmosHttpResponseError:
+        _apply_event(event, subscription, payment)
+    except (exceptions.CosmosHttpResponseError, tax_invoices.CounterBusyError):
         # Let Razorpay retry: forget the event so the retry is processed.
         logger.exception("billing webhook: storage error on %s", event)
         try:
@@ -406,3 +437,30 @@ def razorpay_webhook():
         return jsonify({"error": "Temporary storage error"}), 500
 
     return jsonify({"status": "ok"}), 200
+
+
+# ── Tax invoices ──────────────────────────────────────────────────────────────
+@billing_blueprint.route("/billing/invoices", methods=["GET"])
+@require_role("Admin")
+def list_tax_invoices():
+    """The signed-in tenant's subscription tax invoices, newest first."""
+    return jsonify({"invoices": tax_invoices.list_for_tenant(getattr(request, "tenant_id", None))}), 200
+
+
+@billing_blueprint.route("/billing/invoices/<invoice_id>/pdf", methods=["GET"])
+@require_role("Admin")
+def download_tax_invoice(invoice_id):
+    """One tax invoice as a PDF; the tenant partition makes another tenant's invoice a 404."""
+    tenant_id = getattr(request, "tenant_id", None)
+    try:
+        invoice = tax_invoices_container.read_item(item=invoice_id, partition_key=tenant_id)
+    except exceptions.CosmosResourceNotFoundError:
+        invoice = None
+    if not invoice or invoice.get("tenant_id") != tenant_id:
+        return jsonify({"error": "Invoice not found"}), 404
+    pdf = build_tax_invoice_pdf(invoice)
+    filename = invoice.get("number", invoice_id).replace("/", "-")
+    response = make_response(pdf)
+    response.headers["Content-Type"] = "application/pdf"
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}.pdf"'
+    return response
