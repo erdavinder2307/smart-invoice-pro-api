@@ -60,8 +60,9 @@ PAYMENT_GRACE = timedelta(days=7)
 FAILED_BILLING_STATUSES = frozenset({"halted", "cancelled"})
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Writes a locked tenant can still make (login and refresh never reach the check).
-LOCKED_WRITE_PATHS = frozenset({"/api/auth/logout"})
-LOCKED_WRITE_PREFIXES = ("/api/billing/",)
+# Password change and session revoke stay open: they are security controls, not trial features.
+LOCKED_WRITE_PATHS = frozenset({"/api/auth/logout", "/api/me/password"})
+LOCKED_WRITE_PREFIXES = ("/api/billing/", "/api/me/sessions/")
 
 
 def resolve_plan(plan: str | None) -> str:
