@@ -100,6 +100,12 @@ _CONTAINER_PATCHES = [
     "smart_invoice_pro.api.invoices.invoices_container",
     "smart_invoice_pro.api.invoices.customers_container",
     "smart_invoice_pro.api.invoices.get_container",
+    # Credit notes
+    "smart_invoice_pro.api.credit_notes_api.credit_notes_container",
+    "smart_invoice_pro.api.credit_notes_api.invoices_container",
+    "smart_invoice_pro.api.credit_notes_api.customers_container",
+    "smart_invoice_pro.api.credit_notes_api.products_container",
+    "smart_invoice_pro.api.reports_api.credit_notes_container",
     # Invoice preferences (used inside invoice create)
     "smart_invoice_pro.api.invoice_preferences_api.settings_container",
     # Tax rates (used inside invoice create)
