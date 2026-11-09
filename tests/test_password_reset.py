@@ -1,8 +1,10 @@
 """Tests for the forgot-password endpoints. Cosmos and mail are fakes; nothing leaves the process."""
 import datetime
 import hashlib
+import logging
 import re
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,10 +52,7 @@ class FakeStore:
             return [d for d in docs if d["id"] == params["@uid"]]
         if "@uid" in params:
             return [d for d in docs if d["user_id"] == params["@uid"]]
-        return [
-            d for d in docs
-            if d.get("email") == params["@email"] or (d.get("username") or "").lower() == params["@email"]
-        ]
+        return [d for d in docs if params["@email"] in (d.get("email"), d.get("username"))]
 
     def _create(self, body):
         self.docs[body["id"]] = body
@@ -112,6 +111,25 @@ def expire_all(stores):
     past = (datetime.datetime.utcnow() - datetime.timedelta(seconds=1)).isoformat()
     for doc in stores["tokens"].docs.values():
         doc["expires_at"] = past
+
+
+class RecordingWorker:
+    """Stands in for the thread pool: remembers the jobs and runs them only when told to."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, fn, *args):
+        self.jobs.append((fn, args))
+
+
+def wait_until(condition, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 class TestRequestReset:
@@ -183,6 +201,27 @@ class TestRequestReset:
         client.post(REQUEST_URL, json={"email": "  OWNER@Example.com "})
         assert mail.begin_send.call_count == 1
 
+    def test_user_lookup_uses_indexed_equality_only(self, client, stores, mail):
+        add_user(stores)
+        client.post(REQUEST_URL, json={"email": EMAIL})
+        queries = [call.kwargs["query"] for call in routes.users_container.query_items.call_args_list]
+        assert len(queries) == 1
+        assert "lower(" not in queries[0].lower()
+        assert "c.email = @email" in queries[0]
+
+    def test_mixed_case_username_is_found_through_its_lowercased_email(self, client, stores, mail):
+        # Sign-up keeps the case of the username and lowercases the email.
+        add_user(stores, username="Owner@Example.com")
+        client.post(REQUEST_URL, json={"email": "OWNER@EXAMPLE.COM"})
+        assert mail.begin_send.call_count == 1
+
+    def test_older_account_without_an_email_field_is_found_by_its_username(self, client, stores, mail):
+        user = add_user(stores)
+        del user["email"]
+        client.post(REQUEST_URL, json={"email": EMAIL})
+        assert mail.begin_send.call_count == 1
+        assert sent_messages(mail)[0]["recipients"] == {"to": [{"address": EMAIL}]}
+
     def test_username_in_mail_html_is_escaped(self, client, stores, mail):
         add_user(stores, username="<b>x</b>")
         request_code(client, mail)
@@ -221,6 +260,13 @@ class TestConfirmReset:
         assert check_password_hash(user["password"], NEW_PASSWORD)
         assert user["password_changed_at"]
         assert list(stores["refresh"].docs) == ["s2"]
+
+    @pytest.mark.parametrize("pasted", [" {code}", "{code}\n", "\t{code} \r\n"])
+    def test_code_pasted_with_surrounding_whitespace_is_accepted(self, client, stores, mail, pasted):
+        user = add_user(stores)
+        code = request_code(client, mail)
+        assert confirm(client, pasted.format(code=code)).status_code == 200
+        assert check_password_hash(user["password"], NEW_PASSWORD)
 
     def test_reused_token_is_rejected(self, client, stores, mail):
         user = add_user(stores)
@@ -358,3 +404,184 @@ class TestRateLimits:
     def test_confirm_is_limited(self, client, stores, mail):
         statuses = [confirm(client, f"guess-{i}").status_code for i in range(11)]
         assert statuses == [400] * 10 + [429]
+
+    def test_rotating_left_hand_forwarded_values_do_not_avoid_the_per_ip_limit(self, client, stores, mail):
+        statuses = [
+            client.post(
+                REQUEST_URL,
+                json={"email": f"person{i}@example.com"},
+                headers={"X-Forwarded-For": f"198.51.100.{i}, 203.0.113.7"},
+            ).status_code
+            for i in range(11)
+        ]
+        assert statuses == [200] * 10 + [429]
+
+    def test_rotating_left_hand_forwarded_values_do_not_avoid_the_confirm_limit(self, client, stores, mail):
+        statuses = [
+            client.post(
+                CONFIRM_URL,
+                json={"token": f"guess-{i}", "new_password": NEW_PASSWORD},
+                headers={"X-Forwarded-For": f"198.51.100.{i}, 203.0.113.7"},
+            ).status_code
+            for i in range(11)
+        ]
+        assert statuses == [400] * 10 + [429]
+
+    @pytest.mark.parametrize("forwarded", [",", ", ,", "   ", " , "])
+    def test_malformed_forwarded_values_are_still_limited(self, client, stores, mail, forwarded):
+        statuses = [
+            client.post(
+                REQUEST_URL,
+                json={"email": f"person{i}@example.com"},
+                headers={"X-Forwarded-For": forwarded},
+            ).status_code
+            for i in range(11)
+        ]
+        assert statuses == [200] * 10 + [429]
+
+    def test_a_port_suffix_does_not_split_the_limit(self, client, stores, mail):
+        statuses = [
+            client.post(
+                REQUEST_URL,
+                json={"email": f"person{i}@example.com"},
+                headers={"X-Forwarded-For": f"203.0.113.7:{50000 + i}"},
+            ).status_code
+            for i in range(11)
+        ]
+        assert statuses == [200] * 10 + [429]
+
+    def test_per_email_key_is_a_hash_not_the_address(self, app):
+        with app.test_request_context(REQUEST_URL, method="POST", json={"email": "  OWNER@Example.com "}):
+            key = routes.password_reset_email_key()
+        assert key == hashlib.sha256(EMAIL.encode()).hexdigest()
+        assert "@" not in key and EMAIL not in key
+
+    def test_per_email_key_without_an_address_is_the_client_key(self, app):
+        with app.test_request_context(
+            REQUEST_URL, method="POST", json={"email": "nope"}, headers={"X-Forwarded-For": "1.1.1.1, 203.0.113.7"}
+        ):
+            assert routes.password_reset_email_key() == "203.0.113.7"
+
+    def test_tripped_email_limit_does_not_log_the_address(self, client, stores, mail, caplog):
+        caplog.set_level(logging.INFO)
+        statuses = [client.post(REQUEST_URL, json={"email": EMAIL}).status_code for _ in range(4)]
+        assert statuses == [200, 200, 200, 429]
+        assert "exceeded" in caplog.text  # the limiter did log, so the check below means something
+        assert EMAIL not in caplog.text
+
+
+class TestPasswordResetIpKey:
+    @pytest.mark.parametrize(
+        "forwarded, expected",
+        [
+            ("203.0.113.7", "203.0.113.7"),
+            ("203.0.113.7:51234", "203.0.113.7"),
+            ("1.1.1.1, 203.0.113.7:51234", "203.0.113.7"),
+            ("203.0.113.7, 198.51.100.2", "198.51.100.2"),
+            ("203.0.113.7, ", "203.0.113.7"),
+            ("[2001:db8::1]:443", "2001:db8::1"),
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("::ffff:203.0.113.7", "::ffff:203.0.113.7"),
+            (",", "198.51.100.9"),
+            (" , ,", "198.51.100.9"),
+            (":80", "198.51.100.9"),
+            ("", "198.51.100.9"),
+        ],
+    )
+    def test_key(self, app, forwarded, expected):
+        headers = {"X-Forwarded-For": forwarded} if forwarded else {}
+        with app.test_request_context("/", headers=headers, environ_base={"REMOTE_ADDR": "198.51.100.9"}):
+            assert routes.password_reset_ip_key() == expected
+
+    def test_no_header_falls_back_to_the_socket_address(self, app):
+        with app.test_request_context("/", environ_base={"REMOTE_ADDR": "198.51.100.9"}):
+            assert routes.password_reset_ip_key() == "198.51.100.9"
+
+    def test_key_is_never_empty(self, app):
+        with app.test_request_context("/", headers={"X-Forwarded-For": ","}, environ_base={"REMOTE_ADDR": ""}):
+            assert routes.password_reset_ip_key() == "unknown"
+
+    def test_display_helper_is_unchanged(self, app):
+        with app.test_request_context("/", headers={"X-Forwarded-For": "1.1.1.1, 203.0.113.7"}):
+            assert routes._get_client_ip() == "1.1.1.1"
+
+
+class TestBoundedBackgroundWork:
+    @pytest.fixture()
+    def slots(self, monkeypatch):
+        semaphore = threading.BoundedSemaphore(1)
+        monkeypatch.setattr(routes, "_password_reset_slots", semaphore)
+        return semaphore
+
+    @pytest.fixture()
+    def worker(self, monkeypatch):
+        recording = RecordingWorker()
+        monkeypatch.setattr(routes, "_password_reset_worker", recording)
+        return recording
+
+    def test_full_queue_drops_the_job_with_the_same_reply(self, client, stores, slots, worker, monkeypatch, caplog):
+        job = MagicMock()
+        monkeypatch.setattr(routes, "_process_password_reset", job)
+        caplog.set_level(logging.INFO)
+
+        accepted = client.post(REQUEST_URL, json={"email": EMAIL})
+        assert len(worker.jobs) == 1
+        dropped = client.post(REQUEST_URL, json={"email": EMAIL})
+
+        assert len(worker.jobs) == 1
+        assert dropped.status_code == accepted.status_code == 200
+        assert dropped.get_data() == accepted.get_data()
+        assert sorted(dropped.headers.keys()) == sorted(accepted.headers.keys())
+        assert "dropped" in caplog.text
+        assert EMAIL not in caplog.text
+        job.assert_not_called()
+
+    def test_a_freed_slot_accepts_the_next_request(self, client, stores, slots, worker, monkeypatch):
+        monkeypatch.setattr(routes, "_process_password_reset", MagicMock())
+        client.post(REQUEST_URL, json={"email": EMAIL})
+        fn, args = worker.jobs[0]
+        fn(*args)
+        client.post(REQUEST_URL, json={"email": EMAIL})
+        assert len(worker.jobs) == 2
+
+    @pytest.mark.parametrize("outcome", ["success", "failure"])
+    def test_slot_is_held_while_pending_and_released_when_the_job_ends(
+        self, client, stores, slots, worker, monkeypatch, outcome
+    ):
+        job = MagicMock(side_effect=RuntimeError("boom") if outcome == "failure" else None)
+        monkeypatch.setattr(routes, "_process_password_reset", job)
+        client.post(REQUEST_URL, json={"email": EMAIL})
+        assert not slots.acquire(blocking=False)
+
+        fn, args = worker.jobs[0]
+        if outcome == "failure":
+            with pytest.raises(RuntimeError):
+                fn(*args)
+        else:
+            fn(*args)
+
+        job.assert_called_once_with(EMAIL)
+        assert slots.acquire(blocking=False)
+
+    def test_slot_is_released_when_the_job_cannot_be_queued(self, client, stores, slots, monkeypatch):
+        failing = MagicMock()
+        failing.submit.side_effect = RuntimeError("pool is shut down")
+        monkeypatch.setattr(routes, "_password_reset_worker", failing)
+        resp = client.post(REQUEST_URL, json={"email": EMAIL})
+        assert resp.status_code == 200
+        assert slots.acquire(blocking=False)
+
+    @pytest.mark.parametrize("outcome", ["success", "failure"])
+    def test_slot_is_released_on_the_real_worker(self, client, stores, slots, monkeypatch, outcome):
+        done = threading.Event()
+
+        def job(_email):
+            done.set()
+            if outcome == "failure":
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(routes, "_process_password_reset", job)
+        assert client.post(REQUEST_URL, json={"email": EMAIL}).status_code == 200
+        assert done.wait(5)
+        assert wait_until(lambda: slots.acquire(blocking=False))

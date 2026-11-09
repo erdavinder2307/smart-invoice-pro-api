@@ -10,6 +10,7 @@ import logging
 import uuid
 import os
 import secrets
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from html import escape as html_escape
 from flasgger import swag_from
@@ -89,12 +90,16 @@ _DEMO_WINDOW_SECONDS = 3600
 
 _PASSWORD_RESET_TOKEN_MINUTES = 30
 _PASSWORD_RESET_MAX_ACCOUNTS = 5
+# Accepted requests that are running or waiting for a worker; the rest are dropped.
+_PASSWORD_RESET_MAX_PENDING = 20
+_UNKNOWN_CLIENT = "unknown"
 _PASSWORD_MIN_LENGTH = 8
 _PASSWORD_RESET_ACCEPTED = "If that email is registered, a password reset code has been sent to it."
 _PASSWORD_RESET_INVALID = "This reset code is invalid or has expired."
 
 logger = logging.getLogger(__name__)
 _password_reset_worker = ThreadPoolExecutor(max_workers=2)
+_password_reset_slots = threading.BoundedSemaphore(_PASSWORD_RESET_MAX_PENDING)
 
 PUBLIC_DEMO_ROLES = ("Sales", "Manager", "Accountant", "Purchaser")
 
@@ -538,9 +543,42 @@ def _normalized_reset_email(data) -> str:
     return email if "@" in email and len(email) <= 254 else ""
 
 
+def _strip_forwarded_port(entry: str) -> str:
+    """Drop a :port suffix from an X-Forwarded-For entry; a bare IPv6 address stays whole."""
+    if entry.startswith("["):
+        end = entry.find("]")
+        return entry[1:end] if end > 0 else entry
+    if entry.count(":") == 1:
+        return entry.split(":", 1)[0]
+    return entry
+
+
+def password_reset_ip_key() -> str:
+    """Rate-limit key: the client address as the platform proxy saw it.
+
+    The proxy appends the address it received the request from, so the right-most
+    X-Forwarded-For entry is the one a caller cannot choose; the entries to its
+    left are whatever the caller sent. This assumes the platform proxy is the last
+    hop in front of the app. Azure App Service may add a :port suffix.
+    Without a usable entry this falls back to the socket address. It never returns
+    an empty string, because Flask-Limiter skips a limit whose key is empty.
+    """
+    for entry in reversed(request.headers.get("X-Forwarded-For", "").split(",")):
+        address = _strip_forwarded_port(entry.strip())
+        if address:
+            return address
+    return request.remote_addr or _UNKNOWN_CLIENT
+
+
 def password_reset_email_key() -> str:
-    """Rate-limit key: the requested address, so one inbox cannot be flooded from many IPs."""
-    return _normalized_reset_email(request.get_json(silent=True)) or _get_client_ip()
+    """Rate-limit key: a hash of the requested address, so one inbox cannot be flooded from many IPs.
+
+    Flask-Limiter logs the key when a limit trips, so the key must not be the address.
+    """
+    email = _normalized_reset_email(request.get_json(silent=True))
+    if not email:
+        return password_reset_ip_key()
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()
 
 
 def _accounts_for_reset_email(email: str) -> list:
@@ -550,9 +588,14 @@ def _accounts_for_reset_email(email: str) -> list:
     several accounts (usually in different tenants) can share one. The cap stops
     a burst of throwaway sign-ups turning one request into a burst of mail, and
     oldest-first stops those sign-ups pushing the original account out.
+
+    Only equality on stored fields, so the index serves the query. Sign-up, invite
+    and the admin edit store `email` lowercased, so `c.email` finds those accounts.
+    `c.username` is the fallback for older accounts with no `email` (login also
+    matches `username` exactly); it only matches a username already stored in lower case.
     """
     items = list(users_container.query_items(
-        query="SELECT * FROM c WHERE c.email = @email OR LOWER(c.username) = @email",
+        query="SELECT * FROM c WHERE c.email = @email OR c.username = @email",
         parameters=[{"name": "@email", "value": email}],
         enable_cross_partition_query=True,
     ))
@@ -656,10 +699,26 @@ def _process_password_reset(email: str) -> None:
         logger.error("password reset: request failed (%s)", type(exc).__name__)
 
 
-def _dispatch_password_reset(email: str) -> None:
+def _run_password_reset_job(email: str) -> None:
     try:
-        _password_reset_worker.submit(_process_password_reset, email)
+        _process_password_reset(email)
+    finally:
+        _password_reset_slots.release()
+
+
+def _dispatch_password_reset(email: str) -> None:
+    """Queue the job, or drop it when too many are already pending.
+
+    A drop is logged without the address and is invisible to the caller, so the
+    reply never shows whether an address is registered or the queue is full.
+    """
+    if not _password_reset_slots.acquire(blocking=False):
+        logger.warning("password reset: too many requests pending, request dropped")
+        return
+    try:
+        _password_reset_worker.submit(_run_password_reset_job, email)
     except Exception as exc:
+        _password_reset_slots.release()
         logger.error("password reset: could not queue request (%s)", type(exc).__name__)
 
 
@@ -693,6 +752,8 @@ def confirm_password_reset():
         return jsonify({"error": "token and new_password are required."}), 400
 
     token = data.get("token")
+    if isinstance(token, str):
+        token = token.strip()  # a code pasted from a mail often carries a trailing space or newline
     new_password = data.get("new_password")
     if not isinstance(token, str) or not token or not isinstance(new_password, str):
         return jsonify({"error": "token and new_password are required."}), 400

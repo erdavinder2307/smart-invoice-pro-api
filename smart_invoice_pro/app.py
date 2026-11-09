@@ -190,8 +190,8 @@ def create_app():
     # Register your API blueprints here
     app.register_blueprint(auth_blueprint, url_prefix="/api")
     # The limit is enforced by the wrapper limit() returns, so that wrapper has to be the registered view.
-    from smart_invoice_pro.api.routes import _get_client_ip, password_reset_email_key
-    per_ip = limiter.limit("10 per 15 minutes", key_func=_get_client_ip)
+    from smart_invoice_pro.api.routes import password_reset_email_key, password_reset_ip_key
+    per_ip = limiter.limit("10 per 15 minutes", key_func=password_reset_ip_key)
     per_email = limiter.limit("3 per 15 minutes", key_func=password_reset_email_key)
     app.view_functions["auth.request_password_reset"] = per_email(per_ip(app.view_functions["auth.request_password_reset"]))
     app.view_functions["auth.confirm_password_reset"] = per_ip(app.view_functions["auth.confirm_password_reset"])
