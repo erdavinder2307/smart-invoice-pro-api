@@ -96,6 +96,7 @@ _CONTAINER_PATCHES = [
     # Auth routes
     "smart_invoice_pro.api.routes.users_container",
     "smart_invoice_pro.api.routes.refresh_tokens_container",
+    "smart_invoice_pro.api.routes.password_reset_tokens_container",
     # Invoices
     "smart_invoice_pro.api.invoices.invoices_container",
     "smart_invoice_pro.api.invoices.customers_container",
