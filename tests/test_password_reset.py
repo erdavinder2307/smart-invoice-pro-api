@@ -17,6 +17,7 @@ CONFIRM_URL = "/api/auth/password-reset/confirm"
 OLD_PASSWORD = "old-password-1"
 NEW_PASSWORD = "new-password-1"
 EMAIL = "owner@example.com"
+INELIGIBLE_ACCOUNTS = [{"is_demo_user": True}, {"is_active": False}, {"type": "user_profile"}, {"password": ""}]
 
 
 def make_user(user_id="user-1", tenant_id="tenant-1", email=EMAIL, created_at="2026-01-01T00:00:00", **extra):
@@ -33,11 +34,23 @@ def make_user(user_id="user-1", tenant_id="tenant-1", email=EMAIL, created_at="2
     }
 
 
+# The only conditions the fake understands in the user lookup, as Cosmos evaluates them:
+# `=` is exact, StringEquals with the third argument true ignores case.
+_USER_LOOKUP_CONDITIONS = {
+    "c.email = @email": lambda doc, value: doc.get("email") == value,
+    "c.username = @email": lambda doc, value: doc.get("username") == value,
+    "STRINGEQUALS(c.username, @email, true)": lambda doc, value: (
+        isinstance(doc.get("username"), str) and doc["username"].lower() == value.lower()
+    ),
+}
+
+
 class FakeStore:
     """Just enough of a Cosmos container for the queries the reset code makes."""
 
     def __init__(self, container):
         self.docs = {}
+        self.unsupported = []  # user lookups the fake could not run; the `stores` fixture fails on any
         container.query_items.side_effect = self._query
         container.create_item.side_effect = self._create
         container.delete_item.side_effect = self._delete
@@ -52,7 +65,19 @@ class FakeStore:
             return [d for d in docs if d["id"] == params["@uid"]]
         if "@uid" in params:
             return [d for d in docs if d["user_id"] == params["@uid"]]
-        return [d for d in docs if params["@email"] in (d.get("email"), d.get("username"))]
+        return [d for d in docs if self._user_lookup_matches(query, params["@email"], d)]
+
+    def _user_lookup_matches(self, query, value, doc):
+        """Run the query's conditions against one document; refuse any it does not know.
+
+        The reset job swallows errors, so a refusal is also recorded and fails the test at teardown.
+        """
+        prefix = "SELECT * FROM c WHERE "
+        conditions = query[len(prefix):].split(" OR ") if query.startswith(prefix) else [query]
+        if any(c not in _USER_LOOKUP_CONDITIONS for c in conditions):
+            self.unsupported.append(query)
+            raise AssertionError(f"unsupported user lookup: {query}")
+        return any(_USER_LOOKUP_CONDITIONS[c](doc, value) for c in conditions)
 
     def _create(self, body):
         self.docs[body["id"]] = body
@@ -66,11 +91,14 @@ class FakeStore:
 
 @pytest.fixture()
 def stores(app):
-    return {
+    fakes = {
         "users": FakeStore(routes.users_container),
         "tokens": FakeStore(routes.password_reset_tokens_container),
         "refresh": FakeStore(routes.refresh_tokens_container),
     }
+    yield fakes
+    for name, store in fakes.items():
+        assert not store.unsupported, f"{name} store was sent a query the fake does not support: {store.unsupported}"
 
 
 @pytest.fixture()
@@ -201,13 +229,20 @@ class TestRequestReset:
         client.post(REQUEST_URL, json={"email": "  OWNER@Example.com "})
         assert mail.begin_send.call_count == 1
 
-    def test_user_lookup_uses_indexed_equality_only(self, client, stores, mail):
+    def test_user_lookup_stays_on_the_index(self, client, stores, mail):
+        """Equality on `email`, and StringEquals with ignoreCase on `username`; nothing that scans every user."""
         add_user(stores)
         client.post(REQUEST_URL, json={"email": EMAIL})
         queries = [call.kwargs["query"] for call in routes.users_container.query_items.call_args_list]
         assert len(queries) == 1
-        assert "lower(" not in queries[0].lower()
-        assert "c.email = @email" in queries[0]
+        query = queries[0]
+        assert "c.email = @email" in query
+        assert "STRINGEQUALS(c.username, @email, true)" in query
+        assert "c.username = @email" not in query  # exact match would miss a username stored with capitals
+        scans = re.findall(
+            r"\b(LOWER|UPPER|CONTAINS|ARRAY_CONTAINS|LIKE|REGEXMATCH|STARTSWITH|ENDSWITH)\b", query, re.IGNORECASE
+        )
+        assert scans == []
 
     def test_mixed_case_username_is_found_through_its_lowercased_email(self, client, stores, mail):
         # Sign-up keeps the case of the username and lowercases the email.
@@ -227,20 +262,54 @@ class TestRequestReset:
         request_code(client, mail)
         assert "<b>x</b>" not in sent_messages(mail)[0]["content"]["html"]
 
-    @pytest.mark.parametrize(
-        "extra",
-        [{"is_demo_user": True}, {"is_active": False}, {"type": "user_profile"}, {"password": ""}],
-    )
+    @pytest.mark.parametrize("typed", [EMAIL, "Owner@Example.com", "  OWNER@EXAMPLE.COM "])
+    def test_older_account_with_a_capitalised_username_is_found(self, client, stores, mail, typed):
+        # No `email` field and a username stored with capitals, as some early accounts have.
+        user = add_user(stores, username="Owner@Example.com")
+        del user["email"]
+        code = request_code(client, mail, email=typed)
+        assert mail.begin_send.call_count == 1
+        assert sent_messages(mail)[0]["recipients"] == {"to": [{"address": EMAIL}]}
+        (token,) = stores["tokens"].docs.values()
+        assert token["user_id"] == user["id"]
+        assert token["token_hash"] == hashlib.sha256(code.encode()).hexdigest()
+
+    @pytest.mark.parametrize("extra", INELIGIBLE_ACCOUNTS)
     def test_ineligible_documents_get_no_mail(self, client, stores, mail, extra):
         add_user(stores, **extra)
         resp = client.post(REQUEST_URL, json={"email": EMAIL})
         assert resp.status_code == 200
         mail.begin_send.assert_not_called()
 
+    @pytest.mark.parametrize("extra", INELIGIBLE_ACCOUNTS)
+    def test_ineligible_older_account_with_a_capitalised_username_gets_no_mail(self, client, stores, mail, extra):
+        user = add_user(stores, username="Owner@Example.com", **extra)
+        del user["email"]
+        resp = client.post(REQUEST_URL, json={"email": EMAIL})
+        assert resp.status_code == 200
+        mail.begin_send.assert_not_called()
+        assert stores["tokens"].docs == {}
+
     def test_username_match_does_not_redirect_mail_from_the_account_address(self, client, stores, mail):
         add_user(stores, email="real@example.com", username=EMAIL)
         client.post(REQUEST_URL, json={"email": EMAIL})
         mail.begin_send.assert_not_called()
+
+    def test_capitalised_username_does_not_redirect_mail_from_the_account_address(self, client, stores, mail):
+        # The username equals the typed address apart from case, but the account's own address is another one.
+        add_user(stores, email="real@example.com", username="Owner@Example.com")
+        client.post(REQUEST_URL, json={"email": EMAIL})
+        mail.begin_send.assert_not_called()
+        assert stores["tokens"].docs == {}
+
+    def test_account_returned_by_the_query_is_kept_only_if_its_own_address_matches(self, stores):
+        add_user(stores, user_id="own", email=EMAIL, username="Owner@Example.com")
+        add_user(stores, user_id="other", email="real@example.com", username="OWNER@example.com")
+        selected = routes._accounts_for_reset_email(EMAIL)
+        call = routes.users_container.query_items.call_args
+        fetched = stores["users"]._query(call.kwargs["query"], call.kwargs["parameters"])
+        assert {doc["id"] for doc in fetched} == {"own", "other"}  # the query alone cannot tell them apart
+        assert [doc["id"] for doc in selected] == ["own"]
 
     @pytest.mark.parametrize("body", [{}, {"email": "not-an-email"}, {"email": 5}, ["x"]])
     def test_bad_input_is_rejected(self, client, stores, mail, body):

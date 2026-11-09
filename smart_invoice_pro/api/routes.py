@@ -589,13 +589,15 @@ def _accounts_for_reset_email(email: str) -> list:
     a burst of throwaway sign-ups turning one request into a burst of mail, and
     oldest-first stops those sign-ups pushing the original account out.
 
-    Only equality on stored fields, so the index serves the query. Sign-up, invite
-    and the admin edit store `email` lowercased, so `c.email` finds those accounts.
-    `c.username` is the fallback for older accounts with no `email` (login also
-    matches `username` exactly); it only matches a username already stored in lower case.
+    Sign-up, invite and the admin edit store `email` lowercased, so `c.email`
+    finds those accounts. `c.username` is the fallback for older accounts with no
+    `email` (login also matches `username`), and some keep capitals in it. That is
+    why it uses StringEquals with ignoreCase and not LOWER(c.username): Cosmos DB
+    serves StringEquals from the index (an expanded index scan), whereas LOWER()
+    would scan every user on a public endpoint.
     """
     items = list(users_container.query_items(
-        query="SELECT * FROM c WHERE c.email = @email OR c.username = @email",
+        query="SELECT * FROM c WHERE c.email = @email OR STRINGEQUALS(c.username, @email, true)",
         parameters=[{"name": "@email", "value": email}],
         enable_cross_partition_query=True,
     ))
