@@ -4,10 +4,13 @@ Usage:
     cd /Users/davinderpal/Development/invoicing/smart-invoice-pro-api-2
     source venv/bin/activate
     python create_admin_user.py
+
+Reads ADMIN_USERNAME and ADMIN_PASSWORD from the environment, or asks for them.
 """
 
 import os
 import uuid
+from getpass import getpass
 from datetime import datetime
 from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
@@ -16,9 +19,14 @@ from azure.cosmos import CosmosClient, PartitionKey
 # Load environment variables
 load_dotenv()
 
-# Admin credentials
-ADMIN_USERNAME = "admin@solidevelectrosoft.com"
-ADMIN_PASSWORD = "Solidev@2026"
+# Admin credentials come from settings or a prompt, never from this file
+ADMIN_USERNAME = (os.getenv("ADMIN_USERNAME") or input("Admin username: ")).strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD") or getpass("Admin password: ")
+
+if not ADMIN_USERNAME or not ADMIN_PASSWORD:
+    print("❌ Error: Admin username and password are required")
+    print("   Set ADMIN_USERNAME and ADMIN_PASSWORD, or enter them when asked")
+    exit(1)
 
 # Cosmos DB connection
 uri = os.getenv("COSMOS_URI")
@@ -82,10 +90,9 @@ try:
     users_container.create_item(body=admin_user)
     print("✅ Admin user created successfully!")
     print(f"   Username: {ADMIN_USERNAME}")
-    print(f"   Password: {ADMIN_PASSWORD}")
     print(f"   User ID:  {user_id}")
     print(f"   Role:     Admin")
-    print("\n🎉 You can now login with these credentials!")
+    print("\n🎉 You can now login with the password you set.")
 except Exception as e:
     print(f"❌ Error creating admin user: {e}")
     exit(1)
