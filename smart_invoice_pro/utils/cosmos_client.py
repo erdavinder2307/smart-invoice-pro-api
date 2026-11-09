@@ -50,3 +50,5 @@ webhook_logs_container = get_container("webhook_logs", "/tenant_id")
 subscriptions_container = get_container("subscriptions", "/tenant_id")
 billing_events_container = get_container("billing_events", "/event_id")
 
+tax_invoices_container = get_container("tax_invoices", "/tenant_id")
+counters_container = get_container("counters", "/id")
