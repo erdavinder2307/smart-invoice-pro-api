@@ -177,7 +177,8 @@ class TestSendLowStockEmail:
 
     @patch("smart_invoice_pro.api.cron_jobs.email_configured", lambda: True)
     @patch("smart_invoice_pro.api.cron_jobs.get_email_client")
-    def test_email_sent_successfully(self, mock_cls):
+    def test_email_sent_successfully(self, mock_cls, monkeypatch):
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "donotreply@example.com")
         mock_client = MagicMock()
         mock_poller = MagicMock()
         mock_poller.result.return_value = {"id": "msg-123"}

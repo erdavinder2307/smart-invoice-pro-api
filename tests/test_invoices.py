@@ -873,6 +873,7 @@ class TestSendInvoiceReminder:
     @patch("smart_invoice_pro.api.invoices.invoices_container")
     def test_sends_from_sender_email_setting(self, mock_inv, mock_get_client, client, headers_a,
                                              stored_invoice_a, monkeypatch):
+        monkeypatch.delenv("AZURE_SENDER_EMAIL", raising=False)
         monkeypatch.setenv("SENDER_EMAIL", "billing@example.com")
         mock_inv.query_items.return_value = [self._invoice(stored_invoice_a)]
         mock_client = MagicMock()
@@ -890,9 +891,27 @@ class TestSendInvoiceReminder:
     @patch("smart_invoice_pro.utils.email_client.get_email_client")
     @patch("smart_invoice_pro.utils.email_client.email_configured", lambda: True)
     @patch("smart_invoice_pro.api.invoices.invoices_container")
-    def test_default_sender_when_setting_missing(self, mock_inv, mock_get_client, client, headers_a,
-                                                 stored_invoice_a, monkeypatch):
+    def test_no_sender_returns_503_and_sends_nothing(self, mock_inv, mock_get_client, client, headers_a,
+                                                     stored_invoice_a, monkeypatch):
         monkeypatch.delenv("SENDER_EMAIL", raising=False)
+        monkeypatch.delenv("AZURE_SENDER_EMAIL", raising=False)
+        mock_inv.query_items.return_value = [self._invoice(stored_invoice_a)]
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        resp = client.post(self._URL, json={"recipient_email": "other@example.com"}, headers=headers_a)
+
+        assert resp.status_code == 503
+        assert "No sender address is set" in resp.get_json()["error"]
+        mock_client.begin_send.assert_not_called()
+
+    @patch("smart_invoice_pro.utils.email_client.get_email_client")
+    @patch("smart_invoice_pro.utils.email_client.email_configured", lambda: True)
+    @patch("smart_invoice_pro.api.invoices.invoices_container")
+    def test_azure_sender_email_wins_over_older_name(self, mock_inv, mock_get_client, client, headers_a,
+                                                     stored_invoice_a, monkeypatch):
+        monkeypatch.setenv("SENDER_EMAIL", "old@example.com")
+        monkeypatch.setenv("AZURE_SENDER_EMAIL", "donotreply@example.com")
         mock_inv.query_items.return_value = [self._invoice(stored_invoice_a)]
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -901,5 +920,5 @@ class TestSendInvoiceReminder:
 
         assert resp.status_code == 200
         message = mock_client.begin_send.call_args[0][0]
-        assert message["senderAddress"] == "noreply@solidevelectrosoft.com"
+        assert message["senderAddress"] == "donotreply@example.com"
         assert message["recipients"]["to"] == [{"address": "other@example.com"}]
