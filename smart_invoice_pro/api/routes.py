@@ -1,8 +1,18 @@
 from flask import Blueprint, request, jsonify
-from smart_invoice_pro.utils.cosmos_client import users_container, refresh_tokens_container
+from smart_invoice_pro.utils.cosmos_client import (
+    users_container,
+    refresh_tokens_container,
+    password_reset_tokens_container,
+)
+from smart_invoice_pro.utils.email_client import email_configured, get_email_client
+import hashlib
+import logging
 import uuid
 import os
 import secrets
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from html import escape as html_escape
 from flasgger import swag_from
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
@@ -81,6 +91,19 @@ _LOGIN_WINDOW_SECONDS = 900
 _DEMO_RATE_LIMIT = {}
 _DEMO_MAX_ATTEMPTS = 30
 _DEMO_WINDOW_SECONDS = 3600
+
+_PASSWORD_RESET_TOKEN_MINUTES = 30
+_PASSWORD_RESET_MAX_ACCOUNTS = 5
+# Accepted requests that are running or waiting for a worker; the rest are dropped.
+_PASSWORD_RESET_MAX_PENDING = 20
+_UNKNOWN_CLIENT = "unknown"
+_PASSWORD_MIN_LENGTH = 8
+_PASSWORD_RESET_ACCEPTED = "If that email is registered, a password reset code has been sent to it."
+_PASSWORD_RESET_INVALID = "This reset code is invalid or has expired."
+
+logger = logging.getLogger(__name__)
+_password_reset_worker = ThreadPoolExecutor(max_workers=2)
+_password_reset_slots = threading.BoundedSemaphore(_PASSWORD_RESET_MAX_PENDING)
 
 PUBLIC_DEMO_ROLES = ("Sales", "Manager", "Accountant", "Purchaser")
 
@@ -517,6 +540,295 @@ def login_user():
             "ip_address": _get_client_ip(),
         })
         return jsonify({"message": "Invalid username or password."}), 401
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _normalized_reset_email(data) -> str:
+    value = data.get("email") if isinstance(data, dict) else None
+    if not isinstance(value, str):
+        return ""
+    email = value.strip().lower()
+    return email if "@" in email and len(email) <= 254 else ""
+
+
+def _strip_forwarded_port(entry: str) -> str:
+    """Drop a :port suffix from an X-Forwarded-For entry; a bare IPv6 address stays whole."""
+    if entry.startswith("["):
+        end = entry.find("]")
+        return entry[1:end] if end > 0 else entry
+    if entry.count(":") == 1:
+        return entry.split(":", 1)[0]
+    return entry
+
+
+def password_reset_ip_key() -> str:
+    """Rate-limit key: the client address as the platform proxy saw it.
+
+    The proxy appends the address it received the request from, so the right-most
+    X-Forwarded-For entry is the one a caller cannot choose; the entries to its
+    left are whatever the caller sent. This assumes the platform proxy is the last
+    hop in front of the app. Azure App Service may add a :port suffix.
+    Without a usable entry this falls back to the socket address. It never returns
+    an empty string, because Flask-Limiter skips a limit whose key is empty.
+    """
+    for entry in reversed(request.headers.get("X-Forwarded-For", "").split(",")):
+        address = _strip_forwarded_port(entry.strip())
+        if address:
+            return address
+    return request.remote_addr or _UNKNOWN_CLIENT
+
+
+def password_reset_email_key() -> str:
+    """Rate-limit key: a hash of the requested address, so one inbox cannot be flooded from many IPs.
+
+    Flask-Limiter logs the key when a limit trips, so the key must not be the address.
+    """
+    email = _normalized_reset_email(request.get_json(silent=True))
+    if not email:
+        return password_reset_ip_key()
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()
+
+
+def _accounts_for_reset_email(email: str) -> list:
+    """Accounts whose own address is `email`, oldest first.
+
+    Sign-up does not verify addresses and only invites check for duplicates, so
+    several accounts (usually in different tenants) can share one. The cap stops
+    a burst of throwaway sign-ups turning one request into a burst of mail, and
+    oldest-first stops those sign-ups pushing the original account out.
+
+    Sign-up, invite and the admin edit store `email` lowercased, so `c.email`
+    finds those accounts. `c.username` is the fallback for older accounts with no
+    `email` (login also matches `username`), and some keep capitals in it. That is
+    why it uses StringEquals with ignoreCase and not LOWER(c.username): Cosmos DB
+    serves StringEquals from the index (an expanded index scan), whereas LOWER()
+    would scan every user on a public endpoint.
+    """
+    items = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.email = @email OR STRINGEQUALS(c.username, @email, true)",
+        parameters=[{"name": "@email", "value": email}],
+        enable_cross_partition_query=True,
+    ))
+    accounts = [
+        user for user in items
+        if _can_reset_password(user)
+        and (user.get("email") or user.get("username") or "").lower() == email
+    ]
+    accounts.sort(key=lambda user: user.get("created_at") or "")
+    return accounts[:_PASSWORD_RESET_MAX_ACCOUNTS]
+
+
+def _can_reset_password(user: dict) -> bool:
+    return (
+        user.get("type") in ("", "user", None)
+        and bool(user.get("password"))
+        and not user.get("is_demo_user")
+        and user.get("is_active") is not False
+    )
+
+
+def _delete_reset_tokens(user_id: str) -> None:
+    items = list(password_reset_tokens_container.query_items(
+        query="SELECT * FROM c WHERE c.user_id = @uid",
+        parameters=[{"name": "@uid", "value": user_id}],
+        enable_cross_partition_query=True,
+    ))
+    for item in items:
+        try:
+            password_reset_tokens_container.delete_item(item=item["id"], partition_key=user_id)
+        except Exception:
+            pass
+
+
+def _revoke_refresh_tokens(user_id: str) -> None:
+    items = list(refresh_tokens_container.query_items(
+        query="SELECT * FROM c WHERE c.user_id = @uid",
+        parameters=[{"name": "@uid", "value": user_id}],
+        enable_cross_partition_query=True,
+    ))
+    for item in items:
+        try:
+            refresh_tokens_container.delete_item(item=item["id"], partition_key=user_id)
+        except Exception:
+            pass
+
+
+def _send_password_reset_email(to_email: str, username: str, code: str, sender: str) -> None:
+    safe_username = html_escape(username)
+    poller = get_email_client().begin_send({
+        "senderAddress": sender,
+        "recipients": {"to": [{"address": to_email}]},
+        "content": {
+            "subject": "Reset your Solidev Books password",
+            "plainText": (
+                f"We received a request to reset the password for the account {username}.\n\n"
+                f"Enter this code in the app to choose a new password:\n\n{code}\n\n"
+                f"The code works once and expires in {_PASSWORD_RESET_TOKEN_MINUTES} minutes. "
+                "If you did not ask for this, you can ignore this email."
+            ),
+            "html": (
+                f"<p>We received a request to reset the password for the account <b>{safe_username}</b>.</p>"
+                "<p>Enter this code in the app to choose a new password:</p>"
+                f"<p style=\"font-family:monospace;word-break:break-all\">{code}</p>"
+                f"<p>The code works once and expires in {_PASSWORD_RESET_TOKEN_MINUTES} minutes. "
+                "If you did not ask for this, you can ignore this email.</p>"
+            ),
+        },
+    })
+    poller.result(timeout=30)
+
+
+def _process_password_reset(email: str) -> None:
+    """Issue a token and send the mail, one per matching account.
+
+    Runs off the request so the response cannot differ, in content or timing,
+    between a registered and an unregistered address. Logs carry neither the
+    address nor the token.
+    """
+    try:
+        sender = (os.getenv("SENDER_EMAIL") or "").strip()
+        if not sender or not email_configured():
+            logger.warning("password reset: mail is not configured, nothing sent")
+            return
+        for user in _accounts_for_reset_email(email):
+            user_id = user["id"]
+            # Only the newest code for an account stays usable.
+            _delete_reset_tokens(user_id)
+            code = secrets.token_urlsafe(32)
+            now = datetime.datetime.utcnow()
+            password_reset_tokens_container.create_item(body={
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "tenant_id": user.get("tenant_id") or user_id,
+                "token_hash": _hash_reset_token(code),
+                "created_at": now.isoformat(),
+                "expires_at": (now + datetime.timedelta(minutes=_PASSWORD_RESET_TOKEN_MINUTES)).isoformat(),
+            })
+            _send_password_reset_email(email, user.get("username") or email, code, sender)
+    except Exception as exc:
+        logger.error("password reset: request failed (%s)", type(exc).__name__)
+
+
+def _run_password_reset_job(email: str) -> None:
+    try:
+        _process_password_reset(email)
+    finally:
+        _password_reset_slots.release()
+
+
+def _dispatch_password_reset(email: str) -> None:
+    """Queue the job, or drop it when too many are already pending.
+
+    A drop is logged without the address and is invisible to the caller, so the
+    reply never shows whether an address is registered or the queue is full.
+    """
+    if not _password_reset_slots.acquire(blocking=False):
+        logger.warning("password reset: too many requests pending, request dropped")
+        return
+    try:
+        _password_reset_worker.submit(_run_password_reset_job, email)
+    except Exception as exc:
+        _password_reset_slots.release()
+        logger.error("password reset: could not queue request (%s)", type(exc).__name__)
+
+
+@auth_blueprint.route('/auth/password-reset/request', methods=['POST'])
+def request_password_reset():
+    """
+    Start a password reset. Input JSON: { "email": "<address>" }
+    The response is the same whether or not the address is registered.
+    """
+    data = validate_json_request()
+    if isinstance(data, tuple):
+        return data
+
+    email = _normalized_reset_email(data)
+    if not email:
+        return jsonify({"error": "A valid email address is required."}), 400
+
+    _dispatch_password_reset(email)
+    return jsonify({"message": _PASSWORD_RESET_ACCEPTED}), 200
+
+
+@auth_blueprint.route('/auth/password-reset/confirm', methods=['POST'])
+def confirm_password_reset():
+    """
+    Finish a password reset. Input JSON: { "token": "<code>", "new_password": "<password>" }
+    """
+    data = validate_json_request()
+    if isinstance(data, tuple):
+        return data
+    if not isinstance(data, dict):
+        return jsonify({"error": "token and new_password are required."}), 400
+
+    token = data.get("token")
+    if isinstance(token, str):
+        token = token.strip()  # a code pasted from a mail often carries a trailing space or newline
+    new_password = data.get("new_password")
+    if not isinstance(token, str) or not token or not isinstance(new_password, str):
+        return jsonify({"error": "token and new_password are required."}), 400
+
+    # Checked before the token is touched, so a weak password does not use it up.
+    new_password = new_password.strip()
+    if len(new_password) < _PASSWORD_MIN_LENGTH:
+        return jsonify({"error": f"New password must be at least {_PASSWORD_MIN_LENGTH} characters"}), 400
+
+    invalid = jsonify({"error": _PASSWORD_RESET_INVALID}), 400
+
+    records = list(password_reset_tokens_container.query_items(
+        query="SELECT * FROM c WHERE c.token_hash = @hash",
+        parameters=[{"name": "@hash", "value": _hash_reset_token(token)}],
+        enable_cross_partition_query=True,
+    ))
+    record = records[0] if records else None
+    if not record or datetime.datetime.fromisoformat(record["expires_at"]) <= datetime.datetime.utcnow():
+        return invalid
+
+    # Deleting is the single-use check: of two concurrent confirms only one succeeds.
+    user_id = record["user_id"]
+    try:
+        password_reset_tokens_container.delete_item(item=record["id"], partition_key=user_id)
+    except Exception:
+        return invalid
+
+    users = list(users_container.query_items(
+        query="SELECT * FROM c WHERE c.id = @uid",
+        parameters=[{"name": "@uid", "value": user_id}],
+        enable_cross_partition_query=True,
+    ))
+    user = next((u for u in users if _can_reset_password(u)), None)
+    if (
+        not user
+        or (user.get("tenant_id") or user_id) != record["tenant_id"]
+        # A token issued before the last password change is an older token.
+        or record["created_at"] < (user.get("password_changed_at") or "")
+    ):
+        return invalid
+
+    user["password"] = generate_password_hash(new_password, method="pbkdf2:sha256", salt_length=16)
+    user["password_changed_at"] = datetime.datetime.utcnow().isoformat()
+    users_container.upsert_item(body=user)
+
+    try:
+        _delete_reset_tokens(user_id)
+        _revoke_refresh_tokens(user_id)
+    except Exception as exc:
+        logger.error("password reset: cleanup failed (%s)", type(exc).__name__)
+
+    log_audit_event({
+        "action": "USER_PASSWORD_RESET",
+        "entity": "user",
+        "entity_id": user_id,
+        "before": {"password_reset": False},
+        "after": {"password_reset": True},
+        "tenant_id": record["tenant_id"],
+        "user_id": user_id,
+    })
+
+    return jsonify({"message": "Password has been reset. Please log in with your new password."}), 200
 
 
 @auth_blueprint.route('/auth/demo-roles', methods=['GET'])
