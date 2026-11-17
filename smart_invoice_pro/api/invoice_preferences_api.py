@@ -42,6 +42,19 @@ DEFAULT_PREFS = {
     "default_notes":                "Thank you for your business.",
     "default_terms":                "Payment due within 30 days.",
     "auto_generate_invoice_number": True,
+    # Credit and debit notes have their own series (Rule 53(1A)(b)); the prefix,
+    # suffix style, padding and the auto-generate switch are shared with invoices.
+    "credit_note_prefix":           "CN-",
+    "next_credit_note_number":      1,
+    "debit_note_prefix":            "DN-",
+    "next_debit_note_number":       1,
+}
+
+# Document kinds that draw a number from the preferences document.
+NUMBER_SERIES = {
+    'invoice':     ('invoice_prefix', 'invoice_suffix', 'next_invoice_number'),
+    'credit_note': ('credit_note_prefix', 'invoice_suffix', 'next_credit_note_number'),
+    'debit_note':  ('debit_note_prefix', 'invoice_suffix', 'next_debit_note_number'),
 }
 
 PAYMENT_TERMS_OPTIONS = [
@@ -90,8 +103,13 @@ def format_invoice_number(prefix: str, number: int, padding: int, suffix: str) -
 
 
 def generate_invoice_number(tenant_id: str) -> str:
+    """Atomically claim the next invoice number for this tenant (see claim_next_number)."""
+    return claim_next_number(tenant_id, 'invoice')
+
+
+def claim_next_number(tenant_id: str, kind: str = 'invoice') -> str:
     """
-    Atomically claim the next invoice number for this tenant.
+    Atomically claim the next number of [kind] ('invoice', 'credit_note', 'debit_note') for this tenant.
 
     Uses optimistic concurrency (ETag) with exponential-backoff retries so that
     concurrent invoice creation requests never produce duplicate numbers.
@@ -108,16 +126,17 @@ def generate_invoice_number(tenant_id: str) -> str:
     except ImportError:
         MatchConditions = None
 
+    prefix_key, suffix_key, counter_key = NUMBER_SERIES[kind]
     max_retries = 8
 
     for attempt in range(max_retries):
         prefs = _get_prefs(tenant_id)
-        old_next = max(1, int(prefs.get('next_invoice_number', 1)))
+        old_next = max(1, int(prefs.get(counter_key, 1)))
         etag = prefs.get('_etag')
 
         updated = {
             **prefs,
-            'next_invoice_number': old_next + 1,
+            counter_key: old_next + 1,
             'updated_at': datetime.utcnow().isoformat(),
         }
         # Remove internal Cosmos fields so replace_item doesn't reject them
@@ -144,8 +163,8 @@ def generate_invoice_number(tenant_id: str) -> str:
                 settings_container.create_item(body=updated)
 
             # Claimed old_next successfully
-            prefix  = prefs.get('invoice_prefix', DEFAULT_PREFS['invoice_prefix'])
-            suffix  = prefs.get('invoice_suffix', DEFAULT_PREFS['invoice_suffix'])
+            prefix  = prefs.get(prefix_key, DEFAULT_PREFS[prefix_key])
+            suffix  = prefs.get(suffix_key, DEFAULT_PREFS[suffix_key])
             padding = prefs.get('number_padding', DEFAULT_PREFS['number_padding'])
             return format_invoice_number(prefix, old_next, padding, suffix)
 
@@ -168,15 +187,18 @@ def generate_invoice_number(tenant_id: str) -> str:
 
 
 def peek_next_invoice_number(tenant_id: str) -> str:
-    """
-    Return what the next invoice number WOULD BE without incrementing.
-    Used by the frontend for display / preview only.
-    """
+    """Return what the next invoice number WOULD BE without incrementing (preview only)."""
+    return peek_next_number(tenant_id, 'invoice')
+
+
+def peek_next_number(tenant_id: str, kind: str = 'invoice') -> str:
+    """The next number of [kind] without claiming it. Used for display / preview only."""
+    prefix_key, suffix_key, counter_key = NUMBER_SERIES[kind]
     prefs = _get_prefs(tenant_id)
-    prefix  = prefs.get('invoice_prefix', DEFAULT_PREFS['invoice_prefix'])
-    suffix  = prefs.get('invoice_suffix', DEFAULT_PREFS['invoice_suffix'])
+    prefix  = prefs.get(prefix_key, DEFAULT_PREFS[prefix_key])
+    suffix  = prefs.get(suffix_key, DEFAULT_PREFS[suffix_key])
     padding = prefs.get('number_padding', DEFAULT_PREFS['number_padding'])
-    next_n  = max(1, int(prefs.get('next_invoice_number', 1)))
+    next_n  = max(1, int(prefs.get(counter_key, 1)))
     return format_invoice_number(prefix, next_n, padding, suffix)
 
 
@@ -250,6 +272,17 @@ def update_invoice_preferences():
         elif len(default_terms) > 2000:
             errors['default_terms'] = 'Terms must be 2000 characters or fewer.'
 
+        note_prefixes = {}
+        for key in ('credit_note_prefix', 'debit_note_prefix'):
+            if key in data:
+                value = data.get(key)
+                if not isinstance(value, str) or len(value.strip()) == 0:
+                    errors[key] = 'Prefix cannot be empty.'
+                elif len(value) > 20:
+                    errors[key] = 'Prefix must be 20 characters or fewer.'
+                else:
+                    note_prefixes[key] = value.strip()
+
         if errors:
             return jsonify({'error': 'Validation failed', 'fields': errors}), 400
 
@@ -267,6 +300,7 @@ def update_invoice_preferences():
         existing['default_notes']               = default_notes
         existing['default_terms']               = default_terms
         existing['auto_generate_invoice_number'] = bool(data.get('auto_generate_invoice_number', existing.get('auto_generate_invoice_number', True)))
+        existing.update(note_prefixes)
         existing['updated_at']                  = now
         if 'created_at' not in existing:
             existing['created_at'] = now

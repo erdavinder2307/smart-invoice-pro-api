@@ -20,6 +20,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from smart_invoice_pro.utils.cosmos_client import invoices_container, get_container
 from smart_invoice_pro.utils.permission_checker import require_permission
+from smart_invoice_pro.services.credit_notes import invoice_balance
 
 load_dotenv()
 
@@ -228,9 +229,8 @@ def zoho_payments_webhook():
                 ))
                 if inv_items:
                     inv = inv_items[0]
-                    total_amount       = max(0.0, float(inv.get("total_amount", 0)))
                     new_amount_paid    = round(float(inv.get("amount_paid", 0)) + amount_paid, 2)
-                    new_balance_due    = round(max(0.0, total_amount - new_amount_paid), 2)
+                    new_balance_due    = invoice_balance({**inv, "amount_paid": new_amount_paid})
                     inv["amount_paid"] = new_amount_paid
                     inv["balance_due"] = new_balance_due
                     inv["status"]      = "Paid" if new_balance_due == 0 else "Partially Paid"

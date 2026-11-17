@@ -34,6 +34,7 @@ from smart_invoice_pro.utils.permission_checker import require_permission
 from smart_invoice_pro.api.auth_middleware import get_customer_jwt_secret
 from smart_invoice_pro.utils.demo_guard import enforce_demo_create_limit
 from smart_invoice_pro.services.rule46 import rule46_issues
+from smart_invoice_pro.services.credit_notes import invoice_balance
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -1143,7 +1144,7 @@ def update_invoice(invoice_id):
     round_off = _to_number(merged_payload.get('round_off', 0.0))
     computed_total = computed_subtotal + computed_total_tax - invoice_discount + round_off
     amount_paid = max(0.0, _to_number(merged_payload.get('amount_paid', 0.0)))
-    balance_due = computed_total - amount_paid
+    balance_due = invoice_balance({**item, 'total_amount': computed_total, 'amount_paid': amount_paid})
 
     before_snapshot = copy.deepcopy(item)
     # Update all fields from the request (PUT = full replacement)
@@ -1714,9 +1715,9 @@ def record_payment(invoice_id):
         history.append(payment_entry)
 
         new_amount_paid = round(float(inv.get('amount_paid', 0)) + amount, 2)
-        new_balance_due = round(float(inv.get('total_amount', 0)) - new_amount_paid, 2)
-        if new_balance_due < 0:
-            new_balance_due = 0.0
+        # Total, plus debit notes, less credit notes applied, less payments: a credit note
+        # applied to the invoice must not be undone by the next payment.
+        new_balance_due = invoice_balance({**inv, 'amount_paid': new_amount_paid})
 
         inv['payment_history'] = history
         inv['amount_paid']     = new_amount_paid
