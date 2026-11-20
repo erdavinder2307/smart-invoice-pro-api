@@ -312,6 +312,24 @@ class TestLogin:
         )
         assert resp.status_code == 401
 
+    @pytest.mark.parametrize("flags", [{"is_active": False}, {"status": "suspended"}])
+    @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
+    @patch("smart_invoice_pro.api.routes.users_container")
+    def test_login_disabled_account_refused(self, mock_users, mock_refresh, client, flags):
+        hashed = generate_password_hash("secret123", method="pbkdf2:sha256", salt_length=16)
+        mock_users.query_items.return_value = [
+            {"id": USER_A, "username": "admin1", "password": hashed,
+             "tenant_id": TENANT_A, "role": "Admin", **flags}
+        ]
+        resp = client.post(
+            "/api/auth/login",
+            json={"username": "admin1", "password": "secret123"},
+        )
+        assert resp.status_code == 401
+        # Same answer as a wrong password, and no session is created.
+        assert resp.get_json() == {"message": "Invalid username or password."}
+        mock_refresh.create_item.assert_not_called()
+
     def test_login_non_json_body(self, client):
         resp = client.post(
             "/api/auth/login", data="bad", content_type="text/plain"
@@ -356,6 +374,26 @@ class TestRefreshToken:
 
         payload = jwt.decode(data["access_token"], JWT_SECRET, algorithms=["HS256"])
         assert payload["is_super_admin"] is True
+
+    @patch("smart_invoice_pro.api.routes.users_container")
+    @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
+    def test_refresh_refused_for_deactivated_user(self, mock_refresh, mock_users, client):
+        future = (datetime.datetime.utcnow() + datetime.timedelta(days=10)).isoformat()
+        mock_refresh.query_items.return_value = [
+            {"id": "rt-1", "user_id": USER_A, "tenant_id": TENANT_A,
+             "token": "valid-refresh-token", "expires_at": future}
+        ]
+        mock_users.query_items.return_value = [
+            {"id": USER_A, "username": "admin1", "role": "Admin", "is_active": False}
+        ]
+        resp = client.post(
+            "/api/auth/refresh",
+            json={"refresh_token": "valid-refresh-token"},
+        )
+        assert resp.status_code == 401
+        assert "access_token" not in resp.get_json()
+        mock_refresh.delete_item.assert_called_once_with(item="rt-1", partition_key=USER_A)
+        mock_refresh.create_item.assert_not_called()
 
     @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
     def test_refresh_expired_token(self, mock_refresh, client):
