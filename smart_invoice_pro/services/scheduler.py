@@ -19,7 +19,10 @@ def process_recurring_profiles():
     """
     try:
         from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container, invoices_container
-        from smart_invoice_pro.api.recurring_profiles_api import calculate_next_run_date
+        from smart_invoice_pro.api.recurring_profiles_api import (
+            calculate_next_run_date,
+            compute_recurring_invoice_totals,
+        )
         
         logger.info("Starting recurring invoice generation job...")
         
@@ -85,14 +88,11 @@ def process_recurring_profiles():
                     next_invoice_number = "INV-001"
                 
                 # Calculate totals from items
-                subtotal = 0
                 items = profile.get('items', [])
-                for item in items:
-                    item_total = (item.get('quantity', 0) * item.get('rate', 0) - item.get('discount', 0))
-                    subtotal += item_total
-                
-                total_tax = profile.get('cgst_amount', 0) + profile.get('sgst_amount', 0) + profile.get('igst_amount', 0)
-                total_amount = subtotal + total_tax
+                totals = compute_recurring_invoice_totals(profile)
+                subtotal = totals['subtotal']
+                total_tax = totals['total_tax']
+                total_amount = totals['total_amount']
                 
                 # Calculate due date (e.g., 30 days from issue)
                 issue_date = datetime.utcnow().date().isoformat()
@@ -118,9 +118,9 @@ def process_recurring_profiles():
                     'due_date': due_date,
                     'payment_terms': profile.get('payment_terms', 'Net 30'),
                     'subtotal': subtotal,
-                    'cgst_amount': profile.get('cgst_amount', 0.0),
-                    'sgst_amount': profile.get('sgst_amount', 0.0),
-                    'igst_amount': profile.get('igst_amount', 0.0),
+                    'cgst_amount': totals['cgst_amount'],
+                    'sgst_amount': totals['sgst_amount'],
+                    'igst_amount': totals['igst_amount'],
                     'total_tax': total_tax,
                     'total_amount': total_amount,
                     'amount_paid': 0.0,

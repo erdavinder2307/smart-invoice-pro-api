@@ -224,7 +224,10 @@ def generate_recurring_invoices():
     Cron job endpoint: generate invoices from all Active recurring profiles whose
     next_run_date is today or in the past.  Call this daily from a scheduler.
     """
-    from smart_invoice_pro.api.recurring_profiles_api import calculate_next_run_date
+    from smart_invoice_pro.api.recurring_profiles_api import (
+        calculate_next_run_date,
+        compute_recurring_invoice_totals,
+    )
     from smart_invoice_pro.api.invoice_preferences_api import generate_invoice_number
 
     today_str = date.today().isoformat()
@@ -277,15 +280,13 @@ def generate_recurring_invoices():
 
             # Build invoice document from the profile template
             items        = profile.get('items', [])
-            subtotal     = sum(
-                float(i.get('quantity', 0)) * float(i.get('unit_price', i.get('price', 0)))
-                for i in items
-            )
-            cgst_amount  = float(profile.get('cgst_amount', 0.0))
-            sgst_amount  = float(profile.get('sgst_amount', 0.0))
-            igst_amount  = float(profile.get('igst_amount', 0.0))
-            total_tax    = cgst_amount + sgst_amount + igst_amount
-            total_amount = round(subtotal + total_tax, 2)
+            totals       = compute_recurring_invoice_totals(profile)
+            subtotal     = totals['subtotal']
+            cgst_amount  = totals['cgst_amount']
+            sgst_amount  = totals['sgst_amount']
+            igst_amount  = totals['igst_amount']
+            total_tax    = totals['total_tax']
+            total_amount = totals['total_amount']
 
             invoice_number = generate_invoice_number(tenant_id)
             invoice_status = 'Issued' if profile.get('auto_send') else 'Draft'
@@ -298,7 +299,7 @@ def generate_recurring_invoices():
                 'issue_date':          today_str,
                 'due_date':            today_str,
                 'payment_terms':       profile.get('payment_terms', ''),
-                'subtotal':            round(subtotal, 2),
+                'subtotal':            subtotal,
                 'cgst_amount':         cgst_amount,
                 'sgst_amount':         sgst_amount,
                 'igst_amount':         igst_amount,
