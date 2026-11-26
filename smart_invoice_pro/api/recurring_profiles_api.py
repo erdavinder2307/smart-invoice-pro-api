@@ -4,6 +4,7 @@ import uuid
 
 from flask import Blueprint, jsonify, request
 
+from smart_invoice_pro.api.invoices import _compute_item_totals, _resolve_total_tax
 from smart_invoice_pro.utils.cosmos_client import recurring_profiles_container
 from smart_invoice_pro.utils.archive_service import archive_entity, restore_entity
 from smart_invoice_pro.utils.lifecycle_service import apply_lifecycle_action
@@ -161,6 +162,39 @@ def _calculate_amount(data):
     sgst = max(0.0, _to_float(data.get('sgst_amount', 0)))
     igst = max(0.0, _to_float(data.get('igst_amount', 0)))
     return subtotal + cgst + sgst + igst
+
+
+def compute_recurring_invoice_totals(profile):
+    """Totals for an invoice generated from a recurring profile.
+
+    Used by both recurring-invoice generators (api/cron_jobs.py and
+    services/scheduler.py) so they total the lines exactly as invoice update
+    does: line tax wins, and the profile's stored CGST/SGST/IGST split is only
+    a fallback for lines without tax (SE-4060). A profile that is not
+    GST-applicable gets no tax and a zero split.
+    """
+    is_gst_applicable = bool(profile.get('is_gst_applicable', False))
+    # Older profiles keep the unit price under unit_price/price instead of rate.
+    items = [
+        {**item, 'rate': item.get('rate', item.get('unit_price', item.get('price', 0)))}
+        for item in (profile.get('items') or [])
+    ]
+    _, subtotal, item_tax = _compute_item_totals(items, is_gst_applicable=is_gst_applicable)
+
+    cgst, sgst, igst = (
+        _to_float(profile.get(key, 0.0)) if is_gst_applicable else 0.0
+        for key in ('cgst_amount', 'sgst_amount', 'igst_amount')
+    )
+    total_tax = _resolve_total_tax(item_tax, cgst + sgst + igst, is_gst_applicable)
+
+    return {
+        'subtotal': round(subtotal, 2),
+        'cgst_amount': cgst,
+        'sgst_amount': sgst,
+        'igst_amount': igst,
+        'total_tax': round(total_tax, 2),
+        'total_amount': round(subtotal + total_tax, 2),
+    }
 
 
 def _build_recurrence_rule(data):
