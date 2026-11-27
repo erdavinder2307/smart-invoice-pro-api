@@ -340,11 +340,15 @@ def register_user():
         }
     }), 201
 
+# User statuses that block sign-in. The platform admin "Deactivate" sets "inactive".
+DISABLED_USER_STATUSES = {"inactive", "suspended"}
+
+
 def _account_disabled(user: dict) -> bool:
     """Deactivated or suspended accounts must not sign in or refresh a session."""
     return (
         user.get("is_active") is False
-        or (user.get("status") or "").lower() == "suspended"
+        or (user.get("status") or "").strip().lower() in DISABLED_USER_STATUSES
     )
 
 

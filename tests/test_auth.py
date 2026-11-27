@@ -312,7 +312,7 @@ class TestLogin:
         )
         assert resp.status_code == 401
 
-    @pytest.mark.parametrize("flags", [{"is_active": False}, {"status": "suspended"}])
+    @pytest.mark.parametrize("flags", [{"is_active": False}, {"status": "suspended"}, {"status": "inactive"}])
     @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
     @patch("smart_invoice_pro.api.routes.users_container")
     def test_login_disabled_account_refused(self, mock_users, mock_refresh, client, flags):
@@ -375,16 +375,17 @@ class TestRefreshToken:
         payload = jwt.decode(data["access_token"], JWT_SECRET, algorithms=["HS256"])
         assert payload["is_super_admin"] is True
 
+    @pytest.mark.parametrize("flags", [{"is_active": False}, {"status": "suspended"}, {"status": "inactive"}])
     @patch("smart_invoice_pro.api.routes.users_container")
     @patch("smart_invoice_pro.api.routes.refresh_tokens_container")
-    def test_refresh_refused_for_deactivated_user(self, mock_refresh, mock_users, client):
+    def test_refresh_refused_for_deactivated_user(self, mock_refresh, mock_users, client, flags):
         future = (datetime.datetime.utcnow() + datetime.timedelta(days=10)).isoformat()
         mock_refresh.query_items.return_value = [
             {"id": "rt-1", "user_id": USER_A, "tenant_id": TENANT_A,
              "token": "valid-refresh-token", "expires_at": future}
         ]
         mock_users.query_items.return_value = [
-            {"id": USER_A, "username": "admin1", "role": "Admin", "is_active": False}
+            {"id": USER_A, "username": "admin1", "role": "Admin", **flags}
         ]
         resp = client.post(
             "/api/auth/refresh",
