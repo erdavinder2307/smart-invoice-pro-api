@@ -106,7 +106,7 @@ def resolve_user_permissions(user_id: str, tenant_id: str) -> tuple[bool, dict]:
         return False, {}
 
     status = (user.get('status') or '').lower()
-    if status == 'suspended' or user.get('is_active') is False:
+    if status in ('inactive', 'suspended') or user.get('is_active') is False:
         return False, {}
 
     # Outside their own tenant a user acts only through an active membership,

@@ -108,9 +108,10 @@ class TestResolveUserPermissions:
         assert perms["invoices"]["view"] is True
         assert perms["invoices"]["create"] is False
 
+    @pytest.mark.parametrize("status", ["suspended", "inactive"])
     @patch("smart_invoice_pro.utils.rbac_resolver.users_container")
-    def test_suspended_user_denied(self, mock_users):
-        mock_users.query_items.return_value = [_admin_user(status="suspended")]
+    def test_suspended_user_denied(self, mock_users, status):
+        mock_users.query_items.return_value = [_admin_user(status=status)]
         is_admin, perms = resolve_user_permissions(USER_ID, TENANT)
         assert is_admin is False
         assert perms == {}

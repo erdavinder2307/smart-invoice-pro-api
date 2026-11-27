@@ -340,6 +340,18 @@ def register_user():
         }
     }), 201
 
+# User statuses that block sign-in. The platform admin "Deactivate" sets "inactive".
+DISABLED_USER_STATUSES = {"inactive", "suspended"}
+
+
+def _account_disabled(user: dict) -> bool:
+    """Deactivated or suspended accounts must not sign in or refresh a session."""
+    return (
+        user.get("is_active") is False
+        or (user.get("status") or "").strip().lower() in DISABLED_USER_STATUSES
+    )
+
+
 @auth_blueprint.route('/auth/login', methods=['POST'])
 @swag_from({
     'parameters': [
@@ -414,7 +426,11 @@ def login_user():
             enable_cross_partition_query=True
         ))
 
-    if items and check_password_hash(items[0]['password'], data['password']):
+    if (
+        items
+        and check_password_hash(items[0]['password'], data['password'])
+        and not _account_disabled(items[0])
+    ):
         jwt_secret = get_jwt_secret()
         tenant_id = items[0].get('tenant_id') or items[0].get('id')
         user_id = items[0]['id']
@@ -965,6 +981,14 @@ def refresh_token():
         return jsonify({"error": "User not found"}), 401
 
     user = user_items[0]
+    if _account_disabled(user):
+        try:
+            refresh_tokens_container.delete_item(
+                item=record['id'], partition_key=record['user_id']
+            )
+        except Exception:
+            pass
+        return jsonify({"error": "Unauthorized"}), 401
     is_demo = bool(record.get("is_demo") or user.get("is_demo_user"))
     role = user.get('role', '')
     role_id = user.get('role_id', '')
